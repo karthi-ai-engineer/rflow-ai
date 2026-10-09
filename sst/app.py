@@ -60,7 +60,16 @@ from sst.pipeline.guard import Guard
 from sst.pipeline.learning import CorrectionEvent, Learner
 from sst.pipeline.polish import GatewayLLM
 from sst.pipeline.session import LazyBackend, Stages, VoicePipeline
-from sst.settings import CONFIG_DIR, LOAD_PROBLEMS, Profiles, Settings, Stats, add_to_history, read_history
+from sst.settings import (
+    CONFIG_DIR,
+    LOAD_PROBLEMS,
+    Profiles,
+    Settings,
+    Stats,
+    add_to_history,
+    read_history,
+    write_wake,
+)
 from sst.snippets import Snippet
 from sst.snippets import load as load_snippets
 from sst.transform import Context as TransformContext
@@ -68,6 +77,7 @@ from sst.transform import Transformer
 from sst.transformui import TransformController
 from sst.translate import Translator, system_language
 from sst.translateui import TranslateController
+from sst.wakeui import WakeController, WakeSetupDialog, WakeState, wake_api
 from sst.window import APP_NAME, ICON_FILE, LOG_DIR, MainWindow, PreviewApp
 
 UPDATE_DIR = Path(os.environ.get("TEMP", Path.home())) / "Rflow-update"  # downloaded installers
@@ -411,6 +421,8 @@ class _Signals(QObject):
     download_done = Signal(str, str)  # (speech model, "" or "cancelled" or why it failed)
     voice_progress = Signal(int)  # percent of live translation's voice downloaded
     voice_done = Signal(str)  # "" or why the voice couldn't be downloaded
+    wake_progress = Signal(int)  # percent of the wake word's models downloaded
+    wake_done = Signal(str)  # "" or "cancelled" or why they couldn't be downloaded
     scan_progress = Signal(str)
     scan_done = Signal(object)  # the scan's result (sst.scan.save), or {"error": why}
 
@@ -427,6 +439,12 @@ class TrayApp:
         self.recorder = self.new_recorder()
         self._configure_dictation_mic()
         self.dictation: Dictation | None = None
+        # Start with your voice (sst.wakeui): listens once the speech model is loaded, if it's on and set up
+        self.wake = WakeController(self)
+        self.wake.load()
+        self.wake_downloading: int | None = None  # percent, while its models download
+        self.wake_problem = ""  # why they couldn't be downloaded, until tried again
+        self._cancel_wake = threading.Event()
         self.loading_speech = ""  # the speech model being loaded in the background, if any
         self.downloading: tuple[str, int, int] | None = None  # (speech model, bytes done, bytes in all)
         self.scanning = ""  # what the scan is doing now, while it runs
@@ -459,12 +477,15 @@ class TrayApp:
         self.signals.download_done.connect(self._on_download_done)
         self.signals.voice_progress.connect(self._on_voice_progress)
         self.signals.voice_done.connect(self._on_voice_done)
+        self.signals.wake_progress.connect(self._on_wake_progress)
+        self.signals.wake_done.connect(self._on_wake_done)
         self.signals.scan_progress.connect(self._on_scan_progress)
         self.signals.scan_done.connect(self._on_scan_done)
 
         self.icon = QIcon(str(ICON_FILE))
         self.recording_icon = _with_red_dot(self.icon)
-        self.pill = Pill(level=lambda: self.recorder.level)
+        # the microphone recording now: a wake word turn may record on another one (a Bluetooth headset's stand-in)
+        self.pill = Pill(level=lambda: (self.dictation.recorder if self.dictation else self.recorder).level)
         # Text Transform: its own shortcut and keyboard hook (HotkeyListener looked up when used: the tests replace it)
         self.transforms = TransformController(self, listener_factory=lambda key: HotkeyListener(key))
         self.transforms.start(self.settings.transform_shortcut)
@@ -625,6 +646,7 @@ class TrayApp:
         if first:
             self._start_listener()
             self.pump.start()
+            self.wake.apply()  # the wake word needs a dictation to start
         self.window.refresh()
         if not first:
             return
@@ -757,7 +779,9 @@ class TrayApp:
         while not events.empty():
             event, at = events.get_nowait()
             self.dictation.handle(event, at)
-        self.dictation.tick(time.monotonic())
+        now = time.monotonic()
+        self.dictation.tick(now)
+        self.wake.tick(now)  # a turn ended with the keys, a pause for live translation or Text Transform
 
     def _on_result(self, heard: str, typed: str, seconds: float) -> None:
         self.transforms.note_typed(typed + " ")  # as Dictation pasted it: Text Transform's text where Ctrl+A copies nothing
@@ -845,6 +869,9 @@ class TrayApp:
                 recorder.keep_open()
             except Exception as e:  # no microphone yet: it opens at the first dictation
                 log.warning("Could not keep the microphone open: %s", e)
+        wake = getattr(self, "wake", None)
+        if wake is not None:
+            wake.apply()  # listening keeps a microphone open, with the moment before the keyword
 
     def apply_settings(self, new: Settings) -> None:
         """Save the settings and use them at once (the Settings page and the welcome change them one by one)."""
@@ -1070,6 +1097,122 @@ class TrayApp:
             self.live.set_speak(self.settings.live_speak)  # here now: it speaks if speaking is still wanted
         if self.window.isVisible():
             self.window.refresh()
+
+    # -- Start with your voice (sst.wakeui; the keyword spotting, voice check and turns are sst.wake)
+
+    def wake_state(self) -> WakeState:
+        """What Settings' "Start with your voice" card shows."""
+        wake = self.wake
+        state = WakeState(listening=wake.microphone if wake.listening else "", note=wake.problem or wake.note,
+                          problem=self.wake_problem)
+        if wake.setup is not None:
+            state.keyword, state.heard = wake.setup.keyword, wake.setup.heard
+        try:
+            api = wake_api()
+            missing = [m for m in (api.KWS, api.VOICE) if not m.installed()]
+            state.tries, state.size = api.TRIES, sum(m.size for m in missing)
+            state.models = "downloading" if self.wake_downloading is not None else "missing" if missing else "ready"
+            state.percent = self.wake_downloading or 0
+        except Exception as e:  # not in this build
+            state.models, state.problem = "missing", state.problem or f"The wake word isn't available ({e})."
+        return state
+
+    def set_wake_enabled(self, on: bool) -> None:
+        """Switched on or off: saved, and at once; switched on the first time, its models are downloaded."""
+        self.apply_settings(dataclasses.replace(self.settings, wake_enabled=on))
+        if on and self.wake_state().models == "missing":
+            self.download_wake_models()
+
+    def download_wake_models(self) -> None:
+        """The keyword spotter and the voice check (sst.wake.KWS, VOICE), in the background, one after the other."""
+        if self.wake_downloading is not None:
+            return
+        try:
+            api = wake_api()
+        except Exception as e:
+            self.wake_problem = str(e) or type(e).__name__
+            self.window.refresh()
+            return
+        models = [m for m in (api.KWS, api.VOICE) if not m.installed()]
+        if not models:
+            self.wake.apply()
+            return
+        total = sum(m.size for m in models) or 1
+        self.wake_downloading, self.wake_problem = 0, ""
+        self._cancel_wake.clear()
+        done_before, last = [0], [-1]
+
+        def progress(done: int, _total: int) -> None:
+            percent = (done_before[0] + done) * 100 // total
+            if percent != last[0]:  # the window needn't redraw for every megabyte
+                last[0] = percent
+                self.signals.wake_progress.emit(percent)
+
+        def work() -> None:
+            try:
+                for model in models:
+                    downloads.download(model, progress, self._cancel_wake.is_set)
+                    done_before[0] += model.size
+                self.signals.wake_done.emit("")
+            except downloads.Cancelled:
+                self.signals.wake_done.emit("cancelled")
+            except Exception as e:
+                log.exception("Downloading the wake word's models failed")
+                self.signals.wake_done.emit(str(e) or type(e).__name__)
+        threading.Thread(target=work, name="wake-download", daemon=True).start()
+        self.window.refresh()
+
+    def cancel_wake_download(self) -> None:
+        self._cancel_wake.set()  # what is downloaded so far stays for the next try
+
+    def _on_wake_progress(self, percent: int) -> None:
+        self.wake_downloading = percent
+        if self.window.isVisible():
+            self.window.refresh()
+
+    def _on_wake_done(self, error: str) -> None:
+        self.wake_downloading = None
+        if error and error != "cancelled":
+            self.wake_problem = error
+            self._notify(APP_NAME, f"The wake word's models couldn't be downloaded: {error}",
+                         QSystemTrayIcon.MessageIcon.Warning)
+        elif not error:
+            log.info("The wake word's models are downloaded")
+            self.wake.apply()
+        if self.window.isVisible():
+            self.window.refresh()
+
+    def open_wake_setup(self, parent=None) -> None:
+        """The 10-try setup (a dialog): the keyword typed, then said ten ways; kept when heard often enough. It records
+        on the microphone the wake word listens on (never a Bluetooth headset's), in memory only."""
+        try:
+            api = wake_api()
+        except Exception as e:
+            self._notify(APP_NAME, f"The wake word isn't available: {e}", QSystemTrayIcon.MessageIcon.Warning)
+            return
+        _, device, name, problem = self.wake.choose_microphone()
+
+        def new_recorder() -> Recorder:
+            recorder = Recorder(device)
+            recorder.raw = self.settings.raw_audio
+            return recorder
+        dialog = WakeSetupDialog(parent, microphone=name, problem=problem, check=api.check_keyword,
+                                 enroll=lambda keyword: api.Enrollment(keyword), new_recorder=new_recorder,
+                                 save=self.save_wake_setup, tries=api.TRIES, passes=api.PASS)
+        self.wake.setting_up = True  # the tries mustn't start a dictation
+        try:
+            dialog.exec()
+        finally:
+            self.wake.setting_up = False
+        if self.window.isVisible():
+            self.window.refresh()
+
+    def save_wake_setup(self, setup) -> None:
+        """A setup that passed: kept in the profile (words and numbers, no audio), and listened for at once."""
+        write_wake(self.profile.wake_file, setup.to_json())
+        self.wake.setup = setup
+        self.wake.apply()
+        log.info("Wake word set up: heard %d of the tries", setup.heard)
 
     def _live_session(self, config: LiveConfig, on_event) -> LiveSession:
         return LiveSession(config, Transcript(self.live_folder(), config), on_event)
@@ -1541,6 +1684,7 @@ class TrayApp:
             self.dictation.close()  # a recording started for the other profile is dropped
         old_hotkey = self.settings.hotkey
         self._load_profile()
+        self.wake.load()  # the other profile's keyword and voice (applied with the microphone, next)
         self._configure_dictation_mic()
         if self.dictation:
             self.dictation.sounds, self.dictation.save = self.settings.sounds, self.settings.save_recordings
@@ -1675,6 +1819,7 @@ class TrayApp:
 
     def _stop_all(self) -> None:
         """Stop the shortcuts' keyboard hooks, live translation and dictation (a recording is dropped), before quitting."""
+        self.wake.stop()
         self.transforms.stop()
         self.translator.stop()
         self.live.stop()
@@ -1790,6 +1935,8 @@ def self_test() -> int:
     menu = TransformMenu()
     menu.items, menu.source = [("concise", "1", "Concise"), ("undo", "U", "Undo")], "Self-test"
     menu.grab()
+    WakeSetupDialog(microphone="Self-test", problem="", check=lambda text: None, enroll=lambda keyword: None,
+                    new_recorder=lambda: None, save=lambda setup: None).grab()
     _with_red_dot(QIcon(str(ICON_FILE)))
     import ctranslate2  # noqa: F401 (Whisper's runtime: bundled and its DLLs load, without needing the downloaded model)
     import faster_whisper  # noqa: F401

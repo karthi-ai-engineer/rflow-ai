@@ -134,6 +134,7 @@ from sst.ui import (
     set_tone,
     setting_row,
 )
+from sst.wakeui import WakeState
 
 APP_NAME = "Rflow"
 ICON_FILE = Path(__file__).parent / "static" / "sst.ico"
@@ -5309,6 +5310,177 @@ class ReportPage(Page):
 MIC_READY = [("While Rflow runs", "always"), ("5 minutes after dictating", "warm"), ("Only while dictating", "off")]
 
 
+def parse_end_phrases(value: str) -> list[str]:
+    """The end phrases as typed, separated by commas: trimmed, each once; none typed is the default, "stop it"."""
+    phrases = []
+    for part in value.split(","):
+        phrase = " ".join(part.split())
+        if phrase and phrase.casefold() not in (p.casefold() for p in phrases):
+            phrases.append(phrase)
+    return phrases or ["stop it"]
+
+
+def risky_end_phrases(phrases: list[str]) -> list[str]:
+    """End phrases said in ordinary dictation, which would end it early: "done" fired on 23 of 24 real ones (spike)."""
+    common = {"done", "im done", "finished", "end", "stop", "thats it", "over", "ok", "okay", "thanks", "thank you"}
+    return [p for p in phrases if " ".join(re.sub(r"[^\w\s]", "", p.casefold()).split()) in common]
+
+
+class WakeCard:
+    """Settings' "Start with your voice" (sst.wakeui): the switch; when on, where it listens, the models it needs, the
+    keyword and its 10-try setup, the end phrases, the voice check, and a word on privacy and battery."""
+
+    STATUS_MS = 1000  # the status line follows a pause (live translation, Text Transform) while shown
+
+    def __init__(self, app):
+        self.app = app
+        s = app.settings
+        self.frame, layout = card(0, (20, 4, 20, 4))
+        self.toggle = Toggle("Start with your voice")
+        self.toggle.setChecked(s.wake_enabled)
+        self.toggle.toggled.connect(self._switched)
+        layout.addWidget(setting_row("Start with your voice", "Say your keyword in any app, speak, then say your end "
+                                     "phrase: the text is typed where the cursor is. Ctrl+Win keeps working.",
+                                     self.toggle)[0])
+        self.details = QWidget()
+        details = QVBoxLayout(self.details)
+        details.setContentsMargins(0, 0, 0, 0)
+        details.setSpacing(0)
+        status = QWidget()
+        status_layout = QHBoxLayout(status)
+        status_layout.setContentsMargins(0, 0, 0, 14)
+        status_layout.setSpacing(8)
+        self.lamp = Lamp("off")
+        self.status = caption("", "2")
+        status_layout.addWidget(self.lamp, 0, Qt.AlignmentFlag.AlignTop)
+        status_layout.addWidget(self.status, 1)
+        details.addWidget(status)
+
+        self.models = QWidget()
+        models = QVBoxLayout(self.models)
+        models.setContentsMargins(0, 0, 0, 0)
+        models.setSpacing(0)
+        models.addWidget(divider())
+        self.progress = WaveProgress(24)
+        self.download = button("Download", lambda _=False: app.download_wake_models(), primary=True, size="sm",
+                               icon="download")
+        self.cancel = button("Cancel", lambda _=False: app.cancel_wake_download(), kind="quiet", size="sm")
+        models_row, _, self.models_caption = setting_row("Voice models", "", self.progress, self.cancel, self.download)
+        models.addWidget(models_row)
+        details.addWidget(self.models)
+
+        details.addWidget(divider())
+        self.setup = button("Set up", lambda _=False: self._set_up(), size="sm")
+        keyword_row, _, self.keyword = setting_row("Keyword", "", self.setup)
+        details.addWidget(keyword_row)
+        details.addWidget(divider())
+        self.phrases = QLineEdit(", ".join(s.wake_end_phrases))
+        self.phrases.setPlaceholderText("stop it")
+        self.phrases.setMinimumWidth(200)
+        self.phrases.editingFinished.connect(self._save_phrases)
+        field(self.phrases)
+        phrases_row, _, self.phrases_caption = setting_row("End phrases", "", self.phrases)
+        details.addWidget(phrases_row)
+        details.addWidget(divider())
+        self.voice = Toggle("Only my voice")
+        self.voice.setChecked(s.wake_voice_check)
+        self.voice.toggled.connect(self._voice_toggled)
+        for words in (self.models_caption, self.keyword, self.phrases_caption):
+            words.show()  # made empty, so hidden: refresh() fills them
+        details.addWidget(setting_row("Only my voice", "It starts only for the voice it learned in the setup, not for a "
+                                      "colleague or a video.", self.voice)[0])
+        details.addWidget(divider())
+        privacy = caption("Private: Rflow listens for the keyword on this laptop, and nothing is kept or sent before it "
+                          "hears it. The microphone stays on meanwhile (Windows shows its icon), which costs a little "
+                          "battery: about 2% of one core.", "3")
+        privacy.setContentsMargins(0, 12, 0, 14)
+        details.addWidget(privacy)
+        layout.addWidget(self.details)
+        self.timer = QTimer(self.frame, interval=self.STATUS_MS, timeout=self._refresh_status)
+        self.refresh()
+
+    def refresh(self) -> None:
+        s, state = self.app.settings, self.app.wake_state()
+        self.toggle.blockSignals(True)
+        self.toggle.setChecked(s.wake_enabled)
+        self.toggle.blockSignals(False)
+        self.voice.blockSignals(True)
+        self.voice.setChecked(s.wake_voice_check)
+        self.voice.blockSignals(False)
+        self.details.setVisible(s.wake_enabled)
+        if s.wake_enabled and not self.timer.isActive() and QGuiApplication.platformName() != "offscreen":
+            self.timer.start()
+        elif not s.wake_enabled:
+            self.timer.stop()
+        if not self.phrases.hasFocus():
+            self.phrases.setText(", ".join(s.wake_end_phrases))
+        risky = risky_end_phrases(s.wake_end_phrases)
+        self.phrases_caption.setText(
+            f"“{risky[0]}” ends a dictation whenever you say the word: choose words you never dictate, like “stop it”."
+            if risky else "Say one to type the text; Rflow waits for a short pause after it. Separate several with "
+                          "commas. Not “done”: it's said too often.")
+        set_tone(self.phrases_caption, "warn" if risky else "2")
+        size = f" ({_size(state.size)})" if state.size else ""
+        self.models.setVisible(state.models != "ready")
+        if state.models == "downloading":
+            self.models_caption.setText(f"Downloading: {state.percent}%")
+            self.progress.set_value(state.percent / 100)
+        elif state.problem:
+            self.models_caption.setText(f"The download didn't finish ({state.problem}). Try again: it goes on from where "
+                                        "it stopped.")
+        else:
+            self.models_caption.setText("The keyword spotter and the voice check run on this laptop: downloaded once"
+                                        f"{size}.")
+        downloading = state.models == "downloading"
+        self.progress.setVisible(downloading)
+        self.cancel.setVisible(downloading)
+        self.download.setVisible(not downloading)
+        self.download.setText(f"Download{size}")
+        if state.keyword:
+            self.keyword.setText(f"“{state.keyword}”  ·  heard {state.heard} of {state.tries} in the setup")
+        else:
+            self.keyword.setText(f"Not set up yet: say it {state.tries} times, and Rflow learns it and your voice.")
+        self.setup.setText("Set up again" if state.keyword else "Set up")
+        self.setup.setEnabled(state.models == "ready")
+        self.setup.setToolTip("" if state.models == "ready" else "Download the voice models first.")
+        self._show_status(state)
+
+    def _refresh_status(self) -> None:
+        if self.frame.isVisible():
+            self._show_status(self.app.wake_state())
+
+    def _show_status(self, state) -> None:
+        if state.models == "downloading":
+            words, lamp = f"Downloading the voice models: {state.percent}%.", "warn"
+        elif state.note:
+            words, lamp = state.note, "warn"
+        elif state.listening:
+            words, lamp = (f"Listening for “{state.keyword}” on {state.listening}. Say it, speak, then say "
+                           f"“{self.app.settings.wake_end_phrases[0]}”."), "ok"
+        else:
+            words, lamp = "Not listening yet.", "off"
+        self.status.setText(words)
+        self.lamp.set_state(lamp)
+
+    def _switched(self, on: bool) -> None:
+        self.app.set_wake_enabled(on)
+        self.refresh()
+
+    def _voice_toggled(self, on: bool) -> None:
+        self.app.apply_settings(dataclasses.replace(self.app.settings, wake_voice_check=on))
+
+    def _save_phrases(self) -> None:
+        phrases = parse_end_phrases(self.phrases.text())
+        self.phrases.setText(", ".join(phrases))
+        if phrases != self.app.settings.wake_end_phrases:
+            self.app.apply_settings(dataclasses.replace(self.app.settings, wake_end_phrases=phrases))
+        self.refresh()
+
+    def _set_up(self) -> None:
+        self.app.open_wake_setup(self.frame.window())
+        self.refresh()
+
+
 class SettingsPage(Page):
     def __init__(self, app, go_to=None):
         go_to = go_to or (lambda page: None)
@@ -5345,6 +5517,8 @@ class SettingsPage(Page):
                                 lambda _=False: go_to("reading"))
         layout.addWidget(self.reading)
         self.add(everyday)
+        self.wake = WakeCard(app)  # starting with the voice, next to starting with the keys
+        self.add(self.wake.frame)
 
         privacy, layout = card(0, (20, 4, 20, 4))
         self.save_recordings = Toggle("Keep recordings on this PC")
@@ -5502,6 +5676,7 @@ class SettingsPage(Page):
             box.blockSignals(True)
             box.setChecked(on)
             box.blockSignals(False)
+        self.wake.refresh()
 
     def _apply(self, *_) -> None:
         self._show_keys()
@@ -7052,6 +7227,24 @@ class PreviewApp:
     def set_live_duck(self, depth: float) -> None:
         self.calls.append(("set_live_duck", depth))
         self.apply_settings(dataclasses.replace(self.settings, live_duck=depth))
+
+    _wake: WakeState | None = None  # the wake word as the card shows it, for screenshots and tests
+
+    def wake_state(self) -> WakeState:
+        return self._wake or WakeState(size=45_800_000)
+
+    def set_wake_enabled(self, on: bool) -> None:
+        self.calls.append(("set_wake_enabled", on))
+        self.apply_settings(dataclasses.replace(self.settings, wake_enabled=on))
+
+    def download_wake_models(self) -> None:
+        self.calls.append(("download_wake_models",))
+
+    def cancel_wake_download(self) -> None:
+        self.calls.append(("cancel_wake_download",))
+
+    def open_wake_setup(self, parent=None) -> None:
+        self.calls.append(("open_wake_setup",))  # the dialog itself is tested on its own (tests/test_wakeui.py)
 
     def run_translation(self, text: str, target: str, second: str = ""):
         from sst.translate import Translation

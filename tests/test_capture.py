@@ -266,3 +266,35 @@ def test_the_window_lists_windows_microphones_without_restarting_anything(monkey
     windows = _windows(monkeypatch, LAPTOP, HEADSET, default=HEADSET)
     assert audio.input_device_names() == [LAPTOP.name, HEADSET.name] and windows["restarts"] == 0
     assert audio.default_microphone() == HEADSET.name
+
+
+def test_a_tap_hears_every_block_recording_or_not(monkeypatch):
+    r = _recorder(monkeypatch, warm_seconds=float("inf"))
+    heard = []
+    r.tap = lambda block, rate: heard.append((len(block), rate))
+    r.keep_open()
+    _feed(r, 0.1)  # waiting
+    r.start()
+    _feed(r, 0.1)  # recording
+    r.stop()
+    assert heard == [(BLOCK, RATE)] * 20
+
+
+def test_a_tap_that_fails_never_breaks_the_recording(monkeypatch):
+    r = _recorder(monkeypatch)
+    r.tap = lambda block, rate: 1 / 0
+    r.start()
+    _feed(r, 0.5)
+    assert len(r.stop()) == RATE // 2
+
+
+@pytest.mark.parametrize("rate", [48_000, 44_100, 16_000])
+def test_the_stream_resampler_has_no_seams_between_blocks(rate):
+    t = np.arange(rate) / rate
+    tone = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)  # one second
+    resampler = audio.StreamResampler(rate)
+    out = np.concatenate([resampler(tone[i:i + 441]) for i in range(0, len(tone), 441)])  # blocks of any size
+    assert abs(len(out) - RATE) <= 3
+    shift = (round(rate / RATE) - 1) / 2 / rate  # the average's delay: half its width
+    expected = 0.5 * np.sin(2 * np.pi * 440 * (np.arange(len(out)) / RATE - shift))
+    assert np.max(np.abs(out[100:-100] - expected[100:-100])) < 0.02

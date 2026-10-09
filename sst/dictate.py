@@ -77,6 +77,11 @@ class Dictation:
         # it out (the app's Text Transform). None: every dictation is typed.
         self.command: Callable[[str], str | None] | None = None
         self.on_command: Callable[[str], None] = lambda command: None
+        # The words heard, trimmed before the voice commands, the snippets and the cleanup (the wake word's keyword and
+        # end phrase, sst.wakeui). Set by the app for one recording: the one started next takes it with it.
+        self.trim: Callable[[str], str] | None = None
+        self._trim_now: Callable[[str], str] | None = None  # the recording's own
+        self._failed_trim: Callable[[str], str] | None = None  # last_failed's, for a retry
         self.snippets: Callable[[], Sequence[Snippet]] = tuple  # the user's snippets (sst.snippets), for the classic way
         # A word about the microphone (the chosen one isn't connected), once per change: the app shows a notification.
         self.on_notice: Callable[[str], None] = lambda message: None
@@ -85,7 +90,7 @@ class Dictation:
         self._holding = False  # the press that started this recording has not been released yet
         self._started = 0.0
         self._stopped_by_press = -1.0  # when a hotkey press last ended a recording
-        self._jobs: queue.Queue[Take] = queue.Queue()
+        self._jobs: queue.Queue[tuple] = queue.Queue()  # (take, pipeline session or None, trim)
         threading.Thread(target=self._work, name="transcriber", daemon=True).start()
 
     def handle(self, event: str, at: float) -> None:
@@ -122,6 +127,12 @@ class Dictation:
         tick = getattr(self.recorder, "tick", None)
         if tick:
             tick(now)  # close a warm microphone that has been idle long enough
+
+    def end(self, keep: bool = True, quiet: bool = False) -> None:
+        """Stop the recording from outside the hotkey (the wake word's end phrase or a command): typed when `keep`;
+        dropped otherwise, silently with `quiet`."""
+        if self.recording:
+            self._stop(keep=keep, quiet=quiet)
 
     def close(self) -> None:
         if self.recording:
@@ -164,6 +175,7 @@ class Dictation:
             self.on_notice(notice)
         self._told = notice
         self._beep(START_BEEP)
+        self._trim_now = self.trim
         prepare = getattr(self.engine, "prepare", None)
         if prepare:
             prepare()  # a cloud speech model: connect while the user speaks, not after
@@ -197,7 +209,7 @@ class Dictation:
             self.on_state("ignored", "Too short, ignored.")
         else:
             self._beep(660, after=take.done)  # once the tail is in: the microphone heard it in the last part
-            self._jobs.put((take, session))
+            self._jobs.put((take, session, self._trim_now))
             self.on_state("transcribing", "")
 
     def retry_last(self) -> bool:
@@ -207,8 +219,9 @@ class Dictation:
         audio, rate = self.last_failed
         self.last_failed = None
         session = self.pipeline.start(rate)
+        session.trim = self._failed_trim  # the keyword and end phrase are still in that recording
         _Feeder(Take.ready(audio, rate), session).start()
-        self._jobs.put((Take.ready(audio, rate), session))
+        self._jobs.put((Take.ready(audio, rate), session, self._failed_trim))
         self.on_state("transcribing", "")
         return True
 
@@ -226,6 +239,7 @@ class Dictation:
                 n += len(block)
             session = self.pipeline.start(take.rate, np.concatenate(preroll) if preroll else None,
                                           START_BEEP if self.sounds else None)
+            session.trim = self._trim_now  # applied to the words heard before the voice command and the text stages
             _Feeder(take, session, skip=len(preroll)).start()
             return session
         except Exception:  # the classic way still types the text
@@ -234,10 +248,10 @@ class Dictation:
 
     def _work(self) -> None:
         while True:
-            take, session = self._jobs.get()
+            take, session, trim = self._jobs.get()
             if session is not None:
                 try:
-                    self._finish_session(take, session)
+                    self._finish_session(take, session, trim)
                 except Exception as e:  # keep the worker alive for the next recording
                     log.exception("The voice pipeline failed")
                     self.on_state("error", f"Error: {e}")
@@ -260,6 +274,7 @@ class Dictation:
                 fell_back = getattr(engine, "last_error", "")
                 took = time.perf_counter() - t0
                 log.info("%.1fs -> %.2fs  %s", len(audio) / rate, took, text or "(nothing recognised)")
+                text = trimmed(trim, text)
                 mine = self.snippets() if text else ()
                 snippet = snippets.alone(text, mine) if mine else None
                 if snippet is None and text and self.command is not None and (command := self.command(text)):
@@ -307,7 +322,7 @@ class Dictation:
                                "muted or switched off, or choose another one in AI & models.")
         return True
 
-    def _finish_session(self, take: Take, session) -> None:
+    def _finish_session(self, take: Take, session, trim: Callable[[str], str] | None = None) -> None:
         # Without the pre-roll the session left out (speech before the key press that isn't part of the dictation):
         # the whole-recording last resort, a retry and the saved recording see what the session saw.
         audio, rate = take.audio()[getattr(session, "trimmed", 0):], take.rate
@@ -328,7 +343,7 @@ class Dictation:
             except Exception as e:
                 log.warning("The whole recording couldn't be transcribed either: %s", e)
         if final.provenance.value == "failed":  # fail closed: nothing typed rather than a text with a hole in it
-            self.last_failed = (audio, rate)
+            self.last_failed, self._failed_trim = (audio, rate), trim
             kept = ""
             if self.save:
                 save_recording(audio, rate, "")
@@ -336,7 +351,7 @@ class Dictation:
             self.on_state("error", f"Nothing was typed: {final.error}.{kept}")
             return
         typed = final.text
-        heard = final.stages.get("merged") or typed
+        heard = final.stages.get("trimmed", final.stages.get("merged")) or typed
         failed = self._type(typed)
         if len(audio) and float(np.abs(audio).max()) < 0.01:
             self.on_state("warning", "Almost silent: check the microphone.")
@@ -362,6 +377,18 @@ class Dictation:
                 after.wait(2.0)
             winsound.Beep(frequency, 60)
         threading.Thread(target=play, daemon=True).start()
+
+
+def trimmed(trim: Callable[[str], str] | None, text: str) -> str:
+    """`text` through a recording's trim (the wake word's keyword and end phrase); as heard if the trim fails: typing a
+    keyword is better than losing the dictation."""
+    if trim is None or not text:
+        return text
+    try:
+        return trim(text)
+    except Exception:
+        log.exception("Trimming the words heard failed: typed as heard")
+        return text
 
 
 class _Feeder(threading.Thread):
