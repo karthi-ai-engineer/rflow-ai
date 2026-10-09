@@ -137,6 +137,8 @@ class Session:
         self._finished = False
         self._fed = 0
         self._notch: _ToneNotch | None = None
+        # The words heard, trimmed before everything else (the wake word's keyword and end phrase): set by the caller
+        self.trim: Callable[[str], str] | None = None
         preroll = preroll if preroll is not None and len(preroll) else None
         # Keep the speech that runs into the key press, not a sentence said to someone two seconds earlier. `trimmed`:
         # samples of the take's pre-roll left out; the whole-recording paths leave them out too.
@@ -252,6 +254,12 @@ class Session:
 
     def _text_stages(self, text: str, stages: dict[str, str], notes: list[str]) -> FinalText:
         s = self.pipeline.stages
+        if self.trim is not None and text:
+            try:  # before the snippets and the voice command: a keyword said first mustn't hide either
+                text = self.trim(text)
+            except Exception:  # typing a keyword is better than losing the dictation
+                log.exception("%s: trimming the words heard failed; kept as heard", self.session_id)
+            stages["trimmed"] = text
         heard, mine = text, s.snippets() if text else ()
         if mine and (snippet := snippets.alone(text, mine)) is not None:
             # "my email": the user's own text, exactly as entered; it wins over a voice command with the same words
