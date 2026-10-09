@@ -50,6 +50,11 @@ class Settings:
     live_duck: float = 0.1  # how loud the other apps stay while it speaks (0.0: barely, 1.0: as they are; sst.live.ducking)
     live_voice: str = "en_US-danny-low"  # the voice (sst.live.voice VOICES)
     live_told: bool = False  # the notice (audio goes to Google, the cost) was accepted once
+    # Start with your voice (sst.wake, sst.wakeui): the keyword starts a hands-free dictation, an end phrase types it.
+    # The keyword itself, learned in its 10-try setup, is kept apart: Profile.wake_file.
+    wake_enabled: bool = False
+    wake_end_phrases: list[str] = field(default_factory=lambda: ["stop it"])  # never "done": said in dictation too often
+    wake_voice_check: bool = True  # only the voice the setup learned starts it
     voice_commands: bool = True  # hold the dictation key and say "make it concise" (sst.commands)
     command_phrases: dict[str, str] = field(default_factory=dict)  # transform -> the user's own phrases ("a, b"); else defaults
     # Snippets (sst.snippets): {"cue": "my email", "text": "xyz@gmail.com", "anywhere": false}, typed when said
@@ -260,6 +265,35 @@ class Profile:
     @property
     def gateway_file(self) -> Path:
         return self.folder() / "gateway.json"
+
+    @property
+    def wake_file(self) -> Path:
+        """The wake word's setup (sst.wake.WakeSetup): the keyword, its spelling, the voice print's numbers. No audio."""
+        return self.folder() / "wake.json"
+
+
+def read_wake(path: Path) -> dict | None:
+    """The saved wake word setup as its JSON (sst.wake.WakeSetup.from_json reads it), or None: none yet, or damaged
+    (set up again)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        log.warning("Ignoring the unreadable wake word setup %s: %s", path, e)
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_wake(path: Path, data: dict | None) -> None:
+    """Keep a wake word setup (WakeSetup.to_json: words and numbers only, never audio), or remove it (None)."""
+    if data is None:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
 
 
 @dataclass
