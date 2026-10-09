@@ -7,15 +7,18 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import dataclasses  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
+import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from PySide6.QtNetwork import QLocalServer  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
 from sst import app as sst_app  # noqa: E402
 from sst import settings as settings_module  # noqa: E402
+from sst.audio import Take  # noqa: E402
 from sst.engines.cloud import CLOUD, REMOTE  # noqa: E402
 from sst.gateway import GatewayConfig  # noqa: E402
 from sst.settings import Profile, Profiles, Settings  # noqa: E402
+from sst.wakeui import BLUETOOTH  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -921,3 +924,230 @@ def test_rflow_started_again_waits_for_the_one_that_started_it():
     began = time.monotonic()
     sst_app.wait_for_exit(child.pid, 10)
     assert child.poll() is not None and time.monotonic() - began >= 0.3
+
+
+# ---- Start with your voice (sst.wakeui): sst.wake is a stand-in, the microphones are fakes, nothing is typed for real
+
+class WakeMic:
+    """A microphone kept open (always-on), faked: start() opens a take whose pre-roll holds the keyword; stop_later()
+    adds a second of speech after it."""
+    rate, raw, device, notice, warm = 16_000, False, None, "", True
+
+    def __init__(self, name="Mic A"):
+        self.name, self.tail, self.warm_seconds, self.preroll_seconds = name, 0.3, 0.0, 0.4
+        self.tap, self.level, self.current_take, self.opened, self.closed = None, 0.0, None, 0, False
+
+    @property
+    def busy(self):
+        return self.current_take is not None
+
+    def keep_open(self):
+        self.opened += 1
+
+    def start(self):
+        self.current_take = Take([np.full(16_000, 0.1, dtype=np.float32)], self.rate)
+
+    def stop_later(self):
+        take, self.current_take = self.current_take, None
+        take.chunks.append(np.full(16_000, 0.1, dtype=np.float32))
+        take.done.set()
+        return take
+
+    def tick(self, now):
+        pass
+
+    def close(self):
+        self.closed = True
+
+    def describe(self):
+        return {"device": self.name}
+
+
+@pytest.fixture
+def wake_app(tray_app, monkeypatch, tmp_path):
+    """The tray app with the wake word on and set up ("okay type"), its models downloaded, listening on a fake
+    always-on microphone; dictation types into a list, without sounds, through the classic path."""
+    import wake_stub
+
+    from sst import audio, downloads, wakeui
+    wake = wake_stub.install(monkeypatch)
+    app, saved, history = tray_app
+    monkeypatch.setattr(downloads.Download, "installed", lambda self, root=None: True)
+    monkeypatch.setattr(audio, "call_quality", lambda device: False)
+    monkeypatch.setattr(audio, "input_device_names", lambda refresh=True: ["Mic A"])
+    monkeypatch.setattr(audio, "default_microphone", lambda: "Mic A")
+    own = []
+    monkeypatch.setattr(wakeui, "Recorder", lambda device: own.append(WakeMic(device)) or own[-1])
+    mic = WakeMic()
+    app.recorder = app.dictation.recorder = mic
+    typed = []
+    app.dictation.paste, app.dictation.sounds, app.dictation.save = typed.append, False, False
+    app.wake.setup = wake.WakeSetup("okay type", "okay type", wake.VoicePrint([0.1]), 9)
+    app.apply_settings(dataclasses.replace(app.settings, wake_enabled=True, voice_pipeline=False))
+    yield SimpleNamespace(app=app, wake=wake, mic=mic, typed=typed, own=own, saved=saved, history=history)
+    app.wake.stop()
+
+
+def _heard(app, text):
+    app.dictation.engine.transcribe = lambda audio, rate: text
+
+
+def test_the_wake_word_listens_on_the_always_on_microphone_once_set_up(wake_app):
+    app, mic = wake_app.app, wake_app.mic
+    listener = wake_app.wake.WakeListener.made[-1]
+    assert app.wake.listening and app.wake.shared and mic.tap == app.wake.feeder.put  # every block goes to it
+    assert mic.warm_seconds == float("inf") and mic.preroll_seconds >= 2.0  # the words right after the keyword kept
+    assert listener.end_phrases == ["stop it"] and listener.voice_check
+    state = app.wake_state()
+    assert (state.keyword, state.heard, state.models, state.listening, state.note) == ("okay type", 9, "ready", "Mic A", "")
+    app.apply_settings(dataclasses.replace(app.settings, wake_end_phrases=["stop it", "end it"], wake_voice_check=False))
+    listener = wake_app.wake.WakeListener.made[-1]
+    assert listener.end_phrases == ["stop it", "end it"] and not listener.voice_check
+    app.apply_settings(dataclasses.replace(app.settings, wake_enabled=False))
+    assert not app.wake.listening and mic.tap is None and app.wake_state().listening == ""
+
+
+def test_a_turn_types_the_words_between_the_keyword_and_the_end_phrase(wake_app):
+    app, listener = wake_app.app, wake_app.wake.WakeListener.made[-1]
+    _heard(app, "Okay type, send the report tomorrow. Stop it.")
+    listener.on_wake()
+    assert app.dictation.recording and app.wake.active and app.pill.state == "recording"  # as Ctrl+Win+Space
+    assert app.dictation.trim is None  # it went with this recording only
+    listener.on_end(True)
+    app.dictation.wait()
+    assert wake_app.typed == ["send the report tomorrow. "] and not app.wake.active and not app.dictation.recording
+
+
+def test_a_voice_that_isnt_the_users_is_dropped_without_a_sound(wake_app):
+    app, listener = wake_app.app, wake_app.wake.WakeListener.made[-1]
+    states = []
+    app.dictation.on_state = lambda state, message: states.append(state)
+    listener.on_wake()
+    listener.on_end(False)
+    app.dictation.wait()
+    assert wake_app.typed == [] and states == ["recording", "idle"]  # no "Cancelled", nothing typed or kept
+
+
+def test_ctrl_win_or_esc_still_end_a_turn_and_the_listener_waits_again(wake_app):
+    from PySide6.QtTest import QTest
+    app, listener = wake_app.app, wake_app.wake.WakeListener.made[-1]
+    _heard(app, "Okay type, hello there.")
+    listener.on_wake()
+    app.listener.events.put(("press", sst_app.time.monotonic()))  # Ctrl+Win
+    app._pump()
+    app.dictation.wait()
+    assert wake_app.typed == ["hello there. "] and not app.wake.active
+    assert _wait_for(lambda: listener.ended == 1, QTest.qWait)  # told on its own thread: back to waiting
+    listener.on_wake()
+    app.listener.events.put(("cancel", sst_app.time.monotonic()))  # Esc
+    app._pump()
+    app.dictation.wait()
+    assert wake_app.typed == ["hello there. "] and not app.wake.active
+
+
+def test_a_command_said_after_the_keyword_runs_on_the_text_box_without_waiting(wake_app, monkeypatch):
+    from PySide6.QtTest import QTest
+    app, listener = wake_app.app, wake_app.wake.WakeListener.made[-1]
+    ran = []
+    monkeypatch.setattr(app, "transform_ready", lambda: True)
+    monkeypatch.setattr(app.transforms, "run_command", ran.append)
+    _heard(app, "Okay type, hello there")
+    listener.on_wake()
+    listener.on_pause()  # a few words, then a pause: not a command, dictation goes on
+    QTest.qWait(200)
+    assert app.dictation.recording and ran == []
+    _heard(app, "Okay type, make it concise.")
+    listener.on_pause()
+    assert _wait_for(lambda: ran == ["concise"], QTest.qWait)
+    app.dictation.wait()
+    assert not app.dictation.recording and not app.wake.active and wake_app.typed == []  # not typed: a command
+    assert _wait_for(lambda: listener.ended == 1, QTest.qWait)
+
+
+def test_listening_pauses_for_live_translation_dictation_with_the_keys_and_text_transform(wake_app):
+    from sst.live.contracts import LiveConfig
+    app = wake_app.app
+    app.wake.tick(sst_app.time.monotonic())
+    assert not app.wake.feeder.paused and app.wake_state().note == ""
+    app.dictation.handle("press", sst_app.time.monotonic())  # Ctrl+Win: a dictation of its own
+    app.wake.tick(sst_app.time.monotonic())
+    assert app.wake.feeder.paused and "dictate" in app.wake_state().note
+    app.dictation.end(keep=False, quiet=True)
+    app.transforms.busy = True
+    app.wake.tick(sst_app.time.monotonic())
+    assert app.wake.feeder.paused and "Text Transform" in app.wake_state().note
+    app.transforms.busy = False
+    app.live.session, app.live.config = SimpleNamespace(stop=lambda: None), LiveConfig(source="computer")
+    app.wake.tick(sst_app.time.monotonic())
+    assert not app.wake.feeder.paused  # live translation of the laptop's sound leaves the microphone alone
+    app.live.config = LiveConfig(source="both")
+    app.wake.tick(sst_app.time.monotonic())
+    assert app.wake.feeder.paused and "live translation" in app.wake_state().note
+    app.live.session = None
+    app.wake.tick(sst_app.time.monotonic())
+    assert not app.wake.feeder.paused
+
+
+def test_with_a_bluetooth_headset_chosen_the_built_in_microphone_listens_and_records(wake_app, monkeypatch):
+    from sst import audio
+    app = wake_app.app
+    monkeypatch.setattr(audio, "call_quality", lambda device: device in ("Headset (Buds)", None))
+    monkeypatch.setattr(audio, "input_device_names", lambda refresh=True: ["Headset (Buds)", "Mic A"])
+    app.apply_settings(dataclasses.replace(app.settings, microphone="Headset (Buds)"))
+    own = wake_app.own[-1]
+    assert app.wake.listening and not app.wake.shared and own.name == "Mic A" and app.wake_state().listening == "Mic A"
+    assert own.tap == app.wake.feeder.put and own.warm_seconds == float("inf") and wake_app.mic.tap is None
+    listener = wake_app.wake.WakeListener.made[-1]
+    _heard(app, "Okay type, hello. Stop it.")
+    listener.on_wake()
+    assert app.dictation.recorder is own  # recorded where the keyword was heard: never the headset's microphone
+    listener.on_end(True)
+    app.dictation.wait()
+    assert wake_app.typed == ["hello. "] and app.dictation.recorder is wake_app.mic
+    monkeypatch.setattr(audio, "input_device_names", lambda refresh=True: ["Headset (Buds)"])
+    app.apply_settings(dataclasses.replace(app.settings, raw_audio=True))  # applied again: no wired microphone now
+    assert not app.wake.listening and own.closed and app.wake_state().note == BLUETOOTH
+
+
+def test_a_saved_setup_belongs_to_its_profile_and_goes_with_it(wake_app):
+    app, wake = wake_app.app, wake_app.wake
+    setup = wake.WakeSetup("computer", "computer", wake.VoicePrint([0.3, 0.4]), 10)
+    app.save_wake_setup(setup)
+    assert settings_module.read_wake(app.profile.wake_file) == setup.to_json() and app.wake.listening
+    assert wake.WakeListener.made[-1].setup.keyword == "computer"
+    app.create_profile("Rahul")  # its own: none yet, and off
+    assert app.wake.setup is None and not app.wake.listening
+    rahul = app.profile
+    app.save_wake_setup(wake.WakeSetup("okay type", "okay type", None, 8))
+    assert rahul.wake_file.exists()
+    app.switch_profile("default")
+    assert app.wake.setup.keyword == "computer" and app.wake.listening
+    app.delete_profile("rahul")
+    assert not rahul.wake_file.exists()
+
+
+def test_switching_on_downloads_the_models_once_with_their_progress(tray_app, monkeypatch):
+    import wake_stub
+    from PySide6.QtTest import QTest
+
+    from sst import downloads
+    app, _, _ = tray_app
+    wake = wake_stub.install(monkeypatch)
+    fetched, shown = [], []
+
+    def download(model, progress, cancelled):
+        progress(model.size // 2, model.size)
+        progress(model.size, model.size)
+        fetched.append(model.folder)
+    monkeypatch.setattr(downloads, "download", download)
+    monkeypatch.setattr(downloads.Download, "installed", lambda self, root=None: self.folder in fetched)
+    monkeypatch.setattr(app.window, "refresh", lambda: shown.append(app.wake_state().percent))
+    monkeypatch.setattr(app.window, "isVisible", lambda: True)
+    state = app.wake_state()
+    assert state.models == "missing" and state.size == wake.KWS.size + wake.VOICE.size and state.keyword == ""
+    app.set_wake_enabled(True)
+    assert app.settings.wake_enabled and app.wake_state().models == "downloading"
+    assert _wait_for(lambda: app.wake_downloading is None, QTest.qWait)
+    assert fetched == [wake.KWS.folder, wake.VOICE.folder] and 100 in shown and app.wake_problem == ""
+    assert app.wake.problem == "Set up your keyword to start."  # downloaded: the setup is next
+
