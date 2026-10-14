@@ -126,10 +126,12 @@ def test_an_output_that_cant_be_opened_is_reported_to_the_caller():
 def test_the_speakers_are_heard_without_rflows_own_sound_and_the_chosen_microphone(monkeypatch):
     opened = []
     monkeypatch.setattr(wasapi, "_ProcessLoopback", lambda: opened.append("process loopback") or FakeStream())
+    monkeypatch.setattr(wasapi, "_Stream", lambda flow, role: Whole())  # the whole mix it's checked against
     monkeypatch.setattr(wasapi, "_Meters", FakeMeters)
     monkeypatch.setattr(wasapi, "_Microphone", lambda wanted: opened.append(("microphone", wanted)) or "a microphone")
     speakers = Capture.speakers()._opener()
-    assert isinstance(speakers, wasapi._Speakers) and isinstance(speakers.main, FakeStream)
+    assert isinstance(speakers, wasapi._Speakers) and isinstance(speakers.main, wasapi._Checked)
+    assert isinstance(speakers.main.main, FakeStream) and isinstance(speakers.main.whole, Whole)
     assert Capture.microphone("Headset Microphone (Jabra)")._opener() == "a microphone"
     assert opened == ["process loopback", ("microphone", "Headset Microphone (Jabra)")]
     assert (Capture.speakers().what, Capture.microphone().what) == ("output device", "microphone")
@@ -407,3 +409,66 @@ def test_the_capture_passes_the_hint_on_and_takes_it_back_when_it_closes():
         time.sleep(0.01)
     capture.stop()
     assert notices == ["Nothing heard on Speakers", ""]
+
+
+# ---- process loopback that hears nothing (#176): a Teams call on Bluetooth earbuds reached only the whole mix
+
+class Whole(FakeStream):
+    """The default output's whole mix, at the device's rate (mono after decoding)."""
+    rate, channels = 48_000, 1
+
+
+def read_seconds(stream, seconds):
+    return np.concatenate([np.concatenate(stream.read() or [np.zeros(0, np.float32)]) for _ in range(int(seconds * 10))])
+
+
+def test_the_whole_mix_is_used_when_process_loopback_hears_nothing_while_the_output_plays():
+    main, whole = Loopback(), Whole([sine(300, 0.1, 48_000)] * 40)  # 4 s of a call; process loopback: silence
+    checked = wasapi._Checked(main, whole, clock=lambda: 1e9)
+    assert not checked.hears_self
+    audio = read_seconds(checked, 4)
+    assert checked.switched and checked.hears_self and main.closed  # Rflow's voice is in the mix now
+    assert len(audio) >= 30_000 and abs(pitch(audio[-16_000:], 16_000) - 300) < 3  # the call, at 16 kHz
+    checked.close()
+    assert whole.closed
+
+
+def test_the_whole_mix_is_closed_once_process_loopback_hears_a_sound():
+    main, whole = Loopback([sine(440, 0.1, 16_000)] * 5), Whole([sine(300, 0.1, 48_000)] * 40)
+    checked = wasapi._Checked(main, whole, clock=lambda: 1e9)
+    read_seconds(checked, 4)
+    assert not checked.switched and whole.closed and checked.whole is None and not checked.hears_self
+
+
+def test_rflows_own_voice_in_the_mix_doesnt_count_as_a_sound_process_loopback_missed(monkeypatch):
+    monkeypatch.setattr(wasapi, "_voice_until", 100.0)  # the voice is playing (process loopback leaves it out)
+    main, whole = Loopback(), Whole([sine(300, 0.1, 48_000)] * 40)
+    checked = wasapi._Checked(main, whole, clock=lambda: 50.0)
+    read_seconds(checked, 4)
+    assert not checked.switched and not main.closed
+
+
+def test_with_nothing_playing_nothing_changes():
+    main, whole = Loopback(), Whole([np.zeros(4800, np.float32)] * 40)
+    checked = wasapi._Checked(main, whole, clock=lambda: 1e9)
+    read_seconds(checked, 4)
+    assert not checked.switched and checked.whole is whole
+
+
+def test_the_capture_follows_the_switch_for_the_voices_silencing():
+    main, whole = Loopback(), Whole([sine(300, 0.1, 48_000)] * 40)
+    checked = wasapi._Checked(main, whole, clock=lambda: 1e9)
+    speakers = wasapi._Speakers(checked, meters=FakeMeters)
+    frames, capture = run_capture([speakers], 0, until=lambda: checked.switched)
+    time.sleep(0.05)
+    assert checked.switched and speakers.hears_self
+
+
+def test_without_a_whole_mix_process_loopback_is_used_alone(monkeypatch):
+    main = Loopback()
+    monkeypatch.setattr(wasapi, "_ProcessLoopback", lambda: main)
+
+    def no_mix(*a):
+        raise OSError("no output")
+    monkeypatch.setattr(wasapi, "_Stream", no_mix)
+    assert wasapi._speakers() is main

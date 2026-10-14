@@ -718,12 +718,95 @@ def _muted(stream) -> bool:
 
 
 def _speakers():
-    """What the laptop plays without Rflow's own sound where Windows can leave it out, else the whole mix."""
+    """What the laptop plays without Rflow's own sound where Windows can leave it out (checked against the whole mix,
+    _Checked), else the whole mix."""
     try:
-        return _ProcessLoopback()
+        main = _ProcessLoopback()
     except Exception as e:  # an older Windows: no process loopback
         log.info("Live translation: process loopback isn't available (%s); capturing the whole output", e)
         return _Stream(E_RENDER, E_CONSOLE)
+    try:
+        return _Checked(main, _Stream(E_RENDER, E_CONSOLE))
+    except Exception as e:  # the check is a help, not a need
+        log.info("Live translation: the whole output couldn't be opened to check process loopback (%s)", e)
+        return main
+
+
+WHOLE_AFTER = 1.5  # seconds of sound in the whole mix, with none at all through process loopback, before using the mix
+WHOLE_SOUND = 1e-4  # a peak above this (-80 dBFS) in the whole mix is something playing
+VOICE_MARGIN = 0.5  # seconds after Rflow's own voice was last queued during which the whole mix may still carry it
+_voice_until = 0.0  # time.monotonic() until which Rflow's own voice may be playing (Player.play)
+
+
+def _loud(packets: list[np.ndarray], floor: float) -> bool:
+    return any(len(p) and float(np.max(np.abs(p))) > floor for p in packets)
+
+
+class _Checked:
+    """Process loopback, checked against the default output's whole mix until it has heard something. On the owner's
+    laptop (2026-10-13/14, #176: a Teams call on Bluetooth earbuds, Teams playing to "Headphones", the laptop's mic)
+    process loopback, even of Teams' process alone, got only silence while the whole mix carried the call, and the
+    output meters read 0 as well. So both are read: once process loopback hears a sound the mix is closed; if instead the
+    mix has had WHOLE_AFTER seconds of sound (not Rflow's own voice) while process loopback had none, the mix is used for
+    the rest of this stream. Rflow's voice is in it then (`hears_self`), so the session silences it meanwhile."""
+
+    def __init__(self, main, whole, clock: Callable[[], float] = time.monotonic):
+        self.main, self.whole, self._clock = main, whole, clock
+        self.rate, self.channels, self.bits, self.is_float = main.rate, main.channels, main.bits, main.is_float
+        self.device_id, self.note = getattr(main, "device_id", ""), getattr(main, "note", "")
+        self._resample = Resampler(whole.rate, main.rate)
+        self._whole_sound = 0.0
+        self.switched = False
+
+    @property
+    def hears_self(self) -> bool:
+        return self.switched or getattr(self.main, "hears_self", False)
+
+    def read(self) -> list[np.ndarray]:
+        if self.switched:
+            packets = self.whole.read()
+            return [self._resample(np.concatenate(packets))] if packets else []
+        packets = self.main.read()
+        if self.whole is None:
+            return packets
+        extra = self.whole.read()  # read even when not needed: its buffer mustn't overflow
+        if _loud(packets, SOUND):
+            log.info("Live translation: process loopback hears what plays; the whole mix isn't needed")
+            self._close(self.whole)
+            self.whole = None
+            return packets
+        if extra and _loud(extra, WHOLE_SOUND) and self._clock() >= _voice_until:
+            self._whole_sound += sum(len(p) for p in extra) / self.whole.rate
+            if self._whole_sound >= WHOLE_AFTER:
+                log.info("Live translation: process loopback hears nothing while the output plays (a call on Bluetooth "
+                         "earbuds?): it hears the output's whole mix instead, Rflow's own voice too")
+                self.switched, self.note = True, "the whole mix: process loopback heard nothing"
+                self._close(self.main)
+                return [self._resample(np.concatenate(extra))]
+        return packets
+
+    def _active(self):
+        return self.whole if self.switched else self.main
+
+    def default_changed(self) -> bool:
+        return self._active().default_changed()
+
+    def muted(self) -> bool:
+        return _muted(self._active())
+
+    @staticmethod
+    def _close(stream) -> None:
+        try:
+            stream.close()
+        except Exception as e:
+            log.debug("Live translation: closing a capture failed: %s", e)
+
+    def close(self) -> None:
+        if not self.switched:
+            self._close(self.main)
+        if self.whole is not None:
+            self._close(self.whole)
+            self.whole = None
 
 
 class _Meters:
@@ -799,7 +882,6 @@ class _Speakers:
         self.main = main
         self._open_call = open_call or (lambda: _Stream(E_RENDER, E_COMMUNICATIONS))
         self.rate, self.channels, self.bits, self.is_float = main.rate, main.channels, main.bits, main.is_float
-        self.hears_self = getattr(main, "hears_self", False)
         self.device_id = getattr(main, "device_id", "")
         self.note = getattr(main, "note", "")
         try:
@@ -814,6 +896,10 @@ class _Speakers:
         self._heard: float | None = None  # when the devices listened to last played
         self._other_since: dict[str, float] = {}  # other devices playing, since when
         self._told = ""
+
+    @property
+    def hears_self(self) -> bool:  # main's, which can change (_Checked turning to the whole mix)
+        return getattr(self.main, "hears_self", False)
 
     def read(self) -> list[np.ndarray]:
         packets = self.main.read()  # its failure (unplugged) reopens everything
@@ -994,6 +1080,7 @@ class Capture:
         while not self._stop.is_set():
             now = self._clock()
             packets = stream.read()
+            self.hears_self = getattr(stream, "hears_self", False)  # it may turn to the whole mix
             if packets:
                 last_packet = last_fill = now
                 samples = resample(np.concatenate(packets))
@@ -1104,7 +1191,9 @@ class Player:
     def play(self, samples: np.ndarray, rate: int) -> float:
         """Queue `samples` (float, -1..1) for playing. Returns once they're all in Windows' buffer, with the seconds
         still to be heard then (up to its 0.2 s), or 0 when interrupted (the rest isn't played)."""
+        global _voice_until
         self._interrupt.clear()
+        _voice_until = max(_voice_until, time.monotonic() + len(samples) / rate + VOICE_MARGIN)
         pcm, failures = pcm16(samples), 0
         while pcm and not self._interrupt.is_set():
             try:

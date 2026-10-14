@@ -11,7 +11,13 @@ _Last updated: 2026-10-08_
 
 ## Start here (a new session, or the owner's other laptop)
 
-**Where things stand (2026-10-08):**
+**Where things stand (2026-10-14):**
+- **Rflow 2.5.2** (2026-10-14, the owner's "take control"): live translation from the computer heard nothing in the
+  owner's Teams meetings on Bluetooth earbuds (#176): process loopback, even of Teams alone, got silence while the
+  output's whole mix carried the call (measured live in the meeting; the output meters read 0 too). Now process
+  loopback is checked against the whole mix (`wasapi._Checked`): 1.5 s of sound there and none through process
+  loopback (not Rflow's own voice, `_voice_until`) switches to the whole mix for that stream (`hears_self` then). A
+  console run with the whole mix translated the owner's meeting. Wake word (phase 42) is paused on `phase-42/check`.
 - **Rflow 2.5.1** (2026-10-08): **phase 41, the spoken translation** (#158). (1) The voice repeated sentences (the
   owner's log: 3 lines → 10 sentences said, 9 → 30): a leading space on a line's first piece, Gemini re-sending a line
   revised (appended, not replaced: `gemini._join`), and a new line restarting the last; now `Speaker` remembers what
