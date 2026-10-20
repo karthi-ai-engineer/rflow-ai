@@ -3060,13 +3060,15 @@ class _KeyRow(QWidget):
         self.address = QLineEdit()
         self.address.setPlaceholderText("Your server's address, e.g. http://localhost:8000/v1")
         field(self.address)
-        self.address.setVisible(self.server)
+        if not self.server:  # hide only: shown before it has a parent, it would flash up as its own window
+            self.address.hide()
         form.addWidget(self.address)
         self.key = KeyField("", "Your server's key, only if it needs one" if self.server else "Paste your key")
         self.get_key = button("Get a free key" if name == "gemini" else "Get a key",
                               lambda _=False: QDesktopServices.openUrl(QUrl(p.key_page)), link=True, size="sm",
                               icon="external", icon_after=True)
-        self.get_key.setVisible(bool(p and p.key_page) and not self.server)
+        if not (p and p.key_page) or self.server:
+            self.get_key.hide()
         key_line = row(self.key, self.get_key)
         key_line.setStretch(0, 1)
         form.addLayout(key_line)

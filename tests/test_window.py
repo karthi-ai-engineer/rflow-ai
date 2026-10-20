@@ -81,6 +81,35 @@ def test_someone_who_has_been_welcomed_starts_at_home_and_can_open_every_page():
             assert window.nav[w.SECTION[key]].isChecked()
 
 
+def test_building_and_opening_the_window_flashes_no_other_window():
+    """A widget made visible before it has a parent shows as a window of its own for a moment: at start-up that was
+    dozens of small "Rflow" windows opening and closing (#181)."""
+    from PySide6.QtCore import QEvent, QObject
+    from PySide6.QtWidgets import QWidget
+
+    class Spy(QObject):
+        shown: list[str] = []
+
+        def eventFilter(self, obj, event):
+            if event.type() == QEvent.Type.Show and isinstance(obj, QWidget) and obj.isWindow() \
+                    and not isinstance(obj, w.MainWindow):
+                self.shown.append(f"{type(obj).__name__} {obj.objectName()} {obj.size().toTuple()}")
+            return False
+
+    spy = Spy()
+    QApplication.instance().installEventFilter(spy)
+    try:
+        for kwargs in ({}, {"settings": Settings()}, {"gateway": GatewayConfig("http://localhost:8000/v1", "k", "vllm")}):
+            window, _ = _window(**kwargs)
+            window.open()
+            for key in window.pages:
+                window.show_page(key)
+            window.hide()
+    finally:
+        QApplication.instance().removeEventFilter(spy)
+    assert spy.shown == []
+
+
 def test_pages_one_level_down_lead_back():
     window, _ = _window()
     window.show_page("speech")
