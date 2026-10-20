@@ -1122,7 +1122,8 @@ def setting_row(title: str, caption: str = "", *controls, tooltip: str = "") -> 
     words.setSpacing(2)
     title_label = label(title, "rowtitle")
     caption_label = label(caption, "caption", "2")
-    caption_label.setVisible(bool(caption))
+    if not caption:  # never setVisible(True) here: a widget without a parent yet would flash up as its own window
+        caption_label.hide()
     words.addWidget(title_label)
     words.addWidget(caption_label)
     layout.addLayout(words, 1)

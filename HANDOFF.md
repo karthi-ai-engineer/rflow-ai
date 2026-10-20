@@ -11,7 +11,11 @@ _Last updated: 2026-10-08_
 
 ## Start here (a new session, or the owner's other laptop)
 
-**Where things stand (2026-10-14):**
+**Where things stand (2026-10-20):**
+- **Rflow 2.5.3** (2026-10-20, the owner's "publish it quickly"): about 50 small "Rflow" windows flashed open and
+  closed at start-up (#181): widgets made visible before they had a parent show as windows of their own. Only `hide()`
+  while building; `test_building_and_opening_the_window_flashes_no_other_window` watches Show events. To see such
+  flashes, log Rflow's top-level windows while it starts (EnumWindows), not only console windows.
 - **Rflow 2.5.2** (2026-10-14, the owner's "take control"): live translation from the computer heard nothing in the
   owner's Teams meetings on Bluetooth earbuds (#176): process loopback, even of Teams alone, got silence while the
   output's whole mix carried the call (measured live in the meeting; the output meters read 0 too). Now process

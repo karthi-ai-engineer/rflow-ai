@@ -3,7 +3,7 @@ import os
 import sys
 from pathlib import Path
 
-__version__ = "2.5.2"  # the one place to change it; the installer and release tags follow it
+__version__ = "2.5.3"  # the one place to change it; the installer and release tags follow it
 
 if getattr(sys, "frozen", False):  # the installed app (Rflow.exe / rflow-cli.exe, built by build_installer.cmd)
     MODELS_DIR = Path(sys.executable).parent / "models"
