@@ -50,10 +50,13 @@ class ASRError(Exception):
 
 def classify(exc: BaseException) -> ErrorKind:
     """Whether a failed attempt is worth repeating. Unknown errors count as transient: attempts are bounded, and
-    giving up on a chunk fails the whole dictation."""
+    giving up on a chunk fails the whole dictation. A backend marks an error it knows is final with `permanent = True`
+    (sst.engines.cloud: no credit, a quota used up, a key not accepted, unreachable): the fallback stands in at once."""
     if isinstance(exc, ASRError):
         return exc.kind
     if not isinstance(exc, Exception):  # KeyboardInterrupt, SystemExit: never retried
+        return ErrorKind.PERMANENT
+    if getattr(exc, "permanent", None) is True:  # the backend knows asking again won't help (no credit, offline...)
         return ErrorKind.PERMANENT
     for attr in ("status", "status_code"):  # sst.engines.cloud.CloudError, urllib's HTTPError, other HTTP clients
         status = getattr(exc, attr, None)
