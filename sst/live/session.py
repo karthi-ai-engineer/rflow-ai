@@ -23,7 +23,8 @@ While a way has shown no words, the bar's status line says why (NOTE events), fr
 With Both the microphone says nothing of its own silence: the user listening is silent. note(lane, message) shows
 something a capture found out instead (a device with no sound on it), until words come.
 
-With speaking on, the translation also goes to a Speaker (sst.live.speaker), and a way that could hear the voice gets
+With speaking on, the translation also goes to a Speaker (sst.live.speaker): the engine's own voice (an engine with an
+`on_audio` attribute: Gemini's), else the words to say with the laptop's voice. A way that could hear the voice gets
 silence while it speaks: the microphone near speakers (not headphones), and what the laptop plays where Rflow's own sound
 can't be left out (before Windows 11, or the output's whole mix when process loopback misses a call, while the voice
 plays on that output). So the spoken translation is never heard and translated again; the meeting's words under the
@@ -118,6 +119,8 @@ class LiveSession:
         with self._lock:
             self._hearing[lane] = _Hearing()
         engine = engine_factory(self._event)
+        if hasattr(engine, "on_audio"):  # the translation spoken by the engine itself: to the speaker, if one speaks
+            engine.on_audio = lambda pcm, rate: self._audio(lane, pcm, rate)
         engine.start()
         if hasattr(capture, "on_problem"):  # why it hears nothing (Windows' sound muted), shown like the engine's
             capture.on_problem = lambda message: self._event(LiveEvent(Kind.ERROR, message, lane=lane))
@@ -164,6 +167,10 @@ class LiveSession:
             old.stop()
             log.info("The voice said %d sentences (%d skipped to keep up); the voice skipped a repeat %d times", old.said,
                      old.skipped, old.repeats)
+            if getattr(old, "sound_s", 0) or getattr(old, "voiced", 0):
+                log.info("Gemini's own voice: %.0f s played (%.0f s left out to keep up), %d sentences said by it, %d by "
+                         "the laptop's voice in its place, %d by neither", old.sound_s, old.sound_skipped_s, old.voiced,
+                         old.said, old.unvoiced)
         if speaker is not None:
             speaker.start()
 
@@ -267,6 +274,12 @@ class LiveSession:
             self.on_event(event)
 
     # -- the engines' events
+
+    def _audio(self, lane: str, pcm: bytes, rate: int) -> None:
+        """A piece of the translation spoken by the engine (its thread): to the speaker, which knows the ways it plays."""
+        speaker = self.speaker
+        if speaker is not None and hasattr(speaker, "hear_audio"):
+            speaker.hear_audio(lane, pcm, rate)
 
     def _event(self, event: LiveEvent) -> None:
         if event.kind is Kind.LINE:

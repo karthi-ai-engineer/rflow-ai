@@ -16,6 +16,15 @@ from sst.live.speaker import Speaker, whole_sentences
 from sst.live.voice import PREPARED, TOKENS, Voice, onnx_metadata, prepare
 from sst.live.wasapi import Player
 
+
+@pytest.fixture(autouse=True)
+def _no_voice_left_playing(monkeypatch):
+    """Player.play marks Rflow's voice as playing in wasapi's globals, which the capture reads: put back after each test
+    (left set, the capture tests run after these failed)."""
+    from sst.live import wasapi
+    monkeypatch.setattr(wasapi, "_voice_until", 0.0)
+    monkeypatch.setattr(wasapi, "_voice_device", "")
+
 # ---- the voice: downloaded, then prepared for sherpa-onnx
 
 def read_varint(data: bytes, i: int) -> tuple[int, int]:
@@ -104,11 +113,23 @@ def test_installing_downloads_what_is_missing_then_prepares_once(tmp_path, monke
     assert fetched == ["data", "voice"]  # ready: nothing fetched again
 
 
-def test_the_real_voice_is_pinned_on_hugging_face():
-    for download in (voices.DANNY.model, voices.DANNY.data):
-        assert downloads.allowed(download.base_url) and "/resolve/" in download.base_url
-        assert all(len(f.sha256) == 64 for f in download.files)
-    assert voices.DANNY.language == "en" and 60 * 2**20 < voices.DANNY.size < 70 * 2**20
+def test_the_real_voices_are_pinned_on_hugging_face():
+    for voice in (voices.RYAN, voices.DANNY):
+        for download in (voice.model, voice.data):
+            assert downloads.allowed(download.base_url) and "/resolve/" in download.base_url
+            assert all(len(f.sha256) == 64 for f in download.files)
+        assert voice.language == "en" and 60 * 2**20 < voice.size < 70 * 2**20
+    assert voices.LOCAL is voices.RYAN and voices.RYAN.data is voices.DANNY.data  # the same English espeak-ng data
+
+
+def test_an_older_rflows_danny_speaks_until_ryan_is_downloaded(tmp_path, monkeypatch):
+    have = set()
+    monkeypatch.setattr(Voice, "ready", lambda self, root=None: self.key in have)
+    assert voices.local(tmp_path) is voices.RYAN  # nothing yet: Ryan is the one to download
+    have.add(voices.DANNY.key)
+    assert voices.local(tmp_path) is voices.DANNY  # never left without a voice while Ryan comes
+    have.add(voices.RYAN.key)
+    assert voices.local(tmp_path) is voices.RYAN
 
 
 # ---- whole sentences
@@ -467,3 +488,209 @@ def test_interrupting_the_player_flushes_what_was_queued():
     player.interrupt()
     thread.join(2)
     assert done == [0.0] and player._stream.flushed
+
+
+# ---- Gemini's own voice: played as it streams; the laptop's voice only stands in for it
+
+class RecordingPlayer(FakePlayer):
+    """Keeps what it plays, and how many plays ran at once (one voice at a time: never more than one)."""
+
+    def __init__(self, **named):
+        super().__init__(**named)
+        self.pieces, self.rates, self.at_once, self.most, self.started = [], [], 0, 0, 0
+        self._count = threading.Lock()
+
+    def play(self, samples, rate):
+        with self._count:
+            self.at_once, self.started = self.at_once + 1, self.started + 1
+            self.most = max(self.most, self.at_once)
+        try:
+            if self.gate is not None:
+                self.gate.wait(5)
+            self.pieces.append(np.array(samples, dtype=np.float32))
+            self.rates.append(rate)
+            time.sleep(0.002)
+            return 0.0
+        finally:
+            with self._count:
+                self.at_once -= 1
+
+    @property
+    def seconds(self):
+        return sum(len(p) / r for p, r in zip(self.pieces, self.rates, strict=True))
+
+
+def pcm(level: int, seconds: float = 0.1, rate: int = 24000) -> bytes:
+    return np.full(round(seconds * rate), level, dtype="<i2").tobytes()
+
+
+def test_geminis_voice_is_played_in_order_and_the_sentences_it_says_arent_said_again():
+    player = RecordingPlayer()
+    speaker, said = speaker_with(player=player, own=(SYSTEM,))
+    speaker.start()
+    pieces = [pcm(1000 * n) for n in range(1, 6)]
+    for piece in pieces:
+        speaker.hear_audio(SYSTEM, piece, 24000)
+    speaker.hear(LiveEvent(Kind.LINE, "Thanks for joining. The budget is ready."))  # its transcript, after the audio
+    assert wait_until(lambda: player.seconds >= 0.5)
+    time.sleep(0.1)
+    expected = np.concatenate([np.frombuffer(p, "<i2") for p in pieces]).astype(np.float32) / 32768
+    assert np.array_equal(np.concatenate(player.pieces), expected) and set(player.rates) == {24000}
+    assert said == [] and speaker.voiced == 1 and speaker.said == 0 and speaker.sound_s == pytest.approx(0.5)
+    speaker.stop()
+
+
+def test_a_sentence_geminis_voice_doesnt_say_is_said_by_the_laptops_voice():
+    clock = Clock()
+    speaker, said = speaker_with(clock=clock, own=(SYSTEM,))
+    speaker.start()
+    speaker.hear(LiveEvent(Kind.LINE, "Good morning."))
+    time.sleep(0.2)
+    assert said == []  # Gemini's voice may still come
+    clock.now += speakers.AUDIO_WAIT
+    assert wait_until(lambda: said == [("Good morning.", 1.0)]) and speaker.said == 1 and speaker.voiced == 0
+    speaker.stop()
+
+
+def test_geminis_voice_coming_in_time_takes_the_sentence_over():
+    clock, player = Clock(), RecordingPlayer()
+    speaker, said = speaker_with(clock=clock, player=player, own=(SYSTEM,))
+    speaker.start()
+    speaker.hear(LiveEvent(Kind.LINE, "Good morning."))
+    clock.now += 0.5
+    speaker.hear_audio(SYSTEM, pcm(2000), 24000)
+    clock.now += 5
+    assert wait_until(lambda: player.pieces)
+    time.sleep(0.2)
+    assert said == [] and speaker.voiced == 1
+    speaker.hear(LiveEvent(Kind.LINE, "And welcome."))  # Gemini's voice came 5 s ago: still speaking, it says this too
+    clock.now += 2
+    time.sleep(0.2)
+    assert said == [] and speaker.voiced == 2
+    clock.now += speakers.OWN_RECENT  # Gemini's voice has stopped coming: the laptop's stands in
+    speaker.hear(LiveEvent(Kind.LINE, "Any questions?"))
+    clock.now += speakers.AUDIO_WAIT
+    assert wait_until(lambda: said == [("Any questions?", 1.0)])
+    speaker.stop()
+
+
+def test_the_voice_is_speaking_while_geminis_voice_plays():
+    from sst.live import wasapi
+    clock = Clock()
+    speaker = Speaker(lambda: None, Player(opener=lambda rate: FakeRender(rate)), [], clock=clock, own=(SYSTEM,))
+    speaker.start()
+    assert not speaker.speaking
+    before = time.monotonic()
+    speaker.hear_audio(SYSTEM, pcm(3000, seconds=1.0), 24000)
+    assert wait_until(lambda: speaker.sound_s > 0)
+    assert speaker.speaking  # the microphone's way, near speakers, gets silence now
+    assert wasapi._voice_until >= before + 1.0  # the capture leaves Rflow's own voice out of the whole mix meanwhile
+    clock.now += 1
+    assert not speaker.speaking
+    speaker.stop()
+
+
+def test_never_two_voices_at_once():
+    player = RecordingPlayer()
+    speaker, said = speaker_with(lanes=(SYSTEM, MIC), player=player, own=(SYSTEM,))  # the microphone's: the laptop's
+    speaker.start()
+
+    def gemini():
+        for n in range(20):
+            speaker.hear_audio(SYSTEM, pcm(100 + n, seconds=0.05), 24000)
+            time.sleep(0.003)
+    thread = threading.Thread(target=gemini)
+    thread.start()
+    for n in range(5):
+        speaker.hear(LiveEvent(Kind.LINE, f"Sentence number {n} for the room.", lane=MIC))
+    thread.join()
+    assert wait_until(lambda: len(said) == 5 and player.seconds >= 1.0 + 5 * 0.5 - 1e-6)
+    assert player.most == 1
+    speaker.stop()
+
+
+def test_muting_and_stopping_silence_geminis_voice():
+    gate = threading.Event()
+    player = RecordingPlayer(gate=gate)
+    speaker, _ = speaker_with(player=player, own=(SYSTEM,))
+    speaker.start()
+    for n in range(3):
+        speaker.hear_audio(SYSTEM, pcm(1000 + n, seconds=0.6), 24000)  # each more than one piece played at once
+    assert wait_until(lambda: player.started == 1)
+    speaker.set_muted(True)  # the bar's speaker button: what's queued goes, what plays stops
+    gate.set()
+    speaker.hear_audio(SYSTEM, pcm(5), 24000)
+    time.sleep(0.2)
+    assert len(player.pieces) == 1 and player.interrupted
+    speaker.set_muted(False)
+    speaker.stop()
+    speaker.hear_audio(SYSTEM, pcm(6), 24000)
+    time.sleep(0.1)
+    assert len(player.pieces) == 1 and player.closed
+
+
+def test_only_the_ways_spoken_get_geminis_voice():
+    player = RecordingPlayer()
+    speaker, _ = speaker_with(player=player, own=(SYSTEM,))
+    speaker.start()
+    speaker.hear_audio(MIC, pcm(10), 24000)  # with Both, the user's own words are for the others
+    time.sleep(0.2)
+    assert player.pieces == []
+    speaker.set_lanes([], own=[MIC])
+    speaker.hear_audio(MIC, pcm(10), 24000)
+    assert wait_until(lambda: len(player.pieces) == 1)
+    speaker.stop()
+
+
+def test_falling_behind_geminis_voice_skips_what_is_stale():
+    gate, clock = threading.Event(), Clock()
+    player = RecordingPlayer(gate=gate)
+    speaker, _ = speaker_with(player=player, clock=clock, own=(SYSTEM,))
+    speaker.start()
+    speaker.hear_audio(SYSTEM, pcm(1000, seconds=0.5), 24000)
+    assert wait_until(lambda: player.started == 1)
+    speaker.hear_audio(SYSTEM, pcm(2000, seconds=0.5), 24000)  # waits behind it, then too long
+    clock.now += speakers.STALE + 1
+    speaker.hear_audio(SYSTEM, pcm(3000, seconds=0.5), 24000)
+    gate.set()
+    assert wait_until(lambda: len(player.pieces) == 2)
+    assert [int(round(p[0] * 32768)) for p in player.pieces] == [1000, 3000]
+    assert speaker.sound_skipped_s == pytest.approx(0.5)
+    speaker.stop()
+
+
+def test_pauses_are_shortened_to_catch_up_and_the_words_kept_whole():
+    rate = 24000
+    loud = np.full(rate // 5, 0.3, dtype=np.float32)
+    samples = np.concatenate([loud, np.zeros(rate, np.float32), loud])
+    shorter = speakers.shorten_pauses(samples, rate)
+    assert len(shorter) == 2 * len(loud) + round(speakers.PAUSE_S * 50) * rate // 50  # the pause: 1 s -> 0.24 s
+    assert np.count_nonzero(shorter) == 2 * len(loud)
+    assert np.array_equal(speakers.shorten_pauses(loud, rate), loud)  # no pause: as it was
+
+
+def test_geminis_voice_from_the_fake_server_is_heard_through_the_session():
+    from sst.live.session import LiveSession
+    from tests.test_live_gemini import KEY, FakeServer, spoken
+    from tests.test_live_session import FakeCapture
+    server, shown, said, clock = FakeServer(), [], [], Clock()
+    player = RecordingPlayer()
+    config = LiveConfig(speak=True)
+    session = LiveSession(config, on_event=shown.append)
+    session.add(SYSTEM, FakeCapture(), lambda emit: GeminiLiveTranslate(KEY, config, emit, connect=lambda url: server))
+    session.set_speaker(Speaker(lambda: FakeVoice(said), player, config.spoken_lanes("en"), clock=clock,
+                                own=config.spoken_lanes()))
+    assert wait_until(lambda: server.sent)
+    server.say(modelTurn=spoken(pcm(1200), pcm(1300)), outputTranscription={"text": "Hello there."})
+    server.say(turnComplete=True)
+    assert wait_until(lambda: player.seconds >= 0.2 - 1e-6)
+    assert [e.text for e in shown if e.kind is Kind.LINE] == ["Hello there."]  # the caption as ever
+    clock.now += speakers.OWN_RECENT + 1  # a while later Gemini sends a line without its voice
+    server.say(outputTranscription={"text": "No voice for this one."}, turnComplete=True)
+    assert wait_until(lambda: [e.text for e in shown if e.kind is Kind.LINE][-1:] == ["No voice for this one."])
+    time.sleep(0.1)
+    assert said == []  # its voice may still come
+    clock.now += speakers.AUDIO_WAIT
+    assert wait_until(lambda: said == [("No voice for this one.", 1.0)])
+    session.stop()
+    assert player.closed and session.speaker is None

@@ -1876,7 +1876,7 @@ def test_hearing_the_translation_is_switched_on_in_the_section():
     assert app.settings.live_speak_speed == 1.3
     app._voice_state = ("downloading", 37, "")
     page.refresh()
-    assert page.speak_caption.text().startswith("Downloading the voice Danny: 37%")
+    assert page.speak_caption.text().startswith("Downloading Ryan, the voice on this laptop: 37%")
 
 
 def test_how_low_the_other_apps_stay_while_it_runs_is_a_slider_from_0_to_100():
@@ -1905,4 +1905,6 @@ def test_how_low_the_other_apps_stay_while_it_runs_is_a_slider_from_0_to_100():
 def test_the_section_says_when_the_voice_cant_speak_the_language_chosen():
     window, _ = _live_window(live_target="ja")
     window.show_page("live")
-    assert window.pages["live"].speak_caption.text().startswith("Danny speaks English: choose English below")
+    words = window.pages["live"].speak_caption.text()
+    assert words.startswith("Gemini says the translation in its own voice")
+    assert "Ryan, the voice on this laptop, speaks only English" in words

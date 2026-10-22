@@ -75,11 +75,11 @@ class LiveConfig:
         microphone alone it hears everyone in the room, so nothing is marked."""
         return self.source == "both"
 
-    def spoken_lanes(self, language: str) -> tuple[str, ...]:
-        """The ways a voice speaking `language` reads aloud: what's translated into that language. With both, only the
-        others' words: the user's own are for the people they talk to."""
+    def spoken_lanes(self, language: str | None = None) -> tuple[str, ...]:
+        """The ways a voice speaking `language` reads aloud: what's translated into that language (None: any, the
+        engine's own voice). With both, only the others' words: the user's own are for the people they talk to."""
         lanes = (SYSTEM,) if self.source == "both" else self.lanes
-        return tuple(lane for lane in lanes if self.for_lane(lane).target == language)
+        return tuple(lane for lane in lanes if language is None or self.for_lane(lane).target == language)
 
     def for_lane(self, lane: str) -> "LiveConfig":
         """The settings one way's engine works with: what the microphone hears goes into mic_target."""

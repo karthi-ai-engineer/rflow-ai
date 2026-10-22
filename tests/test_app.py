@@ -708,21 +708,31 @@ def test_past_sessions_are_listed_newest_first(tray_app):
         (datetime(2026, 10, 5, 14, 3, 12), 2), (datetime(2026, 10, 4, 9, 0, 0), 1)]
 
 
-def test_speaking_needs_the_voice_downloaded_first_then_speaks(tray_app, monkeypatch):
+def test_gemini_speaks_at_once_and_the_laptops_voice_is_downloaded_to_stand_in(tray_app, monkeypatch):
     app, _, _ = tray_app
-    from sst.live.contracts import SYSTEM, LiveConfig
+    from sst.live import voice as voices
+    from sst.live.contracts import MIC, SYSTEM, LiveConfig
     from sst.live.speaker import Speaker
-    monkeypatch.setattr(sst_app.Voice, "ready", lambda self, root=None: False)
-    assert app._live_speaker(LiveConfig(speak=True)) is None and app.live_voice_state()[0] == "missing"
+    have = set()
+    monkeypatch.setattr(sst_app.Voice, "ready", lambda self, root=None: self.key in have)
+    speaker = app._live_speaker(LiveConfig(source="microphone", mic_target="ja", speak=True))
+    assert speaker.own == {MIC} and speaker.lanes == set()  # Gemini says Japanese; the laptop's voice speaks English
+    assert speaker._load() is None and app.live_voice_state()[0] == "missing"  # nothing to stand in yet
     started = []
     monkeypatch.setattr(app, "download_live_voice", lambda: started.append(True))
     app.set_live_speak(True)
     assert app.settings.live_speak and started == [True]
-    monkeypatch.setattr(sst_app.Voice, "ready", lambda self, root=None: True)
+    have.add(voices.DANNY.key)  # an older Rflow's Danny: speaks until Ryan is here, and Ryan is still downloaded
+    assert app.live_voice() is voices.DANNY and app.live_voice_state() == ("ready", 0, "")
+    app.set_live_speak(True)
+    assert started == [True, True]
+    have.add(voices.RYAN.key)
     speaker = app._live_speaker(LiveConfig(target="en", speak=True, speak_speed=1.3, duck=0.25))
-    assert isinstance(speaker, Speaker) and speaker.lanes == {SYSTEM} and speaker.speed == 1.3
+    assert isinstance(speaker, Speaker) and speaker.lanes == speaker.own == {SYSTEM} and speaker.speed == 1.3
     assert speaker.ducker.depth == 0.25  # like an interpreter: the other apps kept lower while it runs
-    assert app.live_voice_state() == ("ready", 0, "")
+    assert app.live_voice() is voices.RYAN and app.live_voice_state() == ("ready", 0, "")
+    app.set_live_speak(True)
+    assert started == [True, True]  # here: nothing more to download
 
 
 def test_how_low_the_other_apps_stay_while_it_runs_is_saved_and_used_at_once(tray_app, monkeypatch):

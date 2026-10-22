@@ -422,8 +422,8 @@ class LiveCaptions(QObject):
     """Starts and stops a live translation session and shows it in the translation bar; thread-safe towards the
     engines (their events arrive on their own threads and are moved to Qt's). The app wires the parts:
     `make_session(config, on_event)` builds the LiveSession (with its transcript), `make_lane(lane, config)` gives a
-    way's (capture, engine_factory), `make_speaker(config)` the Speaker that says the translation aloud (None while the
-    voice isn't downloaded)."""
+    way's (capture, engine_factory), `make_speaker(config)` the Speaker that says the translation aloud (None if nothing
+    can speak it)."""
 
     event = Signal(object)
     changed = Signal(bool)  # running or not
@@ -532,7 +532,7 @@ class LiveCaptions(QObject):
             return
         speaker = session.speaker
         if self.config.speak and speaker is None and self._make_speaker is not None:
-            speaker = self._make_speaker(self.config)  # None while the voice isn't downloaded
+            speaker = self._make_speaker(self.config)  # None if nothing can speak it
             if speaker is not None:
                 session.set_speaker(speaker)
         elif not self.config.speak and speaker is not None:
@@ -540,12 +540,13 @@ class LiveCaptions(QObject):
             speaker = None
         hint = ""
         if speaker is not None:
-            lanes = self.config.spoken_lanes(speaker.language)
-            speaker.set_lanes(lanes)
+            # Gemini speaks every way spoken itself, in any language; the laptop's voice stands in only in its own
+            lanes, own = self.config.spoken_lanes(speaker.language), self.config.spoken_lanes()
+            speaker.set_lanes(lanes, own)
             speaker.set_speed(self.config.speak_speed)
             if not lanes:
-                hint = (f"The voice speaks {language_name(speaker.language)}: nothing here is translated into it. "
-                        f"Choose {language_name(speaker.language)} to hear the translation.")
+                hint = (f"Stop speaking the translation (Gemini's voice; the voice on this laptop speaks only "
+                        f"{language_name(speaker.language)}, so it can't stand in for it here)")
         if self.bar is not None:
             self.bar.set_speaking(speaker is not None, hint)
 
