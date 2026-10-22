@@ -86,14 +86,16 @@ def score(seconds: float = 1.0) -> float:
     meanwhile): as fast as OpenBLAS's own threads, and each calling thread's buffer (~30 MB, kept) is only taken here."""
     a = np.random.default_rng(0).standard_normal((768, 768), dtype=np.float32)
     workers = max(1, _cores()) if os.environ.get("OPENBLAS_NUM_THREADS") == "1" else 1
+    a @ a  # warm up
     counts, t0 = [0] * workers, time.perf_counter()
     end = t0 + seconds
 
     def multiply(i: int) -> None:
-        a @ a  # warm up
-        while time.perf_counter() < end:
+        while True:  # at least one each, so a busy PC scores slow rather than nothing
             a @ a
             counts[i] += 1
+            if time.perf_counter() >= end:
+                break
 
     threads = [threading.Thread(target=multiply, args=(i,), daemon=True) for i in range(workers)]
     for thread in threads:

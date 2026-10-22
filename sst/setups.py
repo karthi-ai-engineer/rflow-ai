@@ -70,7 +70,8 @@ NO_TRANSCRIBE = {"ta": "gemini-3.5-flash-lite"}
 
 # The models' names as people read them
 NAMES = {"gemini-3.5-flash-lite": "Gemini 3.5 Flash-Lite", "openai/gpt-oss-20b": "GPT-OSS 20B",
-         "whisper-large-v3-turbo": "Whisper large-v3 turbo", "gemini-3.5-transcribe": "Gemini 3.5 Transcribe"}
+         "whisper-large-v3-turbo": "Whisper large-v3 turbo", "gemini-3.5-transcribe": "Gemini 3.5 Transcribe",
+         "gemini-3.5-transcribe-live": "Gemini 3.5 Transcribe Live"}
 SHORT = {"whisper-large-v3-turbo": "Whisper turbo"}  # where a line is short
 
 
