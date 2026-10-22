@@ -81,7 +81,8 @@ CLOUD = {p.key: p for p in [
     # Explicit ids, not the -latest aliases: gemini-flash-latest moved to 3.5 Flash, the dearest Flash, and
     # gemini-flash-lite-latest's model isn't documented. A name typed in still works.
     CloudProvider("gemini", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta", "gemini",
-                  ("gemini-3.5-transcribe", "gemini-3.5-flash-lite", "gemini-3.6-flash"), "https://aistudio.google.com/apikey"),
+                  ("gemini-3.5-transcribe", "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.5-transcribe-live"),
+                  "https://aistudio.google.com/apikey"),  # -live streams: sst.engines.gemini_stream
 ]}
 
 # Models a provider is shutting down, and the day: still offered, and working, until then (retirement()).
