@@ -629,3 +629,61 @@ def test_the_report_has_numbers_and_no_words(live):
     report = engine.report()
     assert "first words after 1.5 s" in report and "1 frames sent, 0 dropped" in report and "0 reconnects" in report
     assert "secret" not in report and KEY not in report
+
+
+# ---- the translation spoken: Gemini's own voice, passed on as it comes
+
+def spoken(*pieces: bytes, mime="audio/pcm;rate=24000") -> dict:
+    """A serverContent.modelTurn with the translation spoken, as the Live API sends it (base64 PCM16 in inlineData)."""
+    return {"parts": [{"inlineData": {"mimeType": mime, "data": base64.b64encode(p).decode("ascii")}} for p in pieces]}
+
+
+def captions_of(events):
+    return [(e.kind, e.text, e.source) for e in events if e.kind in (Kind.SOURCE, Kind.TRANSLATION, Kind.LINE)]
+
+
+def test_the_translation_spoken_is_passed_on_in_order_and_the_captions_stay_the_same(live):
+    def run(with_voice):
+        server = FakeServer()
+        engine, events, _ = live([server])
+        audio = []
+        engine.on_audio = lambda pcm, rate: audio.append((pcm, rate))
+        engine.start()
+        assert wait_until(lambda: server.sent)
+        server.say(inputTranscription={"text": "今日は会議です"})
+        if with_voice:  # Google's message may carry the voice and its transcript together
+            server.say(modelTurn=spoken(bytes([1, 0]) * 4, bytes([2, 0]) * 4), outputTranscription={"text": "Today we"})
+            server.say(modelTurn=spoken(bytes([3, 0]) * 4, mime=""))  # no type said: Google's 24 kHz
+            server.say(modelTurn={"parts": [{"text": "not audio"}, {"inlineData": {"mimeType": "image/png", "data": "AA=="}}]})
+        else:
+            server.say(outputTranscription={"text": "Today we"})
+        server.say(outputTranscription={"text": " have a meeting."})
+        server.say(turnComplete=True)
+        assert wait_until(lambda: kinds(events, Kind.LINE))
+        return captions_of(events), audio, engine
+    plain, none, _ = run(False)
+    shown, audio, engine = run(True)
+    assert shown == plain and none == []  # the captions exactly as without the voice
+    assert audio == [(bytes([1, 0]) * 4, 24000), (bytes([2, 0]) * 4, 24000), (bytes([3, 0]) * 4, 24000)]
+    assert engine.audio_s == pytest.approx(24 / 48000) and "0 s of Gemini's voice" in engine.report()
+
+
+def test_a_listener_that_fails_never_ends_the_connection(live):
+    server = FakeServer()
+    engine, events, _ = live([server])
+    engine.on_audio = lambda pcm, rate: 1 / 0
+    engine.start()
+    assert wait_until(lambda: server.sent)
+    server.say(modelTurn=spoken(bytes([1, 0]) * 4))
+    server.say(outputTranscription={"text": "Still here."}, turnComplete=True)
+    assert wait_until(lambda: kinds(events, Kind.LINE)) and not kinds(events, Kind.ERROR)
+    assert kinds(events, Kind.LINE)[0].text == "Still here."
+
+
+def test_without_a_listener_the_voice_is_only_counted(live):
+    server = FakeServer()
+    engine, events, _ = live([server])
+    engine.start()
+    assert wait_until(lambda: server.sent)
+    server.say(modelTurn=spoken(bytes([1, 0]) * 2400), outputTranscription={"text": "Hello."}, turnComplete=True)
+    assert wait_until(lambda: kinds(events, Kind.LINE)) and engine.audio_s == pytest.approx(0.1)

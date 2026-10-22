@@ -10,18 +10,23 @@
                  (Google bills the audio streamed); the next sound reopens the stream, after PREROLL_FRAMES of silence
     answers      serverContent.inputTranscription.text   the words heard, piece by piece
                  serverContent.outputTranscription.text  their translation, piece by piece
-                 serverContent.modelTurn                 the translated voice (24 kHz), unused: captions only
+                 serverContent.modelTurn.parts[].inlineData  the translation spoken: base64 PCM16 mono, 24 kHz
+                                                         (https://ai.google.dev/gemini-api/docs/live-guide), given to
+                                                         on_audio when the translation is spoken aloud
                  sessionResumptionUpdate.newHandle       where the session can be taken up again (kept in memory only)
                  goAway                                  the connection ends soon: a new one is opened
 
-The model translates continuously, a few seconds behind the speaker. It only produces audio (and bills it), so the
-voice is thrown away and its transcript shown. A line ends when the model ends its turn, or after LiveConfig.line_pause_s
-without new words, or once a long translation and the words heard are both at a sentence end (one runs ahead of the
-other, either way). How far a line trailed the speaker is measured from when the audio last had
-a voice in it to when the line's translation was complete, and only when the voice had paused. A connection lives ~10
-minutes: before that, at a pause, a new one is opened (frames wait in the queue meanwhile, so no audio is lost), and it
-takes up the same session with the last resumption handle, so the model keeps what was said (Live API session
-resumption, https://ai.google.dev/gemini-api/docs/live-session; a setup Google refuses with it is sent again without).
+The model translates continuously, a few seconds behind the speaker. It only produces audio (and bills it, spoken or
+not): its transcript is shown, and the audio itself goes to `on_audio(pcm, rate)` if set (the session sets it while the
+translation is spoken; the same message may carry audio and transcript, the audio goes first). Asking for it costs
+nothing more: the setup has always asked for AUDIO, the only modality the model takes. A line ends when the model ends
+its turn, or after LiveConfig.line_pause_s without new words, or once a long translation and the words heard are both
+at a sentence end (one runs ahead of the other, either way). How far a line trailed the speaker is measured from when
+the audio last had a voice in it to when the line's translation was complete, and only when the voice had paused. A
+connection lives ~10 minutes: before that, at a pause, a new one is opened (frames wait in the queue meanwhile, so no
+audio is lost), and it takes up the same session with the last resumption handle, so the model keeps what was said
+(Live API session resumption, https://ai.google.dev/gemini-api/docs/live-session; a setup Google refuses with it is
+sent again without).
 Google's refusals (no credit, a key not accepted, a quota used up) are said plainly and end the captions; a short rate
 limit is waited out. The key and the handle are never logged.
 """
@@ -58,6 +63,8 @@ QUOTA_TRIES = 3  # a quota refusal that doesn't say when it lifts is tried this 
 QUOTA_WAIT = 30.0  # seconds between those tries
 LONGEST_WAIT = 600.0  # a rate limit asking for longer than this ends the captions instead
 BYTES_PER_S = 32_000  # 16 kHz, 16-bit
+VOICE_RATE = 24_000  # Google's audio out: "always 24kHz", raw little-endian 16-bit PCM (the Live API guide)
+_RATE = re.compile(r"rate=(\d+)")
 _SENTENCE_END = re.compile(r"[.!?。！？]\s*$")
 _SENTENCES = re.compile(r"[。！？!?]+|\.+(?!\w)")  # each sentence end once ("?!", "..."); "3.5" is none
 _CJK = "".join(f"{chr(a)}-{chr(b)}" for a, b in (
@@ -115,6 +122,7 @@ class GeminiLiveTranslate:
         self._opened = 0.0
         self._closed: str | None = None  # why the server closed the connection, once it did
         self._thread: threading.Thread | None = None
+        self.on_audio: Callable[[bytes, int], None] | None = None  # the translation spoken (PCM16 mono, its rate)
         self._resume = True  # ask for session resumption (dropped if Google refuses a setup with it)
         self._token = ""  # where the session can be taken up again: in memory only, never logged
         self._stream_end = True  # say when the audio pauses (dropped if Google refuses it)
@@ -132,6 +140,7 @@ class GeminiLiveTranslate:
         self.reconnect_s = 0.0  # seconds without a connection between them, in all
         self.resumed = 0  # reconnects that took up the same session
         self.first_words: float | None = None  # seconds from start() to the first words shown
+        self.audio_s = 0.0  # seconds of the translation spoken that came (given to on_audio or not)
         self.error = ""  # the last error, as the user saw it
 
     # -- the caller's side
@@ -168,7 +177,8 @@ class GeminiLiveTranslate:
         """How the session went, for the log: numbers only."""
         first = f"first words after {self.first_words:.1f} s" if self.first_words is not None else "no words"
         parts = [first, f"{self.sent} frames sent, {self.dropped} dropped", f"{self.silence_s:.0f} s of silence not sent",
-                 f"{self.reconnects} reconnects ({self.reconnect_s:.1f} s without a connection, {self.resumed} resumed)"]
+                 f"{self.reconnects} reconnects ({self.reconnect_s:.1f} s without a connection, {self.resumed} resumed)",
+                 f"{self.audio_s:.0f} s of Gemini's voice"]
         if self.error:
             parts.append(f"last error: {self.error}")
         return "; ".join(parts)
@@ -351,6 +361,8 @@ class GeminiLiveTranslate:
         if update.get("resumable") and update.get("newHandle"):
             self._token = update["newHandle"]
         content = message.get("serverContent") or {}
+        for part in (content.get("modelTurn") or {}).get("parts") or ():
+            self._voice(part.get("inlineData") or {})
         heard = content.get("inputTranscription") or {}
         if heard.get("text"):
             self._add(Kind.SOURCE, heard["text"], heard.get("languageCode", ""))
@@ -359,6 +371,24 @@ class GeminiLiveTranslate:
             self._add(Kind.TRANSLATION, said["text"], said.get("languageCode", ""))
         if content.get("turnComplete"):
             self._finish_line()
+
+    def _voice(self, blob: dict) -> None:
+        """A piece of the translation spoken, to on_audio. A listener's failure never ends the connection."""
+        mime = str(blob.get("mimeType") or "audio/pcm")
+        if not blob.get("data") or not mime.startswith("audio/"):
+            return
+        try:
+            pcm = base64.b64decode(blob["data"])
+        except ValueError:
+            log.warning("Live captions: a piece of Gemini's voice that isn't base64 was left out")
+            return
+        rate = int(m.group(1)) if (m := _RATE.search(mime)) else VOICE_RATE
+        self.audio_s += len(pcm) / (2 * rate)
+        if self.on_audio is not None:
+            try:
+                self.on_audio(pcm, rate)
+            except Exception:
+                log.exception("Live captions: Gemini's voice couldn't be passed on")
 
     def _add(self, kind: Kind, piece: str, language: str) -> None:
         now = self._clock()
