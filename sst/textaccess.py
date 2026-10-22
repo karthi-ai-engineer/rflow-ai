@@ -27,6 +27,7 @@ from sst.paste import (
     _put,
     _snapshot,
     _wait_for_modifiers_released,
+    settle,
 )
 
 log = logging.getLogger(__name__)
@@ -181,6 +182,7 @@ def copy_selection(timeout: float = 0.6, fallback: bool = False) -> str | None:
     nothing was copied: with no selection most apps leave the clipboard alone. Only whitespace counts as nothing too.
     Never raises for clipboard trouble, and the user's clipboard is put back unless they copied something new meanwhile."""
     _wait_for_modifiers_released()  # Ctrl+C pressed while the user still holds Alt from the shortcut would be Ctrl+Alt+C
+    settle()  # a dictation's paste puts the user's clipboard back in the background: save theirs, not the dictation
     try:
         with _clipboard():
             saved, before = _snapshot(), _sequence()
@@ -372,6 +374,7 @@ def paste_rich(text: str, html: str | None = None) -> None:
     comes back after RESTORE_DELAY, unless they copied something new meanwhile."""
     items = _items(text, html)
     _wait_for_modifiers_released()  # Ctrl+V pressed while the user still holds Alt would arrive as Ctrl+Alt+V
+    settle()
     with _clipboard():
         saved = _snapshot()
         _put(items + [_NO_HISTORY])
@@ -408,6 +411,7 @@ def set_clipboard(text: str, html: str | None = None) -> None:
     """Put `text` (and, when given, the HTML fragment `html`) on the clipboard for the user to paste themselves: the
     fallback when the result can't go back where the text was. Unlike paste_rich this is a copy the user wants, so it
     replaces theirs for good and is kept in Win+V history. Raises OSError while another app holds the clipboard."""
+    settle()  # or a dictation's restore, still to come, would replace it
     with _clipboard():
         _put(_items(text, html))
 

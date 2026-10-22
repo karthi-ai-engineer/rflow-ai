@@ -3,7 +3,12 @@ import os
 import sys
 from pathlib import Path
 
-__version__ = "2.5.3"  # the one place to change it; the installer and release tags follow it
+# numpy's OpenBLAS starts a thread and reserves its buffers for every core when it loads (+350 MB private memory and
+# 11 threads on a 12-thread laptop). Rflow's numpy work is small (levels, filters, soft shadows); the speech engines
+# (onnxruntime, CTranslate2) bring their own thread pools. Set before anything imports numpy: this module runs first.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
+__version__ = "2.6.0"  # the one place to change it; the installer and release tags follow it
 
 if getattr(sys, "frozen", False):  # the installed app (Rflow.exe / rflow-cli.exe, built by build_installer.cmd)
     MODELS_DIR = Path(sys.executable).parent / "models"

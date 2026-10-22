@@ -13,12 +13,13 @@ custom vocabulary ("vocabulary"): Google offers only one of the two at a time. A
 through the Files API and is deleted afterwards. Whisper models (OpenAI's whisper-1, Groq's) give word times too;
 OpenAI's gpt-transcribe, which replaces its older models (RETIRING), gives none.
 
-Built never to lose a dictation: a connection is opened while the user speaks (prepare), the first-connection stall
-seen on the dev laptop is retried with a short connect timeout, and when the provider can't be reached or fails, the
+Built never to lose a dictation: a connection is opened while the user speaks (prepare), within a few seconds whatever
+the network does (sst.netconnect: the first address that answers), and when the provider can't be reached or fails, the
 recording is transcribed on this computer instead (Parakeet), with a note saying so (`last_error`). A provider that
-couldn't be reached is skipped for a minute, so being offline costs one wait, not one per dictation. The voice
-pipeline's chunks (transcribe_chunk) never fall back here: the pipeline decides. They can be sent two or three at once,
-each on a kept-alive connection of its own.
+couldn't be reached is skipped for a minute, so being offline costs one wait, not one per dictation; one that refused
+the key (no credit, quota used up, key not accepted) is skipped for a few minutes. The voice pipeline's chunks
+(transcribe_chunk) never fall back here: the pipeline decides, and an error marked `permanent` isn't worth a retry.
+They can be sent two or three at once, each on a kept-alive connection of its own.
 """
 import base64
 import difflib
@@ -28,7 +29,6 @@ import io
 import json
 import logging
 import re
-import ssl
 import threading
 import time
 import uuid
@@ -39,14 +39,14 @@ from urllib.parse import urlsplit
 
 import numpy as np
 
+from sst import netconnect
 from sst.audio import TARGET_RATE, condition, resample
 from sst.engines.whisper import LANGUAGES
 from sst.modelrules import gemini_takes_temperature, gemini_thinking
 from sst.pipeline.contracts import RawTranscript, WordInfo
 from sst.pipeline.dictionary import speech_hints
 
-CONNECT_TIMEOUT = 1.5  # a first connection sometimes stalls (seen from Python); a retry gets through in milliseconds
-CONNECT_ATTEMPTS = 3
+CONNECT_BUDGET = netconnect.CONNECT_BUDGET  # seconds to connect, whatever the network does (name lookup included)
 ANSWER_TIMEOUT = 10.0  # seconds, plus ANSWER_PER_SECOND for each second of audio (the upload is 32 KB a second)
 ANSWER_PER_SECOND = 0.5
 DOWN_FOR = 60.0  # after the provider couldn't be reached, go straight to Parakeet this long
@@ -81,7 +81,8 @@ CLOUD = {p.key: p for p in [
     # Explicit ids, not the -latest aliases: gemini-flash-latest moved to 3.5 Flash, the dearest Flash, and
     # gemini-flash-lite-latest's model isn't documented. A name typed in still works.
     CloudProvider("gemini", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta", "gemini",
-                  ("gemini-3.5-transcribe", "gemini-3.5-flash-lite", "gemini-3.6-flash"), "https://aistudio.google.com/apikey"),
+                  ("gemini-3.5-transcribe", "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.5-transcribe-live"),
+                  "https://aistudio.google.com/apikey"),  # -live streams: sst.engines.gemini_stream
 ]}
 
 # Models a provider is shutting down, and the day: still offered, and working, until then (retirement()).
@@ -106,9 +107,13 @@ ECHO_MIN_WORDS = 3  # this many hint words in a row, in the hints' own order, lo
 
 
 class CloudError(Exception):
-    def __init__(self, message: str, status: int = 0):
+    def __init__(self, message: str, status: int = 0, permanent: bool = False, refusal: netconnect.Refusal | None = None,
+                 retry_after: float | None = None):
         super().__init__(message)
         self.status = status  # the HTTP status, when the provider answered
+        self.permanent = permanent or refusal is not None  # asking again now won't help (the pipeline falls back at once)
+        self.refusal = refusal  # no credit, quota used up, key not accepted: remembered (sst.netconnect)
+        self.retry_after = retry_after  # seconds the provider asked to wait before a retry
 
 
 class Unreachable(CloudError):
@@ -198,6 +203,16 @@ class CloudEngine:
     def _mode(self) -> str:
         return "vocabulary" if self.timestamp_mode == "vocabulary" else "timestamps"
 
+    @property
+    def _where(self) -> str:
+        """The provider's host, as sst.netconnect remembers refusals (AI cleanup on the same host and key shares them)."""
+        return f"{self._target[1]}:{self._target[2] or ''}"
+
+    def _refused(self) -> str:
+        """Why the provider refused this key or model a moment ago (sst.netconnect), or ""."""
+        reason = netconnect.refused(self._where, self.api_key, self.model)
+        return f"{reason} (a moment ago)" if reason else ""
+
     def _transcribe_model(self) -> bool:
         """Gemini Transcribe, Google's speech-to-text model (OpenAI's *-transcribe go through OpenAI's transcription API)."""
         return self.provider.api == "gemini" and "transcribe" in self.model
@@ -207,7 +222,7 @@ class CloudEngine:
         target = self._target
         with self._pool:
             self._prune()
-            if time.monotonic() < self._down_until or self._connecting or self._idle:
+            if time.monotonic() < self._down_until or self._connecting or self._idle or self._refused():
                 return
             self._connecting += 1  # counted now: a request made before the thread runs waits for it
         threading.Thread(target=self._prepare, args=(target,), name="cloud-connect", daemon=True).start()
@@ -219,6 +234,8 @@ class CloudEngine:
         try:
             if time.monotonic() < self._down_until:
                 raise CloudError("it couldn't be reached a moment ago")
+            if self._fallback_loader is not None and (refused := self._refused()):  # scoring asks anyway, and waits
+                raise CloudError(refused)
             return self._ask_patiently(wav_bytes(audio16, TARGET_RATE), len(audio16) / TARGET_RATE)
         except TimeoutError:
             reason = "no answer in time"
@@ -247,7 +264,9 @@ class CloudEngine:
         CloudError (.status: the HTTP status, 0 without an answer), OSError or TimeoutError. Thread-safe: chunks may be
         sent at the same time."""
         if time.monotonic() < self._down_until:
-            raise CloudError("it couldn't be reached a moment ago")
+            raise CloudError("it couldn't be reached a moment ago", permanent=True)  # retrying would fail the same way
+        if refused := self._refused():
+            raise CloudError(refused, permanent=True)
         audio16 = resample(condition(audio), sample_rate, TARGET_RATE)
         try:
             return self._ask(wav_bytes(audio16, TARGET_RATE), len(audio16) / TARGET_RATE, timed=True)
@@ -280,7 +299,7 @@ class CloudEngine:
             try:
                 return self.ask(wav, seconds)
             except CloudError as e:
-                if e.status != 429 or not waits:
+                if e.status != 429 or not waits or (e.refusal and not e.refusal.rate_limit):  # a used-up quota: no use
                     raise
                 wait = waits.pop(0)
                 log.info("%s is rate limited; trying again in %d s", self.title, wait)
@@ -318,13 +337,20 @@ class CloudEngine:
 
     def _ask_once(self, wav: bytes, seconds: float, timed: bool, hints: list[str]) -> RawTranscript:
         timeout = ANSWER_TIMEOUT + ANSWER_PER_SECOND * seconds
-        backend = self.title
-        if self._transcribe_model():
-            raw = self._ask_transcribe(wav, timeout, hints)
-        elif self.provider.api == "gemini":
-            raw = self._ask_gemini(wav, timeout, hints)
-        else:
-            raw = self._ask_openai(wav, timeout, timed and self._asks_word_times(), hints)
+        backend, model, key, where = self.title, self.model, self.api_key, self._where
+        try:
+            if self._transcribe_model():
+                raw = self._ask_transcribe(wav, timeout, hints)
+            elif self.provider.api == "gemini":
+                raw = self._ask_gemini(wav, timeout, hints)
+            else:
+                raw = self._ask_openai(wav, timeout, timed and self._asks_word_times(), hints)
+        except CloudError as e:
+            if e.refusal is not None:  # the next chunks and dictations go straight to Parakeet (and AI cleanup's backup)
+                netconnect.refuse(where, key, model, e.refusal)
+                log.warning("%s refused: %s; not asked again for %.0f s", backend, e.refusal.reason, e.refusal.seconds)
+            raise
+        netconnect.forgive(where, key, model)
         raw.text, raw.backend = " ".join(raw.text.split()), backend
         raw.language = raw.language or self.language
         return raw
@@ -339,8 +365,8 @@ class CloudEngine:
         body = json.dumps({"contents": [{"parts": [
             {"inline_data": {"mime_type": "audio/wav", "data": base64.b64encode(wav).decode("ascii")}},
             {"text": instruction}]}], "generationConfig": self._flash_config()}).encode("utf-8")
-        status, data, _ = self._request(f"/models/{self.model}:generateContent", body, self._google(), timeout)
-        answer = _json(status, data)
+        status, data, reply = self._request(f"/models/{self.model}:generateContent", body, self._google(), timeout)
+        answer = _json(status, data, reply)
         parts = ((answer.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
         return RawTranscript("".join(p.get("text", "") for p in parts if isinstance(p, dict) and not p.get("thought")))
 
@@ -382,9 +408,9 @@ class CloudEngine:
             if vocabulary := vocabulary_list(speech_hints(self.words) if hints is None else hints):
                 config["customVocabulary"] = vocabulary
         body = json.dumps({"contents": [{"parts": [audio]}], "generationConfig": {"audioTranscriptionConfig": config}})
-        status, data, _ = self._request(f"/models/{self.model}:generateContent", body.encode("utf-8"), self._google(),
-                                        timeout)
-        return _json(status, data)
+        status, data, reply = self._request(f"/models/{self.model}:generateContent", body.encode("utf-8"), self._google(),
+                                            timeout)
+        return _json(status, data, reply)
 
     def upload_audio(self, wav: bytes, timeout: float) -> dict:
         """The recording into Gemini's Files API (a resumable upload, sent in one piece): the file's {"name", "uri"}."""
@@ -395,7 +421,7 @@ class CloudEngine:
         status, data, reply = self._request(start, json.dumps({"file": {"display_name": "rflow-chunk"}}).encode("utf-8"),
                                             headers, timeout)
         if status != 200:
-            _json(status, data)  # raises with the provider's reason
+            _json(status, data, reply)  # raises with the provider's reason
         address = reply.get("x-goog-upload-url")
         if not address:
             raise CloudError("the Files API gave no upload address", status)
@@ -441,8 +467,8 @@ class CloudEngine:
         if words:
             fields["prompt"] = f"Names and terms: {words}."
         body, content_type = _multipart(fields, "recording.wav", wav)
-        status, data, _ = self._request("/audio/transcriptions", body, {"Content-Type": content_type, **self._auth()},
-                                        timeout)
+        status, data, reply = self._request("/audio/transcriptions", body, {"Content-Type": content_type, **self._auth()},
+                                            timeout)
         if timed and self.name == SERVER.key and status in (400, 422):  # FastAPI-based servers say 422
             # A server that answers only plain JSON: ask again without word times. Once that works, this server and
             # model aren't asked for them again (a 400 for another reason fails the plain request too).
@@ -450,7 +476,7 @@ class CloudEngine:
             self._plain_json.add((self.url, self.model))
             log.info("%s gives no word times (HTTP %d); asking for plain JSON from now on", self.title, status)
             return raw
-        answer = _json(status, data)
+        answer = _json(status, data, reply)
         return RawTranscript(str(answer.get("text") or ""), _words(answer.get("words")) if timed else [],
                              _language_code(answer.get("language")), diagnostics={"format": fields["response_format"]})
 
@@ -515,7 +541,7 @@ class CloudEngine:
     def _checkout(self, target: tuple) -> http.client.HTTPConnection | None:
         """An idle connection to `target`, or None (the caller opens one). One being opened ahead of time is waited
         for rather than opening a second, as when a single connection was kept."""
-        deadline = time.monotonic() + CONNECT_TIMEOUT * CONNECT_ATTEMPTS
+        deadline = time.monotonic() + CONNECT_BUDGET + netconnect.TLS_LEAST
         with self._pool:
             while True:
                 self._prune()
@@ -565,18 +591,10 @@ class CloudEngine:
 
     def _connect(self, target: tuple) -> http.client.HTTPConnection:
         https, host, port, _ = target
-        error: OSError | None = None
-        for _ in range(CONNECT_ATTEMPTS):
-            conn = (http.client.HTTPSConnection(host, port, timeout=CONNECT_TIMEOUT, context=ssl.create_default_context())
-                    if https else http.client.HTTPConnection(host, port, timeout=CONNECT_TIMEOUT))
-            try:
-                conn.connect()
-            except OSError as e:
-                error = e
-                conn.close()
-                continue
-            return conn
-        raise Unreachable(f"cannot reach {host}: {error}")
+        try:
+            return netconnect.http_connection(https, host, port, CONNECT_BUDGET)
+        except OSError as e:  # every address was tried within the budget: asking again now won't do better
+            raise Unreachable(f"cannot reach {host}: {e}", permanent=True) from None
 
 
 def _norm(word: str) -> str:
@@ -732,16 +750,26 @@ def _multipart(fields: dict[str, str], filename: str, data: bytes) -> tuple[byte
     return out.getvalue(), f"multipart/form-data; boundary={boundary}"
 
 
-def _json(status: int, data: str) -> dict:
+def _json(status: int, data: str, headers=None) -> dict:
+    """The answer, or CloudError: one that says no credit, quota used up or key not accepted says so plainly and carries
+    the refusal (sst.netconnect); a short rate limit carries the wait the provider asked for."""
+    found = netconnect.refusal(status, data, headers) if status != 200 else None
     try:
         answer = json.loads(data)
     except ValueError:
+        if found:
+            raise CloudError(f"{found.reason} (HTTP {status})", status, refusal=found) from None
         raise CloudError(f"HTTP {status}, not JSON") from None
+    if isinstance(answer, list) and answer and isinstance(answer[0], dict) and status != 200:
+        answer = answer[0]  # an error wrapped in a list (Google's OpenAI-compatible endpoints)
     if not isinstance(answer, dict):
-        raise CloudError(f"HTTP {status}, an unexpected answer")
+        raise CloudError(f"HTTP {status}, an unexpected answer", refusal=found)
     if status != 200 or "error" in answer:
         error = answer.get("error") or answer.get("message") or data[:120]
         if isinstance(error, dict):
             error = error.get("message") or error
-        raise CloudError(f"HTTP {status} {str(error)[:200]}", status)
+        detail = f"HTTP {status} {str(error)[:200]}"
+        if found:  # said plainly first, the provider's own words after
+            raise CloudError(f"{found.reason} ({detail})", status, refusal=found)
+        raise CloudError(detail, status, retry_after=netconnect.retry_after(data, headers) if status == 429 else None)
     return answer
