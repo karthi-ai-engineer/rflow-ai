@@ -545,3 +545,22 @@ def test_without_a_whole_mix_process_loopback_is_used_alone(monkeypatch):
         raise OSError("no output")
     monkeypatch.setattr(wasapi, "_Stream", no_mix)
     assert wasapi._speakers() is main
+
+
+# ---- Both on speakers: the session needs to know whether the computer plays sound one would hear, and where
+
+def test_the_capture_says_whether_the_output_is_private_and_when_it_last_had_sound_one_would_hear():
+    class Speakers(FakeStream):
+        private = False
+    _, capture = run_capture([Speakers([sine(300, 0.1, 48_000) * 0.3] * 5)], 0.2)
+    assert capture.private is False and capture.heard_at > 0 and capture.sounding(1e9)
+    _, capture = run_capture([FakeStream([sine(300, 0.1, 48_000) * 1e-4] * 5)], 0.2)  # a call's hiss at -80 dBFS
+    assert capture.private is None and capture.heard_at < 0 and not capture.sounding(1.0)
+
+
+def test_the_speakers_capture_reads_whether_the_output_is_headphones(monkeypatch):
+    monkeypatch.setattr(wasapi, "_speakers", lambda: Loopback())
+    monkeypatch.setattr(wasapi, "_Meters", FakeMeters)
+    monkeypatch.setattr(wasapi, "_output_private", lambda: True)
+    stream = Capture.speakers()._opener()
+    assert stream.private is True

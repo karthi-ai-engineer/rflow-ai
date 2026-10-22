@@ -24,8 +24,17 @@ With Both the microphone says nothing of its own silence: the user listening is 
 something a capture found out instead (a device with no sound on it), until words come.
 
 With speaking on, the translation also goes to a Speaker (sst.live.speaker), and a way that could hear the voice gets
-silence while it speaks: the microphone near speakers (not headphones), and what the laptop plays where Windows can't
-leave Rflow's own sound out (before Windows 11). So the spoken translation is never heard and translated again.
+silence while it speaks: the microphone near speakers (not headphones), and what the laptop plays where Rflow's own sound
+can't be left out (before Windows 11, or the output's whole mix when process loopback misses a call, while the voice
+plays on that output). So the spoken translation is never heard and translated again; the meeting's words under the
+voice are lost meanwhile (the mix can't be told apart from the voice in it).
+
+With Both on speakers (the output isn't headphones or a headset), the microphone hears the others' words from the
+speakers, which would be translated as the user's. So the microphone gets silence while the computer plays sound one
+would hear and ECHO_HANGOVER after (the room's echo; the sound reaches the capture before the speakers play it). Gated,
+not echo-cancelled: Windows' echo cancellation is the device's (many microphones have none), comes with communications
+mode, which lowers the other apps by Windows' own setting and treats the room's voices as noise. The user's words while
+the others speak are lost; theirs are translated by the computer's way anyway.
 """
 import logging
 import statistics
@@ -39,6 +48,7 @@ import numpy as np
 from sst.live.contracts import MIC, RATE, SYSTEM, Kind, LiveConfig, LiveEvent, already_in, language_name
 from sst.live.transcript import Transcript
 
+ECHO_HANGOVER = 0.5  # seconds the microphone stays silenced after the speakers played (Both on speakers)
 LISTENING = "Listening…"
 NO_SPEECH = "Hearing sound, but no speech yet"
 NOTHING = {SYSTEM: "Nothing heard yet: is the sound playing on this laptop?", MIC: "Nothing heard from the microphone"}
@@ -82,6 +92,7 @@ class LiveSession:
         self.speaker = None  # speaks the translation aloud (sst.live.speaker), while the user wants it
         self._hearing: dict[str, _Hearing] = {}
         self._lock = threading.Lock()  # the notes: frames come on the capture's thread, events on the engine's
+        self._gated = False  # the microphone was silenced for the speakers' sound (said once in the log)
 
     @property
     def running(self) -> bool:
@@ -162,8 +173,23 @@ class LiveSession:
             if speaker is not None and speaker.speaking and (
                     not speaker.private if lane == MIC else getattr(capture, "hears_self", False)):
                 frame = bytes(len(frame))
+            elif lane == MIC and self._speakers_heard():
+                frame = bytes(len(frame))
             engine.feed(frame)
         return feed
+
+    def _speakers_heard(self) -> bool:
+        """With Both, the computer plays through speakers (not headphones) and had sound just now: the microphone may
+        be hearing it."""
+        system = self.lanes.get(SYSTEM)
+        if self.config.source != "both" or system is None or getattr(system[0], "private", None) is not False:
+            return False
+        if not system[0].sounding(ECHO_HANGOVER):
+            return False
+        if not self._gated:
+            self._gated = True
+            log.info("Live captions: Both on speakers: the microphone is silenced while the computer plays sound")
+        return True
 
     # -- the status line
 

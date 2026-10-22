@@ -7,14 +7,18 @@ before the 16-bit frames are made: turned far down, it would otherwise be lost i
     Capture.speakers()    everything the laptop plays except Rflow's own sound: Windows' process loopback, leaving out
                           this process, so the spoken translation isn't heard and translated again. Windows without it
                           (before Windows 11 / build 20348) get the default output's whole mix, and `hears_self` says
-                          Rflow's voice is in it. Process loopback follows the default output; a call often plays on
-                          another device, Windows' default output for calls (a Bluetooth headset's "Hands-Free"
-                          endpoint): while something plays there, that device is captured too (endpoint loopback) and
-                          mixed in. Rflow's voice plays on the default output, so it isn't in that one
+                          Rflow's voice is in it. Process loopback is compared with that whole mix the whole time
+                          (_Checked): while it misses what plays (a Teams call on Bluetooth earbuds), the mix is used.
+                          Process loopback follows the default output; a call often plays on another device, Windows'
+                          default output for calls (a Bluetooth headset's "Hands-Free" endpoint): while something plays
+                          there, that device is captured too (endpoint loopback) and mixed in. Rflow's voice plays on
+                          the default output, so it isn't in that one. `private`: that output is headphones, and
+                          sounding(s) says it played sound one would hear (for Both on speakers, sst.live.session)
     Capture.microphone()  the microphone chosen in Rflow (Settings.microphone, by name), else Windows' default one,
                           else its default for calls; opened raw where the device allows it (no echo cancellation or
                           noise suppression made for one close talker: a room's voices come through), else in its
-                          default mode, never in communications mode
+                          default mode, never in communications mode (with Both on speakers the session silences it
+                          while the speakers play instead)
     -> IAudioClient -> its format (usually 48 kHz float; process loopback is asked for 16 kHz mono and converts) ->
     mono (the channels' average, or the loudest channel where they cancel out) -> 16 kHz (a box filter, then
     interpolation; state kept across packets) -> its level (quiet sound raised; the microphone's noise floor kept down)
@@ -55,6 +59,7 @@ CHECK_DEVICE_EVERY = 2.0  # seconds between looks at which device is the default
 POLL_EVERY = 1.0  # seconds between looks at the output devices' meters
 MUTED_AFTER = 3.0  # seconds without any sound from the computer before Windows' mute is looked at
 SOUND = 1e-7  # a sample above this (-140 dBFS) is sound, however quiet: float keeps it
+AUDIBLE = 10 ** (-50 / 20)  # an RMS above this (-50 dBFS) before it's raised: speech one would hear, not a call's hiss
 MUTED = "Windows' sound is muted, so live translation hears nothing. Unmute it: a low volume is fine."
 _BUFFER = 2_000_000  # 200 ms, in 100 ns units: WASAPI's buffer, read every 10 ms
 
@@ -439,6 +444,21 @@ def _initialize(client, flags: int, fmt) -> None:
 def _private(device) -> bool:
     """The device is headphones or a headset (its form factor): a microphone can't hear what it plays."""
     return _property(device, _FORM_FACTOR) in _PRIVATE
+
+
+def _output_private() -> bool:
+    """Windows' default output is headphones or a headset (False when it can't be told: speakers, a microphone may
+    hear them). COM must be set up on the calling thread."""
+    enumerator, device = c_void_p(), c_void_p()
+    try:
+        enumerator = _enumerator()
+        device = _default_device(enumerator, E_RENDER, E_CONSOLE)
+        return _private(device)
+    except OSError:
+        return False
+    finally:
+        _release(device)
+        _release(enumerator)
 
 
 _QI = ctypes.WINFUNCTYPE(c_long, c_void_p, POINTER(_GUID), POINTER(c_void_p))
@@ -949,8 +969,8 @@ class _Speakers:
     voice plays on the default output (Player), never there: `hears_self` is main's. poll(now), about once a second,
     looks at the meters and says (a message, "" when it's over, None for no change) when the sound may be elsewhere."""
 
-    def __init__(self, main, meters: Callable | None = None, open_call: Callable | None = None):
-        self.main = main
+    def __init__(self, main, meters: Callable | None = None, open_call: Callable | None = None, private: bool = False):
+        self.main, self.private = main, private  # private: the default output is headphones (no microphone hears it)
         self._open_call = open_call or (lambda: _Stream(E_RENDER, E_COMMUNICATIONS))
         self.rate, self.channels, self.bits, self.is_float = main.rate, main.channels, main.bits, main.is_float
         self.device_id = getattr(main, "device_id", "")
@@ -1062,7 +1082,8 @@ class Capture:
     quiet sound is raised (True: as the computer's; or a function making a Leveler). `on_problem(message)`, if set,
     hears why nothing can be captured (muted). `on_note(message)`, if set, hears a hint about where the sound may be
     instead (another output device playing while nothing is heard), and "" once it no longer applies; called from the
-    capture's thread."""
+    capture's thread. `private`: the output captured is headphones or a headset (None: not known, or a microphone);
+    sounding(seconds): what's captured had sound at a level one would hear in the last `seconds` (before it's raised)."""
 
     def __init__(self, opener: Callable = _Stream, clock: Callable[[], float] = time.monotonic,
                  what: str = "output device", level: bool | Callable[[], Leveler] = False, highpass: bool = False):
@@ -1071,13 +1092,15 @@ class Capture:
         self._thread: threading.Thread | None = None
         self.device_rate = 0  # the device's own rate, once opened (for the log)
         self.hears_self = False
+        self.private: bool | None = None
+        self.heard_at = -1e9  # self._clock() when sound one would hear was last captured
         self.on_problem: Callable[[str], None] | None = None
         self.on_note: Callable[[str], None] | None = None
         self._notice = ""
 
     @classmethod
     def speakers(cls) -> "Capture":
-        return cls(lambda: _Speakers(_speakers()), what="output device", level=True)
+        return cls(lambda: _Speakers(_speakers(), private=_output_private()), what="output device", level=True)
 
     @classmethod
     def microphone(cls, wanted: str | Callable[[], str] = "") -> "Capture":
@@ -1117,6 +1140,7 @@ class Capture:
                     self._stop.wait(1.0)
                     continue
                 self.device_rate, self.hears_self = stream.rate, getattr(stream, "hears_self", False)
+                self.private = getattr(stream, "private", None)
                 if first:
                     first = False
                     opened.set()
@@ -1134,6 +1158,9 @@ class Capture:
                     self._tell("")  # a hint about the old device no longer applies
         finally:
             ctypes.WinDLL("ole32").CoUninitialize()
+
+    def sounding(self, seconds: float) -> bool:
+        return self._clock() - self.heard_at < seconds
 
     def _tell(self, notice: str) -> None:
         if notice != self._notice:
@@ -1157,6 +1184,8 @@ class Capture:
                 samples = resample(np.concatenate(packets))
                 if rumble is not None:
                     samples = rumble(samples)
+                if len(samples) and _energy(samples) >= AUDIBLE * AUDIBLE * len(samples):
+                    self.heard_at = now
                 if level is not None:
                     if len(samples) and float(np.max(np.abs(samples))) > SOUND:
                         sound_at, told = now, False

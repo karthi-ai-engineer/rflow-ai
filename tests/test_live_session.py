@@ -341,3 +341,56 @@ def test_the_speaker_hears_what_is_shown_and_stops_with_the_session(tmp_path, ca
     session.stop()
     assert speaker.stopped and session.speaker is None
     assert "The voice said 7 sentences (1 skipped to keep up); the voice skipped a repeat 3 times" in caplog.text
+
+
+# ---- Both on speakers: the microphone hears the others' words from the speakers (#201)
+
+class Speakers(FakeCapture):
+    def __init__(self, private, sounding):
+        super().__init__()
+        self.private, self._sounding, self.asked = private, sounding, []
+
+    def sounding(self, seconds):
+        self.asked.append(seconds)
+        return self._sounding
+
+
+@pytest.mark.parametrize(("private", "sounding", "silenced"), [
+    (False, True, True),  # the speakers play the meeting: the microphone hears it, not the user
+    (False, False, False),  # the speakers are quiet: the user's words
+    (True, True, False),  # headphones: the microphone can't hear them
+    (None, True, False),  # not known (no output read): left as it was
+])
+def test_with_both_on_speakers_the_microphone_is_silenced_while_the_computer_plays(private, sounding, silenced):
+    session = LiveSession(LiveConfig(source="both"))
+    speakers = Speakers(private, sounding)
+    session.add(SYSTEM, speakers, FakeEngine)
+    session.add(MIC, FakeCapture(), FakeEngine)
+    session.lanes[MIC][0].on_frame(b"\x01\x02" * 1600)
+    assert engine(session, MIC).frames == [bytes(3200) if silenced else b"\x01\x02" * 1600]
+    speakers.on_frame(b"\x01\x02" * 1600)
+    assert engine(session, SYSTEM).frames == [b"\x01\x02" * 1600]  # the computer's way is never gated
+    if silenced:
+        assert speakers.asked == [pytest.approx(0.5)]
+
+
+def test_the_microphone_alone_is_never_gated():
+    session = LiveSession(LiveConfig(source="microphone"))
+    session.add(MIC, FakeCapture(), FakeEngine)
+    session.lanes[MIC][0].on_frame(b"\x01\x02" * 1600)
+    assert engine(session, MIC).frames == [b"\x01\x02" * 1600]
+
+
+def test_the_ducker_is_told_whether_the_computer_is_translated():
+    class Ducking(FakeSpeaker):
+        def __init__(self):
+            super().__init__()
+            self.ducker = type("D", (), {"captured": staticmethod(lambda: False)})()
+    session, speaker = LiveSession(LiveConfig(source="both")), Ducking()
+    session.set_speaker(speaker)
+    session.add(MIC, FakeCapture(), FakeEngine)
+    assert not speaker.ducker.captured()
+    session.add(SYSTEM, FakeCapture(), FakeEngine)
+    assert speaker.ducker.captured()
+    session.remove(SYSTEM)
+    assert not speaker.ducker.captured()
