@@ -296,11 +296,11 @@ def test_starting_with_the_voice_is_off_until_switched_on_next_to_the_dictation_
     assert not card.toggle.isChecked() and card.details.isHidden()
     card.toggle.setChecked(True)
     assert ("set_wake_enabled", True) in app.calls and app.settings.wake_enabled and not card.details.isHidden()
-    assert not card.models.isHidden() and card.download.text() == "Download (46 MB)"  # the models come first
+    assert not card.models.isHidden() and card.download.text() == "Download (58 MB)"  # the models come first
     assert not card.setup.isEnabled() and card.setup.text() == "Set up" and "Not set up yet" in card.keyword.text()
     card.download.click()
     assert ("download_wake_models",) in app.calls
-    app._wake = w.WakeState(models="downloading", percent=40, size=45_800_000)
+    app._wake = w.WakeState(models="downloading", percent=40, size=57_900_000)
     card.refresh()
     assert card.download.isHidden() and not card.cancel.isHidden() and "40%" in card.models_caption.text()
     assert card.lamp.state == "warn" and "40%" in card.status.text()

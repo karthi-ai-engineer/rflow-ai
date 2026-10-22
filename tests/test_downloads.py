@@ -108,12 +108,51 @@ def test_an_answer_from_the_server_is_not_retried(server, tmp_path):
     assert len(server.requests) == 1
 
 
-def test_only_hugging_face_servers_are_accepted():
+def test_only_hugging_face_servers_and_k2_fsas_releases_are_accepted():
     assert downloads.allowed("https://huggingface.co/dropbox-dash/x/resolve/abc/model.bin")
     assert downloads.allowed("https://us.aws.cdn.hf.co/xet-bridge/abc")
     assert downloads.allowed("https://cdn-lfs.huggingface.co/repos/abc")
     assert not downloads.allowed("https://example.com/model.bin")
     assert not downloads.allowed("https://huggingface.co.evil.example/model.bin")
+    assert downloads.allowed("https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/x.tar.bz2")
+    assert downloads.allowed("https://release-assets.githubusercontent.com/github-production-release-asset/1/2")
+    assert not downloads.allowed("https://github.com/someone/sherpa-onnx/releases/download/kws-models/x.tar.bz2")
+    assert not downloads.allowed("https://github.com/k2-fsa/sherpa-onnx/archive/main.zip")
+    assert not downloads.allowed("http://release-assets.githubusercontent.com/x")
+
+
+def _archive(top: str, members: dict[str, bytes]) -> bytes:
+    import io
+    import tarfile
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w:bz2") as tar:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name if name.startswith(("..", "/")) else f"{top}/{name}")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return out.getvalue()
+
+
+def test_a_model_published_as_an_archive_keeps_only_its_own_files_checked(server, tmp_path):
+    # Only the pinned files are read out, by their own names; nothing else in the archive (a path climbing out of the
+    # folder, a test recording) is written anywhere, and the archive is deleted once they're out.
+    packed = _archive("kws", {"a.onnx": b"model" * 100, "tokens.txt": b"x 1", "test.wav": b"RIFF", "../evil.txt": b"!"})
+    FILES["kws.tar.bz2"] = packed
+    try:
+        files = (ModelFile("a.onnx", 500, hashlib.sha256(b"model" * 100).hexdigest()),
+                 ModelFile("tokens.txt", 3, hashlib.sha256(b"x 1").hexdigest()))
+        model = Download("kws", server.url, files, ModelFile("kws.tar.bz2", len(packed), hashlib.sha256(packed).hexdigest()))
+        seen = []
+        folder = downloads.download(model, lambda done, total: seen.append((done, total)), root=tmp_path)
+        assert model.installed(tmp_path) and (folder / "a.onnx").read_bytes() == b"model" * 100
+        assert sorted(p.name for p in folder.iterdir()) == ["a.onnx", "complete.json", "tokens.txt"]
+        assert not (tmp_path / "evil.txt").exists() and seen[-1] == (len(packed), len(packed))
+        bad = Download("bad", server.url, (ModelFile("a.onnx", 500, "0" * 64),), model.archive)
+        with pytest.raises(downloads.DownloadError, match="damaged"):
+            downloads.download(bad, root=tmp_path)
+        assert not bad.installed(tmp_path) and (bad.path(tmp_path) / "kws.tar.bz2").exists()  # kept for the next try
+    finally:
+        del FILES["kws.tar.bz2"]
 
 
 def test_removing_a_model_frees_its_folder(server, tmp_path):

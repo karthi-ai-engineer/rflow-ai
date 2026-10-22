@@ -20,13 +20,18 @@ FIXTURE = Path(__file__).parent / "fixtures" / "wake"
 
 @pytest.mark.parametrize("model", [KWS, VOICE])
 def test_each_model_is_pinned_and_checked(model):
-    assert downloads.allowed(model.base_url) and re.search(r"/resolve/[0-9a-f]{40}/$", model.base_url)
-    assert all(f.size > 0 and re.fullmatch(r"[0-9a-f]{64}", f.sha256) for f in model.files)
+    # From their makers: k2-fsa's own release (an archive), or the sherpa-onnx author's Hugging Face repository
+    assert downloads.allowed(model.base_url)
+    assert (model.base_url.startswith(downloads.K2_RELEASES) if model.archive else
+            re.match(r"https://huggingface\.co/csukuangfj/[^/]+/resolve/[0-9a-f]{40}/$", model.base_url))
+    pinned = (*model.files, model.archive) if model.archive else model.files
+    assert all(f.size > 0 and re.fullmatch(r"[0-9a-f]{64}", f.sha256) for f in pinned)
 
 
 def test_the_spotter_is_small_and_the_voice_model_is_titanet_small():
     assert {f.name for f in KWS.files} == {models.ENCODER, models.DECODER, models.JOINER, models.TOKENS, models.BPE}
-    assert KWS.size < 7_000_000 and VOICE.files[0].name == "nemo_en_titanet_small.onnx"
+    assert sum(f.size for f in KWS.files) < 7_000_000 and KWS.size < 18_000_000  # kept, and downloaded
+    assert VOICE.files[0].name == "nemo_en_titanet_small.onnx"
 
 
 def test_install_downloads_the_spotter_then_the_voice_model(monkeypatch, tmp_path):

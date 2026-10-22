@@ -1,12 +1,11 @@
-"""The wake word's two models, downloaded when the user turns the wake word on (sst.downloads: pinned, checked, Hugging
-Face only), never bundled:
+"""The wake word's two models, downloaded when the user turns the wake word on (sst.downloads: pinned, checked), from
+their makers, never bundled:
 
-    KWS    k2-fsa's keyword spotter sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01 (Apache-2.0): int8 encoder and
-           joiner, the float decoder, tokens.txt and bpe.model (6.3 MB). k2-fsa publish it only as a .tar.bz2 on GitHub,
-           which sst.downloads neither fetches nor unpacks; these are the same files, byte for byte (each SHA-256
-           checked against that archive, itself checked against k2-fsa's kws-checksum.txt), from a Hugging Face copy.
+    KWS    k2-fsa's keyword spotter sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01 (Apache-2.0), from k2-fsa's own
+           GitHub release, the only place they publish it: the archive (17.6 MB) is pinned, and five of its files are
+           kept (6.3 MB): the int8 encoder and joiner, the float decoder, tokens.txt and bpe.model.
     VOICE  NVIDIA's TitaNet-small speaker model as sherpa-onnx's ONNX export (NeMo toolkit licence, Apache-2.0; 40 MB),
-           from the sherpa-onnx author's copy: the voice check.
+           from the copy of sherpa-onnx's author (the same file as k2-fsa's release): the voice check.
 
 sherpa-onnx's C++ checks end the whole process on a missing or damaged file, so a folder is checked (every file there,
 at its size) before sherpa-onnx is given it: check().
@@ -16,10 +15,11 @@ from pathlib import Path
 
 from sst.downloads import Download, ModelFile, download
 
-KWS_REVISION = "e8ca74a794ce66e38a100e7c60c0214189ff4100"
+KWS_ARCHIVE = ModelFile("sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2", 17626723,
+                        "f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a")
 KWS = Download(
     "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01",
-    f"https://huggingface.co/mobilebytesensei/sherpa-onnx-kws-zipformer-gigaspeech-3.3M/resolve/{KWS_REVISION}/", (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/", (
         ModelFile("encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx", 4807159,
                   "1e721676515bcd42a186979733981213c66c80db680e1cc582dfedf3be76e678"),
         ModelFile("decoder-epoch-12-avg-2-chunk-16-left-64.onnx", 1063189,
@@ -28,7 +28,7 @@ KWS = Download(
                   "eae9da0c7e1e6c6a3f4cc42d167899c388f6c6701b94cb96320e4f55df79624c"),
         ModelFile("tokens.txt", 5006, "fd2ded4050a55d2b1578870ba8697d02371980217806b7558bd0a5cc60f3ba53"),
         ModelFile("bpe.model", 244837, "c8a2a0129c4ab8e463164c142f82d25649661b122c8cd0b7aab5c9e80b90ad24"),
-    ))
+    ), KWS_ARCHIVE)
 ENCODER, DECODER, JOINER, TOKENS, BPE = (f.name for f in KWS.files)
 
 VOICE_REVISION = "0743f301363dec56491a490f6d6cbc9d67f9a3bf"

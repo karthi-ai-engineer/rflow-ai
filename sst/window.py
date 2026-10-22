@@ -7266,7 +7266,7 @@ class PreviewApp:
     _wake: WakeState | None = None  # the wake word as the card shows it, for screenshots and tests
 
     def wake_state(self) -> WakeState:
-        return self._wake or WakeState(size=45_800_000)
+        return self._wake or WakeState(size=57_900_000)
 
     def set_wake_enabled(self, on: bool) -> None:
         self.calls.append(("set_wake_enabled", on))

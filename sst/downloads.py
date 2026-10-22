@@ -4,13 +4,16 @@ Each model is a fixed list of files at a pinned revision, with each file's size 
 its checksum matches, and the model only counts as installed when every file is there (a marker file is written
 last). A broken connection resumes where it stopped; the first connection, which stalls on some laptops, is retried;
 and the user can cancel at any time (the part already downloaded stays for next time). Only Hugging Face's own
-servers are accepted after redirects.
+servers are accepted after redirects, and k2-fsa's GitHub releases (sherpa-onnx's own models, which they publish only
+as archives): such a model's archive is pinned and checked like a file, then only the model's files are read out of it,
+by their own names (no path in the archive is used), each checked again, and the archive is deleted.
 """
 import hashlib
 import http.client
 import json
 import logging
 import shutil
+import tarfile
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -24,6 +27,8 @@ ATTEMPTS = 4  # per request: the first connection sometimes stalls, the next get
 ATTEMPT_TIMEOUT = 15.0  # seconds to connect, and for each read
 CHUNK = 1 << 20
 MARKER = "complete.json"
+K2_RELEASES = "https://github.com/k2-fsa/sherpa-onnx/releases/download/"  # sherpa-onnx's makers' own releases
+GITHUB_ASSETS = {"release-assets.githubusercontent.com", "objects.githubusercontent.com"}  # where those redirect
 
 log = logging.getLogger(__name__)
 
@@ -48,10 +53,13 @@ class Download:
     folder: str  # its folder in DOWNLOADS_DIR
     base_url: str  # each file is base_url + its name
     files: tuple[ModelFile, ...]
+    # Or the files are in this archive (base_url + its name, a .tar.bz2 whose top folder is named like it)
+    archive: ModelFile | None = None
 
     @property
     def size(self) -> int:
-        return sum(f.size for f in self.files)
+        """The bytes to download."""
+        return self.archive.size if self.archive else sum(f.size for f in self.files)
 
     def path(self, root: Path | None = None) -> Path:
         return (root or DOWNLOADS_DIR) / self.folder
@@ -64,8 +72,10 @@ class Download:
 
 
 def allowed(url: str) -> bool:
-    host = (urlsplit(url).hostname or "").lower()
-    return host == "huggingface.co" or host.endswith(".huggingface.co") or host.endswith(".hf.co")
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    return (host == "huggingface.co" or host.endswith(".huggingface.co") or host.endswith(".hf.co")
+            or url.startswith(K2_RELEASES) or (parts.scheme == "https" and host in GITHUB_ASSETS))
 
 
 def download(model: Download, progress: Callable[[int, int], None] = lambda done, total: None,
@@ -76,18 +86,59 @@ def download(model: Download, progress: Callable[[int, int], None] = lambda done
     if model.installed(root):
         return folder
     folder.mkdir(parents=True, exist_ok=True)
-    done = sum(f.size for f in model.files if _verified(folder / f.name, f))
-    progress(done, model.size)
-    for f in model.files:
-        target = folder / f.name
-        if _verified(target, f):
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)  # a file in a subfolder (a voice's "lang/gmw/en-US")
-        done = _fetch(model.base_url + f.name, target, f, done, model.size, progress, cancelled)
+    if model.archive is not None:
+        _from_archive(model, folder, progress, cancelled)
+    else:
+        done = sum(f.size for f in model.files if _verified(folder / f.name, f))
+        progress(done, model.size)
+        for f in model.files:
+            target = folder / f.name
+            if _verified(target, f):
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)  # a file in a subfolder (a voice's "lang/gmw/en-US")
+            done = _fetch(model.base_url + f.name, target, f, done, model.size, progress, cancelled)
     (folder / MARKER).write_text(json.dumps({"files": [f.name for f in model.files], "version": __version__}),
                                  encoding="utf-8")
     log.info("Downloaded %s (%d MB)", model.folder, model.size // 2**20)
     return folder
+
+
+def _from_archive(model: Download, folder: Path, progress, cancelled) -> None:
+    """The model's files out of its archive (see the module's notes). The archive stays until every file is out, so a
+    failure halfway needs no second download."""
+    packed, top = folder / model.archive.name, model.archive.name.removesuffix(".tar.bz2")
+    if not all(_verified(folder / f.name, f) for f in model.files):
+        if not _verified(packed, model.archive):
+            progress(0, model.size)
+            _fetch(model.base_url + model.archive.name, packed, model.archive, 0, model.size, progress, cancelled)
+        try:
+            with tarfile.open(packed, "r:bz2") as tar:
+                for f in model.files:
+                    target = folder / f.name
+                    if not _verified(target, f):
+                        _unpack(tar, f"{top}/{f.name}", target, f)
+        except (tarfile.TarError, EOFError, OSError) as e:  # checked, yet unreadable: a disk problem
+            raise DownloadError(f"couldn't unpack {model.archive.name}: {e}") from None
+    progress(model.size, model.size)
+    packed.unlink(missing_ok=True)
+
+
+def _unpack(tar: tarfile.TarFile, name: str, target: Path, f: ModelFile) -> None:
+    """One file read out of the archive by its own name, into target (never a path from the archive), checked."""
+    try:
+        member = tar.getmember(name)
+    except KeyError:
+        member = None
+    if member is None or not member.isfile() or member.size != f.size:
+        raise DownloadError(f"{f.name} isn't in the archive as expected")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_name(target.name + ".part")
+    with tar.extractfile(member) as source, partial.open("wb") as out:
+        shutil.copyfileobj(source, out, CHUNK)
+    if _sha256(partial) != f.sha256:
+        partial.unlink()
+        raise DownloadError(f"{f.name} arrived damaged (checksum mismatch); try again")
+    partial.replace(target)
 
 
 def remove(model: Download, root: Path | None = None) -> None:
