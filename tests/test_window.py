@@ -110,6 +110,37 @@ def test_building_and_opening_the_window_flashes_no_other_window():
     assert spy.shown == []
 
 
+def test_pages_are_built_when_first_wanted_as_the_window_is_then(monkeypatch):
+    """Building all fifteen pages took 3-5 s and 107 MB at every start: Home (and the welcome) now, the rest when used.
+    A page built after the theme, the window's width or the app's settings changed is as if it had been there all along."""
+    window, _ = _window(settings=Settings())
+    assert set(window.pages.built) == {"home", "welcome"}
+    monkeypatch.setattr(w, "dark_mode", lambda: False)
+    born_light, _ = _window(settings=Settings(welcomed=True, hotkey="menu"))  # light and "menu" from the start
+    early = born_light.pages["settings"]  # built in light (the theme is global: before the next window sets dark)
+    monkeypatch.setattr(w, "dark_mode", lambda: True)
+    window, app = _window()
+    assert set(window.pages.built) == {"home"} and len(window.pages) == 15 and "settings" in window.pages
+    assert list(window.pages)[:3] == ["home", "dictionary", "snippets"]
+    for win in (window, born_light):
+        win.open("home")
+        win.resize(820, 600)  # narrow: the pages' tighter margins
+        win.set_update_status("Rflow is up to date.")
+        win.set_status("Ready: hold Ctrl+Win", True)
+    window.apply_theme("light")
+    app.settings = dataclasses.replace(app.settings, hotkey="menu")  # e.g. another profile's settings
+    window.show_page("settings")
+    born_light.show_page("settings")
+    page = window.pages["settings"]
+    assert "settings" in window.pages.built and window.current_page() == "settings" and window.pages["home"].ready
+    assert page.update_status.text() == "Rflow is up to date." and page.hotkey.currentData() == "menu"
+    assert page.body.contentsMargins().left() == early.body.contentsMargins().left() == 24
+    assert page.grab().toImage() == early.grab().toImage()  # in the theme in use, icons and all
+    for win in (window, born_light):
+        win.hide()
+    window.apply_theme("dark")
+
+
 def test_pages_one_level_down_lead_back():
     window, _ = _window()
     window.show_page("speech")
@@ -148,6 +179,33 @@ def test_home_shows_the_stats_and_the_dictations_by_day():
     assert not home.hero_keys.isHidden() and home.hero_keys.accessibleName().startswith("Hold Ctrl+Win and talk")
     assert [cap.key_text for cap in home.hero_keys.findChildren(KeyCap)] == ["Ctrl", "Win"]  # drawn as keys
     assert home.orb.state == "ready" and window.status_title.text() == "Ready"
+
+
+def test_the_orb_moves_only_while_listening_or_cleaning_up():
+    """Each orb frame repaints the soft surfaces under it too: a breathing "ready" cost half a core while Home was open."""
+    from sst.ui import Orb
+    window, app = _window()
+    app.speech_in_use = lambda: "parakeet"
+    window.open("home")
+    window.set_status("Ready: hold Ctrl+Win", True)
+    home = window.pages["home"]
+    assert home.orb.state == "ready" and home.orb.isVisible() and not home.orb.animating
+    window.hide()
+    orb = Orb()
+    orb.show()
+    for state in ("ready", "off", "loading", "done"):
+        orb.set_state(state, 0.5)
+        assert not orb.animating, state
+    for state in ("live", "ai"):
+        orb.set_state(state)
+        assert orb.animating, state
+    orb.hide()
+    assert not orb.animating
+    orb.show()
+    assert orb.animating  # still listening when shown again
+    orb.set_state("ready")
+    assert not orb.animating and not orb.grab().isNull()
+    orb.hide()
 
 
 def test_home_explains_what_to_do_before_the_first_dictation():
@@ -917,6 +975,7 @@ def test_the_mouse_wheel_never_changes_a_dropdown_anywhere():
     from PySide6.QtGui import QWheelEvent
     from PySide6.QtWidgets import QComboBox
     window, _ = _window()
+    list(window.pages.values())  # every page built (they are built when first shown)
     boxes = window.findChildren(QComboBox)
     assert boxes and all(isinstance(box, w.Choice) for box in boxes)  # every page, every dropdown
     box = window.pages["speech"].in_use.language
