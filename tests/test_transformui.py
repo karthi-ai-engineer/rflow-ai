@@ -86,6 +86,12 @@ class FakeAccess:
 class FakeListener:
     def __init__(self, hotkey):
         self.hotkey, self.events, self.captured, self.running = hotkey, queue.Queue(), None, False
+        self.on_event = None
+
+    def send(self, event):
+        """As the keyboard hook does: queue the event, then wake the controller up (it polls nothing)."""
+        self.events.put((event, 0.0))
+        self.on_event()
 
     def start(self):
         self.running = True
@@ -149,8 +155,19 @@ def wait_until(condition, ms=2000):
 
 
 def open_menu(controller):
-    controller.listener.events.put(("release", 0.0))
+    controller.listener.send("release")
     assert wait_until(lambda: controller.menu.isVisible() or controller.app.said)
+
+
+def test_nothing_runs_while_waiting_for_the_shortcut(qt):
+    """Rflow sits in the tray all day: Text Transform wakes up for its shortcut's events, it never polls for them."""
+    from PySide6.QtCore import QTimer
+    controller, _, _ = make(selection="Some text")
+    assert controller.listener.on_event is not None
+    assert not any(timer.isActive() for timer in controller.findChildren(QTimer))
+    open_menu(controller)  # the event alone opened the menu
+    assert controller.menu.isVisible()
+    controller.menu.close_menu()
 
 
 def test_selected_text_is_transformed_and_replaced(qt):
@@ -159,7 +176,7 @@ def test_selected_text_is_transformed_and_replaced(qt):
     menu = controller.menu
     assert [label for _, _, label in menu.items] == ["Concise", "Professional", "Bullet points", "Action items"]
     assert menu.source.startswith("Selected text") and controller.listener.captured == MENU_KEYS
-    controller.listener.events.put(("key:49", 0.0))  # 1: Concise
+    controller.listener.send("key:49")  # 1: Concise
     assert wait_until(lambda: access.pasted)
     assert access.pasted == [(" " + CONCISE + "\n", f"<p>{CONCISE}</p>")]  # the text's own spaces kept around it
     assert app.asked == [("concise", ORIGINAL)] and app.remembered == [(CONCISE, ORIGINAL)]

@@ -396,6 +396,7 @@ class TranslateController(QObject):
     _got = Signal(object)  # (text, window) or why there is none (str), from the reading thread
     _done = Signal(object)  # (request number, Translation or error str), from the translating thread
     _placed = Signal(str)  # what happened to Replace, from the pasting thread
+    _key = Signal()  # the shortcut's listener queued an event, from the keyboard hook's thread
 
     def __init__(self, app, access=None, listener_factory=HotkeyListener):
         super().__init__()
@@ -417,9 +418,11 @@ class TranslateController(QObject):
         self._got.connect(self._show)
         self._done.connect(self._finish)
         self._placed.connect(self._after_replace)
-        self.pump = QTimer(self)
-        self.pump.setInterval(15)
-        self.pump.timeout.connect(self._pump)
+        self._key.connect(self._pump)  # queued from the hook's thread: nothing runs here between keys
+        # Only while the popup is open: it closes when the user goes to another app or clicks outside it.
+        self.watch = QTimer(self)
+        self.watch.setInterval(15)
+        self.watch.timeout.connect(self._watch_popup)
         self.reading = False  # the copied text is being read
         self.request = 0  # each translation's number: an answer to an older one is dropped
         self.source: tuple[str, int] | None = None  # (the text, its window) the popup is for
@@ -433,18 +436,18 @@ class TranslateController(QObject):
         try:
             hotkey = parse_hotkey(shortcut)
             self.listener = self._listener_factory(hotkey)
+            self.listener.on_event = self._key.emit
             self.listener.start()
         except (ValueError, OSError) as e:
             log.warning("Translate's shortcut %r doesn't work: %s", shortcut, e)
             self.listener = None
             return
         self.double_copy = hotkey.double and hotkey.key is not None
-        self.pump.start()
         log.info("Translate on %s", shortcut)
 
     def stop(self) -> None:
-        self.pump.stop()
         self.popup.close_popup()
+        self.watch.stop()
         if self.listener is not None:
             self.listener.stop()
             self.listener = None
@@ -462,7 +465,12 @@ class TranslateController(QObject):
                     self.trigger()
                 elif event.startswith("key:"):
                     self.popup.key(int(event[4:]))  # Esc, and C (Copy) and Enter (Replace, Try again) when they're there
-        if self.popup.isVisible() and self.source:
+
+    def _watch_popup(self) -> None:
+        if not self.popup.isVisible():
+            self.watch.stop()
+            return
+        if self.source:
             front = self.access.foreground_window()
             if front not in (self.source[1], 0) and self.access.window_process(front) != os.getpid():
                 self.popup.close_popup()  # the user went to another app: the popup was for the text left behind
@@ -515,6 +523,7 @@ class TranslateController(QObject):
         self._held = True
         self.popup.open_at(_pointer(), text, choose_target(text, s.translate_to, second),
                            self._choices(language, second), language)
+        self.watch.start()
         self._take_keys()
         if not self.app.translate_ready():
             self.popup.show_setup()
