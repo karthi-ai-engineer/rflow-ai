@@ -46,7 +46,7 @@ FRAME = TARGET_RATE // 10  # the spotter's 100 ms frames
 # spike), so the words said right after it are in the recording. The voice pipeline trims the rest back to the
 # speech running into the start (sst.pipeline.audio_stream.trim_preroll).
 PREROLL = 2.0
-QUEUE_BLOCKS = 1000  # ~10 s of the microphone's blocks; more means the listener is stuck, and blocks are dropped
+QUEUE_BLOCKS = 1000  # ~50 s of the microphone's 50 ms blocks; more means the listener is stuck: blocks are dropped
 CHECK_EVERY = 3.0  # seconds between looks at whether the microphone listened to is still open and still the right one
 SUGGESTIONS = ("okay type", "computer")  # heard best in the spike (94.5% and 90.9%); "Rflow" alone 74.5%
 BLUETOOTH = ("Your Bluetooth headset's microphone is chosen, and keeping it on would drop the headset to call quality. "
