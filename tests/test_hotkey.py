@@ -487,6 +487,8 @@ def test_the_hook_is_renewed_while_no_key_is_held(monkeypatch):
     from sst.hotkey import WM_TIMER, HotkeyListener
 
     listener = HotkeyListener(parse_hotkey("ctrl+win"))
+    shared = hotkey.KeyboardHook()
+    shared.listeners = (HotkeyListener(parse_hotkey("double ctrl")), listener)  # any listener mid-chord holds it back
     hooks, unhooked = iter(range(1, 10)), []
 
     def held(msg):
@@ -518,5 +520,151 @@ def test_the_hook_is_renewed_while_no_key_is_held(monkeypatch):
 
     monkeypatch.setattr(hotkey, "user32", User32)
     monkeypatch.setattr(hotkey, "kernel32", Kernel32)
-    listener._run()
+    shared._run()
     assert unhooked == [1, 2, 3]  # hook 1 replaced by 2 (idle), kept while Ctrl was held, then by 3; 3 removed at the end
+
+
+# ---------------------------------------------------------------- one hook for every shortcut
+
+class FakeWindows:
+    """user32 and kernel32 as the shared hook uses them: keys held as the test says, no real hook, no key sent."""
+
+    def __init__(self):
+        import threading
+        self.held, self.hooks, self.unhooked, self.sent, self.calls = set(), 0, [], [], 0
+        self.quit = threading.Event()
+
+    def SetWindowsHookExW(self, *args):
+        self.hooks += 1
+        return self.hooks
+
+    def UnhookWindowsHookEx(self, hook):
+        self.unhooked.append(hook)
+
+    def SetTimer(self, *args):
+        return 0
+
+    def KillTimer(self, *args):
+        pass
+
+    def GetMessageW(self, *args):
+        self.quit.wait(5)  # until the last listener stops
+        return 0
+
+    def PostThreadMessageW(self, *args):
+        self.quit.set()
+
+    def GetAsyncKeyState(self, vk):
+        return -0x8000 if vk in self.held else 0
+
+    def GetCursorPos(self, point):
+        pass
+
+    def MapVirtualKeyW(self, vk, kind):
+        return 0
+
+    def SendInput(self, count, inputs, size):
+        self.sent.extend(inputs[i].ki.wVk for i in range(count))
+
+    def CallNextHookEx(self, *args):
+        self.calls += 1
+        return 0
+
+    @staticmethod
+    def GetCurrentThreadId():
+        return 1
+
+    @staticmethod
+    def GetModuleHandleW(name):
+        return 0
+
+
+@pytest.fixture
+def windows(monkeypatch):
+    from sst import hotkey
+    fake = FakeWindows()
+    monkeypatch.setattr(hotkey, "user32", fake)
+    monkeypatch.setattr(hotkey, "kernel32", fake)
+    monkeypatch.setattr(hotkey, "HOOK", hotkey.KeyboardHook())
+    return fake
+
+
+def _shortcuts():
+    """Dictation, Text Transform, Translate and live translation, as the app starts them; each counts its wake-ups."""
+    listeners = {name: HotkeyListener(parse_hotkey(text)) for name, text in
+                 (("dictation", "ctrl+win"), ("transform", "double ctrl"), ("translate", "ctrl+c+c"), ("live", "ctrl+alt+l"))}
+    woken = {name: 0 for name in listeners}
+    for name, listener in listeners.items():
+        listener.on_event = lambda name=name: woken.__setitem__(name, woken[name] + 1)
+    return listeners, woken
+
+
+def _type(windows, *steps):
+    """Physical key events through the shared hook's procedure, as Windows would call it; returns what it answered."""
+    import threading
+
+    from sst import hotkey
+    hotkey.HOOK._ident = threading.get_ident()  # called on the hook's own thread
+    answers = []
+    for action, vk in steps:
+        (windows.held.add if action == "down" else windows.held.discard)(vk)
+        info = hotkey.KBDLLHOOKSTRUCT(vkCode=vk, scanCode=0, flags=0, time=0, dwExtraInfo=0)
+        answers.append(hotkey.HOOK._on_key(hotkey.HC_ACTION, hotkey.WM_KEYDOWN if action == "down" else 0x0101,
+                                           ctypes.addressof(info)))
+    return answers
+
+
+def _drain(listener):
+    out = []
+    while not listener.events.empty():
+        out.append(listener.events.get_nowait()[0])
+    return out
+
+
+def test_every_shortcut_shares_one_keyboard_hook(windows):
+    from sst import hotkey
+    listeners, _ = _shortcuts()
+    for listener in listeners.values():
+        listener.start()
+    assert windows.hooks == 1 and hotkey.HOOK.listeners == tuple(listeners.values())  # one hook, four listeners
+    for listener in listeners.values():
+        listener.stop()
+    assert windows.quit.wait(2)
+    for _ in range(100):
+        if windows.unhooked:
+            break
+        __import__("time").sleep(0.01)
+    assert windows.unhooked == [1] and hotkey.HOOK.listeners == ()  # removed with the last listener
+
+
+def test_one_hook_feeds_every_shortcut_its_own_events(windows):
+    from sst import hotkey
+    listeners, woken = _shortcuts()
+    hotkey.HOOK.listeners = tuple(listeners.values())
+    A, L = 0x41, 0x4C
+    # Ordinary typing: every app gets every key, and nobody is woken up.
+    assert _type(windows, ("down", A), ("up", A)) == [0, 0] and windows.calls == 2
+    assert woken == {"dictation": 0, "transform": 0, "translate": 0, "live": 0}
+    # Ctrl+Win held: dictation's press and release (and the Start menu masked, as before).
+    _type(windows, ("down", LCTRL), ("down", LWIN), ("up", LWIN), ("up", LCTRL))
+    assert _drain(listeners["dictation"]) == ["press", "release"] and windows.sent == [0xE8, 0xE8]
+    # Ctrl tapped twice: Text Transform.
+    _type(windows, ("down", LCTRL), ("up", LCTRL), ("down", LCTRL), ("up", LCTRL))
+    assert _drain(listeners["transform"]) == ["release"]
+    # Ctrl+C+C: Translate; the app still copies (nothing hidden).
+    answers = _type(windows, ("down", LCTRL), ("down", C), ("up", C), ("down", C), ("up", C), ("up", LCTRL))
+    assert _drain(listeners["translate"]) == ["release"] and 1 not in answers
+    # Ctrl+Alt+L: live translation; L is hidden from the app.
+    answers = _type(windows, ("down", LCTRL), ("down", LALT), ("down", L), ("up", L), ("up", LALT), ("up", LCTRL))
+    assert _drain(listeners["live"]) == ["press", "release"] and answers[2:4] == [1, 1]
+    assert _drain(listeners["dictation"]) == [] and _drain(listeners["transform"]) == []  # nobody else's
+    assert woken == {"dictation": 2, "transform": 1, "translate": 1, "live": 2}  # woken once per event, never polled
+
+
+def test_a_listener_that_fails_never_costs_the_others_their_keys(windows):
+    from sst import hotkey
+    listeners, _ = _shortcuts()
+    listeners["live"].feed = lambda vk, is_down: 1 / 0  # a bug in one shortcut, fed before dictation's
+    hotkey.HOOK.listeners = (listeners["live"], listeners["dictation"])
+    assert _type(windows, ("down", LCTRL), ("down", LWIN), ("up", LWIN), ("up", LCTRL)) == [0, 0, 0, 0]
+    assert _drain(listeners["dictation"]) == ["press", "release"]  # and every app still got its keys

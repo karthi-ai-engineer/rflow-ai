@@ -13,6 +13,7 @@ import os
 import shutil
 import struct
 import sysconfig
+import threading
 import time
 import winreg
 from ctypes import wintypes
@@ -80,14 +81,28 @@ def computer(benchmark: bool = True) -> Computer:
 
 
 def score(seconds: float = 1.0) -> float:
-    """GFLOPS of float32 matrix multiplication on all cores: the kind of work both speech engines do."""
+    """GFLOPS of float32 matrix multiplication on all cores: the kind of work both speech engines do. OpenBLAS keeps to
+    one thread in Rflow (sst/__init__.py), so a thread per physical core multiplies at once (numpy lets go of the GIL
+    meanwhile): as fast as OpenBLAS's own threads, and each calling thread's buffer (~30 MB, kept) is only taken here."""
     a = np.random.default_rng(0).standard_normal((768, 768), dtype=np.float32)
+    workers = max(1, _cores()) if os.environ.get("OPENBLAS_NUM_THREADS") == "1" else 1
     a @ a  # warm up
-    n, t0 = 0, time.perf_counter()
-    while time.perf_counter() - t0 < seconds:
-        a @ a
-        n += 1
-    return n * 2 * 768**3 / (time.perf_counter() - t0) / 1e9
+    counts, t0 = [0] * workers, time.perf_counter()
+    end = t0 + seconds
+
+    def multiply(i: int) -> None:
+        while True:  # at least one each, so a busy PC scores slow rather than nothing
+            a @ a
+            counts[i] += 1
+            if time.perf_counter() >= end:
+                break
+
+    threads = [threading.Thread(target=multiply, args=(i,), daemon=True) for i in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    return sum(counts) * 2 * 768**3 / (time.perf_counter() - t0) / 1e9
 
 
 def judge(pc: Computer, models: list, measured: dict[str, float]) -> list[Verdict]:

@@ -597,3 +597,40 @@ def test_a_rest_with_enough_speech_is_sent_alone():
     audio, _ = scene(("pause", 0.3), ("speech", 6.0), ("pause", 1.6), ("speech", 3.0), ("pause", 0.4))
     chunks = chunk_all(audio, config=ChunkingConfig())
     assert [c.boundary for c in chunks] == ["pause", "end"] and chunks[-1].replaces == 0
+
+
+def finish_timed(audio: np.ndarray, config: ChunkingConfig) -> list[AudioChunk]:
+    chunker = Chunker("sess_test", RATE, config, VAD_CONFIG)
+    return chunker.push(audio) + chunker.finish(timed=True)
+
+
+@pytest.mark.parametrize("parts", [
+    (("pause", 0.3), ("speech", 20.8), ("pause", 0.6)),  # after a cut at the maximum
+    (("pause", 0.3), ("speech", 6.0), ("pause", 1.6), ("speech", 0.5), ("pause", 0.4)),  # a word after a pause
+])
+def test_with_word_times_a_short_rest_goes_with_only_the_end_of_the_part_before(parts):
+    audio, _ = scene(*parts)
+    config = ChunkingConfig(min_alone_speech_ms=3000)
+    chunks = finish_timed(audio, config)
+    first, last = chunks[0], chunks[-1]
+    assert len(chunks) == 2 and last.replaces == 0 and last.boundary == "end"
+    assert first.start_sample + 2 * RATE <= last.start_sample < first.end_sample  # not the whole part again
+    assert last.overlap_end_sample == first.end_sample  # the repeated end, which the merge takes out
+    assert last.speech_seconds >= config.join_context_ms / 1000 - 0.05  # enough speech for a good transcript
+    assert last.end_sample == len(audio) and len(last.audio) == last.end_sample - last.start_sample
+    assert np.array_equal(last.audio[:first.end_sample - last.start_sample], audio[last.start_sample:first.end_sample])
+
+
+def test_the_rest_starts_between_words_not_inside_one():
+    audio, spans = scene(("pause", 0.3), ("speech", 6.0), ("pause", 1.6), ("speech", 0.5), ("pause", 0.4))
+    last = finish_timed(audio, ChunkingConfig(min_alone_speech_ms=3000))[-1]
+    window = audio[last.start_sample - 400:last.start_sample + 400]
+    assert np.sqrt(np.mean(window ** 2)) < 0.3 * np.sqrt(np.mean(audio[spans[0][0]:spans[0][1]] ** 2))
+
+
+def test_without_word_times_or_much_to_save_the_whole_part_goes_again():
+    audio, _ = scene(("pause", 0.3), ("speech", 6.0), ("pause", 1.6), ("speech", 0.5), ("pause", 0.4))
+    assert chunk_all(audio, config=ChunkingConfig())[-1].replaces == 1  # untimed (finish() without timed)
+    short, _ = scene(("pause", 0.3), ("speech", 4.5), ("pause", 1.6), ("speech", 0.5), ("pause", 0.4))
+    assert finish_timed(short, ChunkingConfig(min_cut_speech_ms=4000))[-1].replaces == 1  # under 2 s saved
+    assert finish_timed(audio, ChunkingConfig(join_context_ms=0))[-1].replaces == 1  # switched off

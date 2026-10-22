@@ -65,11 +65,16 @@ class FakeLLM:
         return self.answer(text) if callable(self.answer) else (self.answer if self.answer is not None else text)
 
 
-def pipeline(backend, stages=None, **asr):
+def pipeline(backend, stages=None, chunking=None, **asr):
     config = VoiceConfig()
     for key, value in asr.items():
         setattr(config.asr, key, value)
+    for key, value in (chunking or {}).items():
+        setattr(config.chunking, key, value)
     return VoicePipeline(ASRScheduler(backend, config.asr, sleep=lambda s: None), config, stages or Stages())
+
+
+WHOLE_JOIN = {"join_context_ms": 0}  # a short last part goes with the whole part before it (as with untimed engines)
 
 
 def two_sentences():
@@ -268,7 +273,7 @@ def test_a_short_last_part_is_sent_again_with_the_part_before_it():
     backend = ScriptedBackend(["one two three four five six", "never said: version installer commit",
                                "one two three four five six seven"])
     audio = np.concatenate([silence(0.3), speech(6.0), silence(1.6), speech(0.5, seed=4), silence(0.4)])
-    final = pipeline(backend).process_audio(audio, RATE)
+    final = pipeline(backend, chunking=WHOLE_JOIN).process_audio(audio, RATE)
     assert sorted(backend.calls) == [1, 2]  # the short rest went only as part of chunk 2, which replaces chunk 1
     assert final.text == "never said: version installer commit" and final.stages["merged"] == final.text
 
@@ -278,7 +283,7 @@ def test_a_replaced_part_is_dropped_when_the_result_is_awaited_before_the_last_p
     # last part, the one that replaces the part before it. The owner's dictation of 2026-10-04 came out twice.
     backend = ScriptedBackend(["one two three four five six", "one two three four five six seven"])
     audio = np.concatenate([silence(0.3), speech(6.0), silence(1.6), speech(0.5, seed=4), silence(0.4)])
-    session = pipeline(backend).start(RATE)
+    session = pipeline(backend, chunking=WHOLE_JOIN).start(RATE)
     session.feed(audio)  # the first part is cut at the pause; the short rest waits for the key release
     waiting, wait = threading.Event(), session._asr.wait
 
@@ -454,3 +459,225 @@ def test_a_command_after_the_keyword_reaches_the_app_and_a_retry_trims_too(monke
     assert d.retry_last()
     d.wait()
     assert typed == ["hello. "]
+
+
+# ---- phase 44: faster dictation
+
+class TimelineBackend:
+    """A recogniser that hears exactly what was said: the session's words are known with their times, and a chunk is
+    answered with the words in it (a word cut by the chunk's edge counts where most of it is), with word times."""
+    name = "timeline"
+
+    def __init__(self, words, delay=0.0, timed=True):
+        self.words, self.delay, self.timed, self.calls = words, delay, timed, []
+
+    def transcribe(self, chunk):
+        self.calls.append((chunk.sequence, round(chunk.start, 2), round(chunk.end, 2), chunk.replaces))
+        time.sleep(self.delay)
+        inside = [(w, s, e) for w, s, e in self.words if chunk.start <= (s + e) / 2 < chunk.end]
+        words = [WordInfo(w, s - chunk.start, e - chunk.start) for w, s, e in inside] if self.timed else []
+        return RawTranscript(" ".join(w for w, _, _ in inside), words, backend=self.name)
+
+
+def timeline(script: str, spans) -> list[tuple[str, float, float]]:
+    """The script's words spread over the speech spans (seconds), in order."""
+    words, total = script.split(), sum(e - s for s, e in spans)
+    out, i = [], 0
+    for s, e in spans:
+        n = round(len(words) * (e - s) / total) if (s, e) != spans[-1] else len(words) - i
+        step = (e - s) / max(n, 1)
+        out += [(words[i + k], s + k * step, s + (k + 0.8) * step) for k in range(n)]
+        i += n
+    return out
+
+
+def test_a_short_last_part_goes_with_only_the_end_of_the_part_before():
+    # The part before is already being transcribed: sending all of it again made the last answer the slowest.
+    audio = np.concatenate([silence(0.3), speech(6.0), silence(1.6), speech(0.5, seed=4), silence(0.4)])
+    words = timeline("we shipped the new installer today and it works well. Thanks.", [(0.3, 6.3), (7.9, 8.4)])
+    backend = TimelineBackend(words)
+    p = pipeline(backend)
+    p.word_times = True  # learnt from the engine's earlier answers
+    final = p.process_audio(audio, RATE)
+    (_, start1, end1, _), (_, start2, end2, replaces) = sorted(backend.calls)
+    assert replaces == 0 and start1 + 2 < start2 < end1 and end2 == pytest.approx(len(audio) / RATE, abs=0.01)
+    assert final.text == "we shipped the new installer today and it works well. Thanks."  # every word once
+
+
+def test_an_engine_without_word_times_still_gets_the_whole_part_before():
+    audio = np.concatenate([silence(0.3), speech(6.0), silence(1.6), speech(0.5, seed=4), silence(0.4)])
+    words = timeline("we shipped the new installer today and it works well. Thanks.", [(0.3, 6.3), (7.9, 8.4)])
+    p = pipeline(TimelineBackend(words, timed=False))
+    p.process_audio(audio, RATE)
+    assert p.word_times is False  # learnt: the next short last part goes with the whole part before it
+    backend = TimelineBackend(words, timed=False)
+    p.scheduler.backend = backend
+    final = p.process_audio(audio, RATE)
+    assert [c[3] for c in sorted(backend.calls)] == [0, 1]  # the last part replaces the first, as before
+    assert final.text == "we shipped the new installer today and it works well. Thanks."
+
+
+def test_the_local_stand_in_loads_at_the_first_cloud_failure_not_when_a_part_needs_it():
+    made, ready = [], threading.Event()
+
+    class Flaky(ScriptedBackend):
+        def transcribe(self, chunk):
+            if not self.calls:
+                self.calls.append(chunk.sequence)
+                raise ConnectionError("the network is down")  # transient: retried
+            return super().transcribe(chunk)
+
+    def make():
+        made.append(True)
+        ready.set()
+        return ScriptedBackend(["from parakeet"])
+    config = VoiceConfig()
+    scheduler = ASRScheduler(Flaky(["hello there"]), config.asr, fallback=LazyBackend("parakeet", make), sleep=lambda s: None)
+    final = VoicePipeline(scheduler, config).process_audio(np.concatenate([speech(1.0), silence(0.4)]), RATE)
+    assert final.text == "hello there" and not final.notes  # the retry worked: Parakeet wasn't needed...
+    assert ready.wait(5) and made == [True]  # ...but it was made ready in the background, once
+
+
+def test_a_stand_in_that_isnt_downloaded_is_tried_again_when_needed():
+    attempts = []
+
+    def make():
+        attempts.append(True)
+        raise RuntimeError("Parakeet isn't downloaded to take over")
+    lazy = LazyBackend("parakeet", make)
+    lazy.warm()
+    for _ in range(100):
+        if not lazy._warming:
+            break
+        time.sleep(0.01)
+    assert attempts == [True] and lazy._backend is None
+    with pytest.raises(RuntimeError):
+        lazy.transcribe(None)
+    assert len(attempts) == 2
+
+
+# -- the cleanup of finished sentences while the user is still speaking
+
+FILLERS = ("um ", "uh ", "Um ", "Uh ")
+
+
+def clean(text: str, before: str = "") -> str:
+    """A deterministic cleanup: fillers out, and a capital letter where a sentence starts (as the prompt asks)."""
+    for filler in FILLERS:
+        text = text.replace(filler, "")
+    starts = not before or before.rstrip()[-1:] in ".!?"
+    return text[:1].upper() + text[1:] if starts else text
+
+
+class PartsLLM(FakeLLM):
+    """A FakeLLM that can clean the rest of a dictation after its beginning."""
+
+    def __init__(self, answer=clean, rest=None, error=None, delay=0.0):
+        super().__init__(answer, error)
+        self.rest, self.delay, self.continued, self.calls = rest, delay, [], []
+
+    def polish(self, text, protected_terms=()):
+        time.sleep(self.delay)
+        self.calls.append(("whole", text))
+        return super().polish(text, protected_terms)
+
+    def polish_continued(self, text, before, protected_terms=()):
+        time.sleep(self.delay)
+        self.calls.append(("rest", text))
+        self.continued.append((text, before))
+        if self.error:
+            raise RuntimeError(self.error)
+        return (self.rest or clean)(text, before)
+
+
+FIRST = "um so we met on Tuesday. And the plan we made was to ship the new installer by Friday and then we"
+SECOND = "uh decided to wait a week. It was fine."
+WHOLE = clean(FIRST + " " + SECOND)
+
+
+def live(llm, texts=(FIRST, SECOND), guard=None, hold=True):
+    """A two-part dictation fed like the app does: the first part's answer arrives while the user is still speaking."""
+    backend = ScriptedBackend(list(texts))
+    p = pipeline(backend, Stages(llm=llm, guard=guard if guard is not None else Guard()))
+    session = p.start(RATE)
+    first = np.concatenate([silence(0.3), speech(6.0), silence(1.6)])
+    session.feed(first)
+    for _ in range(200):  # the user goes on speaking while the first part is transcribed and cleaned
+        if session._merged is not None and (llm.calls or not hold) and not session._early._busy:
+            break
+        time.sleep(0.01)
+    session.feed(np.concatenate([speech(3.0, seed=3), silence(0.5)]))
+    session.finish()
+    return session.result(5)
+
+
+def test_finished_sentences_are_cleaned_while_the_user_speaks_and_only_the_rest_after():
+    llm = PartsLLM()
+    final = live(llm)
+    assert final.text == WHOLE and final.provenance is Provenance.LLM_POLISHED  # the same as cleaning it whole
+    assert llm.calls[0] == ("whole", "um so we met on Tuesday.")  # during the dictation: the finished sentence
+    rest = "And the plan we made was to ship the new installer by Friday and then we uh decided to wait a week. It was fine."
+    assert llm.calls[1:] == [("rest", rest)]  # after it: only the rest, the sentence across the parts' boundary whole
+    assert llm.continued[0][1] == "So we met on Tuesday."  # with the cleaned beginning as context
+    assert final.stages["early"] == "So we met on Tuesday." and final.metrics["stage_ms"]["llm_early"] >= 0
+
+
+def test_a_part_that_ends_mid_sentence_is_never_cleaned_alone():
+    # "... and then we" | "uh decided to wait.": cleaned alone, the first part would end with a period ("then we.") and
+    # the second start a new sentence ("Decided"). Only a sentence end inside a part, with words after it, splits.
+    first = "um so the plan we made was to ship the new installer by Friday at the latest and then we"
+    llm = PartsLLM()
+    final = live(llm, (first, SECOND), hold=False)
+    assert final.text == clean(first + " " + SECOND) and llm.calls == [("whole", first + " " + SECOND)]
+
+
+def test_a_single_part_dictation_is_cleaned_whole_as_before():
+    llm = PartsLLM()
+    text = "um so we met on Tuesday. And the plan we made was to ship the new installer by Friday and we did."
+    final = pipeline(ScriptedBackend([text]), Stages(llm=llm, guard=Guard())).process_audio(
+        np.concatenate([speech(6.0), silence(0.4)]), RATE)
+    assert llm.calls == [("whole", text)] and final.text == clean(text) and "early" not in final.stages
+
+
+def test_when_the_guard_refuses_the_text_cleaned_in_parts_it_is_cleaned_whole():
+    llm = PartsLLM(rest=lambda text, before: clean(text, before) + " We also added three brand new features.")  # refused
+    final = live(llm)
+    assert final.text == WHOLE and final.provenance is Provenance.LLM_POLISHED
+    assert [kind for kind, _ in llm.calls] == ["whole", "rest", "whole"]  # the beginning, the rest, then all of it
+
+
+def test_an_llm_that_fails_while_the_user_speaks_leaves_it_all_for_the_end():
+    class FailsFirst(PartsLLM):
+        def polish(self, text, protected_terms=()):
+            if not self.calls:
+                self.calls.append(("whole", text))
+                raise RuntimeError("timed out")
+            return super().polish(text, protected_terms)
+    llm = FailsFirst()
+    final = live(llm)
+    assert final.text == WHOLE and [kind for kind, _ in llm.calls] == ["whole", "whole"] and not llm.continued
+
+
+def test_without_the_switch_nothing_is_cleaned_early():
+    llm = PartsLLM()
+    backend = ScriptedBackend([FIRST, SECOND])
+    config = VoiceConfig()
+    config.llm.early = False
+    p = VoicePipeline(ASRScheduler(backend, config.asr, sleep=lambda s: None), config, Stages(llm=llm, guard=Guard()))
+    final = p.process_audio(np.concatenate([silence(0.3), speech(6.0), silence(1.6), speech(3.0, seed=3), silence(0.5)]),
+                            RATE)
+    assert final.text == WHOLE and llm.calls == [("whole", FIRST + " " + SECOND)]
+
+
+def test_settled_text_never_ends_at_an_abbreviation_or_a_parts_last_word():
+    from sst.pipeline.merge import Token
+    from sst.pipeline.session import settled_text
+    def part(*words, end=9.0):
+        return [Token(w, chunk_end=end) for w in words]
+    after = part(*(f"w{i}" for i in range(12)))
+    assert settled_text(part("Ask", "Dr.") + after) == ""
+    assert settled_text(part("see", "e.g.") + after) == ""
+    assert settled_text(part("Hi", "there.") + after) == "Hi there."
+    assert settled_text(part("Hi", "there?»") + after) == "Hi there?»"
+    assert settled_text(part("Hi", "there.", end=4.0) + after) == ""  # its part ended there: maybe not a sentence end
+    assert settled_text(part("Hi", "there.") + after[:11]) == ""  # too close to the end: a later merge may change it

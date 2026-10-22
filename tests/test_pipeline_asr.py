@@ -776,6 +776,15 @@ def test_classify(exc, kind):
     assert classify(exc) is kind
 
 
+def test_classify_takes_the_backends_word_that_an_error_is_final():
+    no_credit, offline = HTTPFailure(429), HTTPFailure(0)  # a used-up quota; "couldn't be reached a moment ago"
+    no_credit.permanent = offline.permanent = True
+    unsure = HTTPFailure(429)
+    unsure.permanent = "yes"  # only True counts
+    assert classify(no_credit) is classify(offline) is ErrorKind.PERMANENT
+    assert classify(unsure) is ErrorKind.TRANSIENT
+
+
 def test_classify_reads_status_code_and_ignores_statuses_that_are_not_http():
     requests_like = RuntimeError("Service Unavailable")
     requests_like.status_code = 503

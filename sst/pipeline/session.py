@@ -1,8 +1,10 @@
 """The orchestrator: one Session per key press, from the first audio sample to the FinalText that is typed.
 
-    Session.feed(block)      while the key is held: the chunker cuts chunks and the ASR workers start on them at once
+    Session.feed(block)      while the key is held: the chunker cuts chunks and the ASR workers start on them at once;
+                             finished sentences are cleaned up (dictionary -> formatting -> LLM) as their parts come back
     Session.finish()         key released (after the tail): the last chunk goes out
-    Session.result()         waits for the ordered results, then merge -> dictionary -> formatting -> LLM -> guard
+    Session.result()         waits for the ordered results, then merge -> dictionary -> formatting -> LLM -> guard (the
+                             LLM only for the rest after the sentences cleaned already; the guard on the whole text)
 
 Sessions are isolated: every chunk and result carries its session id, so a slow answer for session A can never land
 in session B (sst.pipeline.asr). If a chunk can't be transcribed, the session fails closed: nothing is typed rather than
@@ -10,10 +12,11 @@ a text with a hole in it, and the caller keeps the recording.
 """
 import json
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -23,21 +26,24 @@ from sst.pipeline.asr import ASRScheduler, SessionFailed
 from sst.pipeline.audio_stream import Chunker, trim_preroll
 from sst.pipeline.contracts import (
     AudioChunk,
+    ChunkingConfig,
     ChunkResult,
     FinalText,
+    GuardResult,
     MergedTranscript,
     Provenance,
     SessionState,
     VoiceConfig,
     new_session_id,
 )
-from sst.pipeline.merge import TranscriptMerger
+from sst.pipeline.merge import Token, TranscriptMerger
 from sst.snippets import Snippet
 
 log = logging.getLogger(__name__)
 
 RESULT_TIMEOUT = 120.0  # seconds to wait for the last ASR results after the key is released
 BEEP_WINDOW = 0.6  # seconds after the key press in which the start beep is filtered out
+WARM_ON = ("asr_retrying", "asr_fallback", "asr_failed")  # a cloud model failing: the local stand-in gets ready
 
 
 class _ToneNotch:
@@ -75,12 +81,155 @@ class LazyBackend:
     def __init__(self, name: str, make: Callable[[], object]):
         self.name, self._make, self._backend = name, make, None
         self._lock = threading.Lock()
+        self._warming = False
 
     def transcribe(self, chunk: AudioChunk):
         with self._lock:
             if self._backend is None:
                 self._backend = self._make()
         return self._backend.transcribe(chunk)
+
+    def warm(self) -> None:
+        """Make it now, in the background: the cloud model has just failed, so the next part may need the stand-in, and
+        making it takes 7-12 s that a part waiting for it would add to the dictation. Never blocks. If it can't be made
+        (Parakeet isn't downloaded: `make` says so without loading anything), nothing happens."""
+        with self._lock:
+            if self._backend is not None or self._warming:
+                return
+            self._warming = True
+
+        def make() -> None:
+            try:
+                with self._lock:
+                    if self._backend is None:
+                        self._backend = self._make()
+                log.info("%s is ready to stand in", self.name)
+            except Exception as e:
+                log.info("%s can't stand in: %s", self.name, e)
+            finally:
+                self._warming = False
+        threading.Thread(target=make, name=f"{self.name}-warm", daemon=True).start()
+
+
+SENTENCE_ENDS = ".!?…。！？"
+_CLOSERS = "\"')]»”’」』"
+_ABBREVIATIONS = frozenset("mr mrs ms dr prof st vs etc no approx dept est inc ltd jr sr fig".split())
+SETTLED_AFTER = 12  # words after a sentence end before it counts as settled: the next part's merge (an overlap, a short
+# last part sent with the end of this one) reaches only into the last few seconds of the text
+
+
+def _sentence_end(token: str) -> bool:
+    """A token that ends a sentence: "Tuesday.", "right?", "「はい。」"; not "Dr." or "e.g." (an abbreviation)."""
+    word = token.rstrip(_CLOSERS)
+    if not word or word[-1] not in SENTENCE_ENDS:
+        return False
+    stem = word.rstrip(SENTENCE_ENDS)
+    return bool(stem) and stem.lower() not in _ABBREVIATIONS and not re.fullmatch(r"(?:\w\.)+\w", stem)
+
+
+def settled_text(tokens: Sequence[Token]) -> str:
+    """The merged text up to its last settled sentence end: one inside a part (a part's last word may carry a period
+    only because the part ended there) with SETTLED_AFTER words after it. "" when there is none."""
+    for i in range(len(tokens) - 1 - SETTLED_AFTER, -1, -1):
+        if _sentence_end(tokens[i].text) and tokens[i + 1].chunk_end == tokens[i].chunk_end:
+            return " ".join(t.text for t in tokens[:i + 1])
+    return ""
+
+
+class EarlyCleanup:
+    """A dictation's finished sentences cleaned up while the user is still speaking (LLMConfig.early), so that after the
+    key release only the rest waits for the AI.
+
+    Each new stretch of settled text (settled_text) goes through the same stages as at the end, on its own thread:
+    snippets checked, dictionary, formatting, then the LLM with the cleaned text before it as context
+    (polish_continued), and the guard. Anything unexpected (an error, the guard refusing, a snippet's placeholder, text
+    already cleaned changed by a later merge) stops it, and the session cleans the whole text at the end, as before.
+    Session.result() uses the parts only if their text is exactly the beginning of the whole trusted text."""
+
+    def __init__(self, stages: "Stages"):
+        self.stages = stages
+        self.parts: list[tuple[str, str]] = []  # (trusted text, cleaned text) of each stretch, in order
+        self.ms = 0.0  # LLM time spent while the user was speaking
+        self.off = False
+        self._raw = self._target = ""  # merged text cleaned so far / settled so far
+        self._busy = self._closed = False
+        self._since = 0.0  # when the current stretch went to the LLM
+        self._lock = threading.Lock()
+        self._idle = threading.Event()
+        self._idle.set()
+
+    def offer(self, tokens: Sequence[Token]) -> None:
+        """New merged text (from an ASR worker): starts cleaning what is newly settled. Never waits."""
+        target = settled_text(tokens)
+        with self._lock:
+            if self.off or self._closed or len(target) <= len(self._target):
+                return
+            self._target = target
+            if self._busy:
+                return
+            self._busy = True
+            self._idle.clear()
+        threading.Thread(target=self._run, name="early-cleanup", daemon=True).start()
+
+    def close(self, released: float, timeout: float) -> list[tuple[str, str]]:
+        """No more stretches: the parts cleaned, once the one under way is done. One that went out after the key
+        release is not waited for (the whole text is cleaned instead)."""
+        with self._lock:
+            self._closed = True
+            late = self._busy and released and self._since > released
+        if late or not self._idle.wait(timeout):
+            self.off = True
+        return [] if self.off else list(self.parts)
+
+    def _run(self) -> None:
+        while True:
+            with self._lock:
+                if self.off or self._closed or len(self._target) <= len(self._raw):
+                    self._busy = False
+                    self._idle.set()
+                    return
+                target, raw = self._target, self._raw
+                self._since = time.monotonic()
+            ok = target.startswith(raw)  # else a later merge changed text already cleaned
+            try:
+                ok = ok and self._clean(target[len(raw):].strip())
+            except Exception as e:  # the AI unreachable, a bug in a stage: the end of the dictation does it all
+                log.info("Early cleanup stopped: %s", e)
+                ok = False
+            with self._lock:
+                self._raw, self.off = (target, self.off) if ok else (raw, True)
+
+    def _clean(self, text: str) -> bool:
+        s = self.stages
+        mine = s.snippets()
+        if mine and snippets.protect(text, mine)[1]:
+            return False  # placeholders are numbered over the whole text: it is cleaned at the end
+        if s.dictionary is not None:
+            text = s.dictionary.correct(text).text
+        if s.formatter is not None:
+            text = s.formatter.format(text).text
+        terms = [t for t in s.terms() if t.lower() in text.lower()]
+        before = " ".join(cleaned for _, cleaned in self.parts)
+        t0 = time.perf_counter()
+        cleaned = s.llm.polish_continued(text, before, terms) if before else s.llm.polish(text, terms)
+        self.ms += (time.perf_counter() - t0) * 1000
+        if not cleaned.strip() or (s.guard is not None and not s.guard.validate(text, cleaned, terms).accepted):
+            return False
+        self.parts.append((text, cleaned))
+        return True
+
+
+def _covered(trusted: str, parts: list[tuple[str, str]]) -> str | None:
+    """The rest of the trusted text after the parts cleaned early, or None when they aren't exactly its beginning."""
+    whole, head = " ".join(trusted.split()), " ".join(" ".join(t for t, _ in parts).split())
+    if not head or not (whole == head or whole.startswith(head + " ")):
+        return None
+    return whole[len(head):].strip()
+
+
+def _merge_config(config: ChunkingConfig) -> ChunkingConfig:
+    """The merge's text window reaches as far back as a short last part's lead-in may (Chunker._lead_in)."""
+    return replace(config, overlap_ms=max(config.overlap_ms, 2 * getattr(config, "join_context_ms", 0)))
 
 
 @dataclass
@@ -128,8 +277,12 @@ class Session:
         self.metrics = Metrics()
         config = pipeline.config
         self._chunker = Chunker(self.session_id, rate, config.chunking, config.vad, config.audio.frame_ms)
-        self._merger = TranscriptMerger(config.chunking)
+        self._merger = TranscriptMerger(_merge_config(config.chunking))
         self._merged: MergedTranscript | None = None
+        self._timed = True  # every part so far came back with word times
+        llm = pipeline.stages.llm
+        self._early = EarlyCleanup(pipeline.stages) if getattr(config.llm, "early", False) and llm is not None \
+            and callable(getattr(llm, "polish_continued", None)) else None
         self._asr = pipeline.scheduler.open_session(self.session_id, on_result=self._on_result,
                                                     keep_audio=pipeline.keep_audio)
         self._submitted = 0
@@ -170,7 +323,9 @@ class Session:
         self._finished = True
         self.metrics.released = time.monotonic()
         self.state = SessionState.FINALIZING_AUDIO
-        for chunk in self._chunker.finish():
+        # A short last part goes with only the end of the part before it when the engine's word times can take the
+        # repeated words out: known from this engine's last answers (the pipeline's) and this session's.
+        for chunk in self._chunker.finish(timed=bool(self._timed and self.pipeline.word_times)):
             self._submit(chunk)
         self._asr.finish(self._submitted)
         self.state = SessionState.WAITING_FOR_ASR
@@ -179,6 +334,8 @@ class Session:
         self._finished = True
         self.state = SessionState.CANCELLED
         self._asr.cancel()
+        if self._early is not None:
+            self._early.off = True
 
     def _submit(self, chunk: AudioChunk) -> None:
         self._submitted += 1
@@ -191,13 +348,21 @@ class Session:
 
     def _on_result(self, result: ChunkResult) -> None:
         # Called in sequence order by the scheduler: the provisional transcript grows while the user is still talking.
-        before = (self._chunks[result.sequence - 1].replaces or result.sequence) - 1  # a replacement follows what the
-        previous = self._chunks[before - 1] if before >= 1 else None  # part it replaces followed
-        if previous is not None and previous.boundary == "pause":
+        chunk = self._chunks[result.sequence - 1]
+        before = (chunk.replaces or result.sequence) - 1  # a replacement follows what the part it replaces followed
+        previous = self._chunks[before - 1] if before >= 1 else None
+        if previous is not None and previous.boundary == "pause" and chunk.start_sample >= previous.end_sample:
             # Cut in a pause: the overlap holds only silence, so nothing in it can be a duplicate. Without word times
             # the merger couldn't tell, and a phrase the user really said twice across the pause would lose a copy.
+            # (A short last part that starts inside the part before it repeats its end: that overlap is real.)
             result.overlap_end = result.start
+        if result.text.strip():
+            self._timed = self._timed and bool(result.words)
+            if not result.note:  # the engine's own answer, not a stand-in's
+                self.pipeline.word_times = bool(result.words)
         self._merged = self._merger.add(result)
+        if self._early is not None and not self._finished:  # after the release the whole rest is cleaned at once
+            self._early.offer(self._merger.tokens)
 
     # -- text out
 
@@ -242,7 +407,7 @@ class Session:
 
     def _merge(self, results: list[ChunkResult]) -> MergedTranscript:
         """The final transcript from these results alone (the progressive one also holds a superseded part)."""
-        merger = TranscriptMerger(self.pipeline.config.chunking)
+        merger = TranscriptMerger(_merge_config(self.pipeline.config.chunking))
         for result in results:
             merger.add(result)
         return merger.final()
@@ -294,28 +459,16 @@ class Session:
         provenance, guard_result, error = Provenance.FORMATTED, None, ""
         if s.llm is not None and trusted.strip():
             terms = [t for t in s.terms() if t.lower() in trusted.lower()] + list(slots)
-            self.state = SessionState.LLM_POLISH
-            t0 = time.perf_counter()
-            try:
-                polished = s.llm.polish(trusted, terms)
-            except Exception as e:  # unreachable, slow, refused: the trusted text is typed
-                polished, error = None, str(e) or type(e).__name__
-                log.warning("%s: LLM polish failed: %s", self.session_id, error)
-            self._stage("llm", t0)
-            if polished is None:
-                provenance = Provenance.FORMATTED_FALLBACK
+            early = self._early_parts(s, trusted, slots)
+            polished, guard_result, error = self._polish(s, trusted, terms, early, stages)
+            if early and polished is None and guard_result is not None:
+                # Cleaned in parts, refused as a whole: the whole text in one go, as without the early cleanup
+                log.info("%s: the guard refused the text cleaned in parts; cleaning it whole", self.session_id)
+                polished, guard_result, error = self._polish(s, trusted, terms, None, stages)
+            if polished is not None:
+                text, provenance = polished, Provenance.LLM_POLISHED
             else:
-                stages["polished"] = polished
-                self.state = SessionState.GUARD
-                t0 = time.perf_counter()
-                guard_result = s.guard.validate(trusted, polished, terms) if s.guard is not None else None
-                self._stage("guard", t0)
-                if guard_result is None or guard_result.accepted:
-                    text, provenance = polished, Provenance.LLM_POLISHED
-                else:
-                    provenance = Provenance.FORMATTED_FALLBACK
-                    log.warning("%s: guard kept the text before the LLM: %s", self.session_id,
-                                "; ".join(guard_result.reasons))
+                provenance = Provenance.FORMATTED_FALLBACK
         text = " ".join(text.split())
         if slots:  # the snippets' own text, last: no stage touches it, line breaks included
             text = snippets.expand(text, slots) or snippets.expand(" ".join(trusted.split()), slots) \
@@ -326,6 +479,50 @@ class Session:
                           metrics=self._metrics())
         self.pipeline.record(final, self._chunks)
         return final
+
+    def _early_parts(self, s: Stages, trusted: str, slots: dict) -> list[tuple[str, str]] | None:
+        """The parts cleaned while the user spoke, when they are exactly the beginning of this trusted text; else None.
+        Only for a dictation of two parts or more: one part is cleaned as a whole, as before."""
+        early = self._early
+        if early is None:
+            return None
+        parts = early.close(self.metrics.released, self.pipeline.config.llm.timeout_ms / 1000)
+        if early.ms:
+            self.metrics.stage_ms["llm_early"] = early.ms
+        if not parts or slots or s is not early.stages or self.metrics.chunks < 2 or _covered(trusted, parts) is None:
+            return None
+        return parts
+
+    def _polish(self, s: Stages, trusted: str, terms: list[str], early: list[tuple[str, str]] | None,
+                stages: dict[str, str]) -> tuple[str | None, GuardResult | None, str]:
+        """The LLM's text and the guard's verdict on it: (the text if the guard took it, the verdict, why not).
+        `early`: the parts cleaned already; only the rest goes to the LLM, after them."""
+        self.state = SessionState.LLM_POLISH
+        t0 = time.perf_counter()
+        try:
+            if early:
+                before = " ".join(cleaned for _, cleaned in early)
+                rest = _covered(trusted, early)
+                rest_terms = [t for t in terms if t.lower() in rest.lower()]
+                polished = before + " " + s.llm.polish_continued(rest, before, rest_terms) if rest else before
+                stages["early"] = before
+            else:
+                polished = s.llm.polish(trusted, terms)
+        except Exception as e:  # unreachable, slow, refused: the trusted text is typed
+            error = str(e) or type(e).__name__
+            log.warning("%s: LLM polish failed: %s", self.session_id, error)
+            self._stage("llm", t0)
+            return None, None, error
+        self._stage("llm", t0)
+        stages["polished"] = polished
+        self.state = SessionState.GUARD
+        t0 = time.perf_counter()
+        guard_result = s.guard.validate(trusted, polished, terms) if s.guard is not None else None
+        self._stage("guard", t0)
+        if guard_result is None or guard_result.accepted:
+            return polished, guard_result, ""
+        log.warning("%s: guard kept the text before the LLM: %s", self.session_id, "; ".join(guard_result.reasons))
+        return None, guard_result, ""
 
     def _fail(self, error: str, stages: dict[str, str]) -> FinalText:
         self.state = SessionState.FAILED
@@ -354,6 +551,19 @@ class VoicePipeline:
         self.stages = stages or Stages()
         self.debug_dir = debug_dir  # set: every session's stages (and chunk audio) are kept there for debugging
         self.keep_audio = debug_dir is not None
+        self.word_times: bool | None = None  # whether the speech engine's last answer had word times (None: no answer yet)
+        fallback = getattr(scheduler, "fallback", None)
+        if callable(getattr(fallback, "warm", None)):
+            # The local stand-in (LazyBackend) starts loading at the cloud model's first failure, not when a part
+            # needs it: loading takes 7-12 s, which a part waiting for it would add to the dictation.
+            inner = scheduler.on_event
+
+            def on_event(name: str, data: dict) -> None:
+                if name in WARM_ON and data.get("kind") != "suspicious":  # "suspicious": the cloud did answer
+                    fallback.warm()
+                if inner is not None:
+                    inner(name, data)
+            scheduler.on_event = on_event
 
     def start(self, rate: int, preroll: np.ndarray | None = None, beep_hz: float | None = None) -> Session:
         return Session(self, rate, preroll, beep_hz)

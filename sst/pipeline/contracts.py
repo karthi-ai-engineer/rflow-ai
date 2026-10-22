@@ -253,6 +253,9 @@ class ChunkingConfig:
     # a mid-sentence pause came back rewritten ("Under some protocol..."): a part needs enough words for its context.
     # (Before: 400, which kept a breath alone, heard as "Yeah.", from making a part; this covers that too.)
     keep_silence_ms: int = 300  # silence kept at the end of a chunk cut at a pause
+    join_context_ms: int = 3000  # a short last part goes with only the end of the part before it, enough for this much
+    # speech in all, when the engine gives word times (they take the repeated words out); the rest of that part is already
+    # transcribed. 0, or an engine without word times: with the whole part before it, as before phase 44.
 
 
 @dataclass
@@ -289,6 +292,8 @@ class FormattingConfig:
 class LLMConfig:
     enabled: bool = True  # only when AI cleanup has a model
     timeout_ms: int = 8000
+    early: bool = True  # clean up the finished sentences while the user is still speaking, so that after the key release
+    # only the rest waits for the AI (with the cleaned beginning as context). The guard still checks the whole text.
 
 
 @dataclass

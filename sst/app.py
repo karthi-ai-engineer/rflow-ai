@@ -28,16 +28,17 @@ from collections.abc import Callable
 from datetime import date, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QFontMetrics, QGuiApplication, QIcon, QPainter
-from PySide6.QtNetwork import QLocalServer, QLocalSocket
+from PySide6.QtNetwork import QLocalServer
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
-from sst import DOWNLOADS_DIR, __version__, bench, downloads, evaluate, scan, theme, updates
+from sst import DOWNLOADS_DIR, __version__, bench, downloads, instance, scan, theme, updates
 from sst.audio import PREROLL_SECONDS, TAIL_SECONDS, Recorder, default_microphone, input_device_names
 from sst.commands import UNDO, match_command, phrases_for
-from sst.dictate import DEFAULT_HOTKEY, Dictation, already_running, wispr_flow_running
+from sst.dictate import DEFAULT_HOTKEY, Dictation, wispr_flow_running
 from sst.engines import DEFAULT_MODEL, SPEECH_MODELS, load_engine, usable
 from sst.engines.cloud import CLOUD, REMOTE, SERVER, CloudEngine
 from sst.gateway import PROVIDERS, SPEECH_SERVER, GatewayConfig, Polisher
@@ -80,14 +81,16 @@ from sst.translateui import TranslateController
 from sst.wakeui import WakeController, WakeSetupDialog, WakeState, wake_api
 from sst.window import APP_NAME, ICON_FILE, LOG_DIR, MainWindow, PreviewApp
 
+if TYPE_CHECKING:
+    from sst import evaluate  # imported when a reading test is scored (score_reading), not at every start
+
 UPDATE_DIR = Path(os.environ.get("TEMP", Path.home())) / "Rflow-update"  # downloaded installers
 # The sentence models are tried on (the scan, a cloud or server card's Test): 7.4 s of a LibriVox reading, as in
 # sherpa-onnx's model packages. It comes with Rflow, since Parakeet may not be downloaded.
 SAMPLE_FILE = Path(__file__).resolve().parent / "static" / "sample.wav"
-# Opening Rflow while it runs asks the running copy, through this local pipe, to show its window.
-SERVER_NAME = f"Rflow-window-{os.environ.get('USERNAME', 'user')}"
-ASFW_ANY = -1  # AllowSetForegroundWindow: any process
+SERVER_NAME = instance.SERVER_NAME  # the local pipe a second Rflow asks to show the window (sst/instance.py)
 WARM_SECONDS = 300  # the microphone stays open this long after a dictation (the owner chose 5 minutes)
+TICK_MS = 1000  # dictation's housekeeping: none of it needs to be sooner (Dictation.tick, Recorder.tick)
 DEBUG_DIR = LOG_DIR.parent / "debug"  # each dictation's stages and chunk audio, when Settings asks for them
 
 log = logging.getLogger("sst.app")
@@ -163,7 +166,8 @@ def close_log_files() -> None:
 # transcripts; the last scan) and %LOCALAPPDATA%\sst (logs, reading tests, the installed app's recordings, the debug
 # steps, and the downloaded speech models and voice in "models"). The source code's recordings/ is never touched.
 DATA_DIRS = (CONFIG_DIR, LOG_DIR.parent)
-AFTER = "--after="  # Rflow started again by Start over waits for the one that started it (its process id) to end
+AFTER = instance.AFTER  # Rflow started again by Start over waits for the one that started it (its process id) to end
+wait_for_exit = instance.wait_for_exit
 
 
 def erase_data(folders=DATA_DIRS, keep: tuple[str, ...] = ()) -> list[Path]:
@@ -193,20 +197,7 @@ def restart_command(pid: int) -> list[str]:
     """How to start this Rflow again once process `pid` (this one) has ended: Rflow.exe, or the app from the source."""
     if getattr(sys, "frozen", False):
         return [sys.executable, f"{AFTER}{pid}"]
-    return [sys.executable, "-c", "import sys; from sst.app import main; sys.exit(main())", f"{AFTER}{pid}"]
-
-
-def wait_for_exit(pid: int, seconds: float = 30) -> None:
-    """Wait for the Rflow that started this one to end: until then it holds the mutex that says Rflow runs, and this
-    one would only ask it to show its window."""
-    SYNCHRONIZE = 0x00100000
-    _kernel32.OpenProcess.restype = ctypes.c_void_p
-    _kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
-    _kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-    handle = _kernel32.OpenProcess(SYNCHRONIZE, False, pid)
-    if handle:  # none: it has ended already
-        _kernel32.WaitForSingleObject(handle, int(seconds * 1000))
-        _kernel32.CloseHandle(handle)
+    return [sys.executable, "-c", "import sys; from sst.instance import launch; sys.exit(launch())", f"{AFTER}{pid}"]
 
 
 # ---------------------------------------------------------------- the recording pill
@@ -391,17 +382,7 @@ def release_running_mutex() -> None:
 
 def show_running_window() -> bool:
     """Ask a running Rflow to show its window; False if none answers (e.g. the console `sst dictate` or 1.1 and older)."""
-    socket = QLocalSocket()
-    socket.connectToServer(SERVER_NAME)
-    if not socket.waitForConnected(1500):
-        return False
-    # Windows only lets the process the user just started take the foreground. Pass that on to the running copy,
-    # or its window would only flash in the taskbar.
-    ctypes.windll.user32.AllowSetForegroundWindow(ASFW_ANY)
-    socket.write(b"show\n")
-    socket.waitForBytesWritten(1500)
-    socket.disconnectFromServer()
-    return True
+    return instance.show_running_window(SERVER_NAME)
 
 
 # ---------------------------------------------------------------- the app
@@ -425,6 +406,8 @@ class _Signals(QObject):
     wake_done = Signal(str)  # "" or "cancelled" or why they couldn't be downloaded
     scan_progress = Signal(str)
     scan_done = Signal(object)  # the scan's result (sst.scan.save), or {"error": why}
+    key = Signal()  # the dictation shortcut's listener queued an event, from the keyboard hook's thread
+    live_key = Signal()  # the same for live translation's shortcut
 
 
 class TrayApp:
@@ -481,6 +464,8 @@ class TrayApp:
         self.signals.wake_done.connect(self._on_wake_done)
         self.signals.scan_progress.connect(self._on_scan_progress)
         self.signals.scan_done.connect(self._on_scan_done)
+        self.signals.key.connect(self._pump)  # the keys wake the app up: nothing polls between them
+        self.signals.live_key.connect(self._live_key_pump)
 
         self.icon = QIcon(str(ICON_FILE))
         self.recording_icon = _with_red_dot(self.icon)
@@ -499,8 +484,7 @@ class TrayApp:
         self.live.moved.connect(self._live_moved)
         self.live.speak_toggled.connect(lambda on: self.set_live_speak(on))
         self.live.noted.connect(lambda _: self.window.isVisible() and self.window.refresh())  # the Live page shows it
-        self.live_listener = None  # live translation's shortcut (Ctrl+Alt+L), watched by live_keys
-        self.live_keys = QTimer(interval=30, timeout=self._live_key_pump)
+        self.live_listener = None  # live translation's shortcut (Ctrl+Alt+L)
         self.window = MainWindow(self)
 
         self.tray = QSystemTrayIcon(self.icon)
@@ -547,9 +531,11 @@ class TrayApp:
         if not self.server.listen(SERVER_NAME):
             log.warning("No window server (%s); opening Rflow again won't show this window", self.server.errorString())
 
-        self.pump = QTimer()
-        self.pump.setInterval(15)
-        self.pump.timeout.connect(self._pump)
+        # Dictation's housekeeping (the 30-minute limit, closing or watching the open microphone), once a second and only
+        # while recording or while the microphone is open; the keys themselves arrive through signals.key.
+        self.ticker = QTimer()
+        self.ticker.setInterval(TICK_MS)
+        self.ticker.timeout.connect(self._tick)
         self._load_speech()
         if getattr(sys, "frozen", False):  # the source checkout is updated with git, not by the app
             # The installer of an update that has finished (it started this version) isn't needed any more.
@@ -645,8 +631,8 @@ class TrayApp:
         self._apply_cleanup()  # also gives the new model Your words, and builds its voice pipeline
         if first:
             self._start_listener()
-            self.pump.start()
-            self.wake.apply()  # the wake word needs a dictation to start
+            self.wake.apply()  # the wake word needs a dictation to start (and keeps the microphone open: ticks)
+            self._wake_ticker()
         self.window.refresh()
         if not first:
             return
@@ -682,6 +668,7 @@ class TrayApp:
             log.warning("Bad hotkey %r in the settings (%s); using %s", self.settings.hotkey, e, DEFAULT_HOTKEY)
             key = parse_hotkey(DEFAULT_HOTKEY)
         self.listener = HotkeyListener(key)
+        self.listener.on_event = self.signals.key.emit
         self.listener.start()
         self.dictation.listener = self.listener
         self._update_status()
@@ -775,13 +762,32 @@ class TrayApp:
     # -- running
 
     def _pump(self) -> None:
+        """The dictation shortcut's events, as they come (signals.key)."""
+        if self.listener is None or self.dictation is None:
+            return
         events = self.listener.events
         while not events.empty():
             event, at = events.get_nowait()
             self.dictation.handle(event, at)
+        self.wake.tick(time.monotonic())  # a turn ended with the keys, or a dictation with the keys pauses it
+        self._wake_ticker()  # a recording may have started, and the microphone opened
+
+    def _tick(self) -> None:
         now = time.monotonic()
-        self.dictation.tick(now)
-        self.wake.tick(now)  # a turn ended with the keys, a pause for live translation or Text Transform
+        if self.dictation is not None:
+            self.dictation.tick(now)
+        self.wake.tick(now)  # a turn ended by the time limit, a pause for live translation or Text Transform
+        if not self._needs_ticks():
+            self.ticker.stop()
+
+    def _needs_ticks(self) -> bool:
+        r = self.recorder
+        # The wake word listens on an open microphone, so its ticks are those of an open microphone: once a second
+        return self.dictation is not None and (self.dictation.recording or r.warm or r.busy or self.wake.listening)
+
+    def _wake_ticker(self) -> None:
+        if self._needs_ticks() and not self.ticker.isActive():
+            self.ticker.start()
 
     def _on_result(self, heard: str, typed: str, seconds: float) -> None:
         self.transforms.note_typed(typed + " ")  # as Dictation pasted it: Text Transform's text where Ctrl+A copies nothing
@@ -872,6 +878,8 @@ class TrayApp:
         wake = getattr(self, "wake", None)
         if wake is not None:
             wake.apply()  # listening keeps a microphone open, with the moment before the keyword
+        if hasattr(self, "ticker"):  # not while starting: the ticks begin with dictation (_on_loaded)
+            self._wake_ticker()
 
     def apply_settings(self, new: Settings) -> None:
         """Save the settings and use them at once (the Settings page and the welcome change them one by one)."""
@@ -1300,13 +1308,12 @@ class TrayApp:
         if self.live_listener is not None:
             self.live_listener.stop()
             self.live_listener = None
-        self.live_keys.stop()
         shortcut, label = self.settings.live_shortcut, ""
         if shortcut and not self.live_shortcut_clash():
             try:
                 self.live_listener = HotkeyListener(parse_hotkey(shortcut))
+                self.live_listener.on_event = self.signals.live_key.emit
                 self.live_listener.start()
-                self.live_keys.start()
                 label = parse_hotkey(shortcut).label
             except (ValueError, OSError) as e:
                 log.warning("Live translation's shortcut %r doesn't work: %s", shortcut, e)
@@ -1438,10 +1445,11 @@ class TrayApp:
         if self.dictation:
             self._apply_speech()  # the speech model listens for the term too
 
-    def score_reading(self, folders: list[Path], progress) -> evaluate.Results:
+    def score_reading(self, folders: list[Path], progress) -> "evaluate.Results":
         """The speech model alone, then with the cleanup model and the backup model, one at a time (the endpoint may be
         small).
         The report goes into the test's folder, or into 'summary' when several tests are scored together."""
+        from sst import evaluate
         if not self.dictation:
             raise RuntimeError("The speech model is still loading; try again in a moment." if self.loading_speech
                                else "Choose a speech model first, on the Speech recognition page.")
@@ -1844,8 +1852,7 @@ class TrayApp:
         Rflow again: it opens on the welcome, like a new install."""
         log.info("Starting over: the downloaded speech models are %s", "kept" if keep_models else "deleted too")
         self._cancel_download.set()  # a download in progress stops writing into the models folder
-        for timer in (self.pump, self.live_keys):
-            timer.stop()
+        self.ticker.stop()
         self._stop_all()
         self.dictation, self._local = None, None  # the speech models let go of, so their files can be deleted too
         gc.collect()
@@ -1956,19 +1963,14 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if "--self-test" in argv:
         return self_test()
-    after = next((a.removeprefix(AFTER) for a in argv if a.startswith(AFTER)), "")
-    if after.isdigit():  # started again by Start over
-        wait_for_exit(int(after))
+    if instance.hand_over(argv):  # asked already by Rflow.exe's entry (instance.launch), before these imports
+        return 0
     log_dir = setup_logging()
     log.info("%s %s starting (%s)", APP_NAME, __version__, scan.machine())  # which kind of computer the log is from
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)  # closing the window keeps Rflow in the tray
     app.setWindowIcon(QIcon(str(ICON_FILE)))
-    if already_running():
-        if "--startup" not in argv and not show_running_window():
-            QMessageBox.information(None, APP_NAME, f"{APP_NAME} is already running. Look for its icon in the tray.")
-        return 0
     hold_running_mutex()
     if not QSystemTrayIcon.isSystemTrayAvailable():
         QMessageBox.critical(None, APP_NAME, "Windows has no notification area (system tray) available.")

@@ -7,11 +7,36 @@ Rach_flow or Rach_Darling_Flow:** installed copies up to 2.3.0 (and up to 1.6.0)
 which GitHub redirects only while they stay free (checked after each rename: the old API names answer 301 and
 reach the latest release). Locally: `git remote set-url origin https://github.com/karthi-ai-engineer/rflow-ai.git`.
 
-_Last updated: 2026-10-08_
+_Last updated: 2026-10-22_
 
 ## Start here (a new session, or the owner's other laptop)
 
-**Where things stand (2026-10-08):**
+**Where things stand (2026-10-22):**
+- **Rflow 2.6.0 = phase 44, a light, fast Rflow** (#184, the owner's "build all 16"; built in 6 parts by parallel builders, merged on
+  `phase-44/speed`). Measured first (2026-10-22, 311 logged dictations, idle profiling, network, models): the window's
+  orb, 4 keyboard hooks and 15 ms timers, OpenBLAS's thread buffers and the eager pages made Rflow heavy; Gemini's speech
+  (~2.3 s) and cleanup (~0.9 s) the wait. Parts: A #185 light window (orb still unless live, `window.pages` built on
+  demand, `OPENBLAS_NUM_THREADS=1` in `sst/__init__.py`, `sst/instance.py` hands over before heavy imports), B #186
+  quiet when idle (one `hotkey.KeyboardHook`, no polling, 50 ms mic blocks, level on read), C #187 faster dictation
+  (cleanup of finished sentences while speaking, `LLMConfig.early`; clipboard restored in the background, `paste.settle()`
+  before any other clipboard use; a short last part sent with 3 s of context, `join_context_ms`; Parakeet warmed on the
+  cloud's first failure), D #188 errors (`sst/netconnect.py`: 3 s connect budget, refusals 402/401/403/quota remembered
+  5 min, never retried; a backup from another provider the user has a key for), E #189 streaming speech
+  (`sst/engines/gemini_stream.py`, Gemini 3.5 Transcribe Live in the Gemini menu, batch fallback in
+  `sst/pipeline/streaming.py`; **not yet tried against real Gemini**), F #190 setups chosen by language (`setups.resolve`).
+  Real app, before → after: idle CPU hidden 3.2% → 0.1% of a core, window open 35% → 0.1%, private memory 491 → 107 MB,
+  threads 25 → 10, a second start shows the window in 0.5 s (was 1.4 s). Still to check with real keys: Gemini Live, and
+  `sst eval` for the short-last-part change.
+- **Rflow 2.5.3** (2026-10-20, the owner's "publish it quickly"): about 50 small "Rflow" windows flashed open and
+  closed at start-up (#181): widgets made visible before they had a parent show as windows of their own. Only `hide()`
+  while building; `test_building_and_opening_the_window_flashes_no_other_window` watches Show events. To see such
+  flashes, log Rflow's top-level windows while it starts (EnumWindows), not only console windows.
+- **Rflow 2.5.2** (2026-10-14, the owner's "take control"): live translation from the computer heard nothing in the
+  owner's Teams meetings on Bluetooth earbuds (#176): process loopback, even of Teams alone, got silence while the
+  output's whole mix carried the call (measured live in the meeting; the output meters read 0 too). Now process
+  loopback is checked against the whole mix (`wasapi._Checked`): 1.5 s of sound there and none through process
+  loopback (not Rflow's own voice, `_voice_until`) switches to the whole mix for that stream (`hears_self` then). A
+  console run with the whole mix translated the owner's meeting. Wake word (phase 42) is paused on `phase-42/check`.
 - **Rflow 2.5.1** (2026-10-08): **phase 41, the spoken translation** (#158). (1) The voice repeated sentences (the
   owner's log: 3 lines → 10 sentences said, 9 → 30): a leading space on a line's first piece, Gemini re-sending a line
   revised (appended, not replaced: `gemini._join`), and a new line restarting the last; now `Speaker` remembers what

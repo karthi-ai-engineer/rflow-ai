@@ -69,6 +69,51 @@ def test_a_warm_microphone_keeps_the_moment_before_the_key_press(monkeypatch):
     assert np.all(out[:BLOCK] == np.float32(0.2)) and take.seconds == pytest.approx(1.0)  # the lead-in isn't counted
 
 
+def test_long_blocks_keep_the_whole_pre_roll_and_tail(monkeypatch):
+    """The always-on microphone's blocks are BLOCK_SECONDS long (fewer trips into Python): the 2 s pre-roll of the voice
+    pipeline and the tail are still there in full, sample for sample."""
+    block = int(RATE * audio.BLOCK_SECONDS)
+    r = _recorder(monkeypatch, warm_seconds=float("inf"), tail=0.3)
+    r.preroll_seconds = 2.0
+    r.keep_open()
+
+    def feed(seconds, value):
+        for _ in range(int(seconds * RATE / block)):
+            r._on_audio(np.full((block, 1), value, dtype=np.float32), block, None, None)
+    feed(5.0, 0.1)  # waiting for the key
+    r.start()
+    feed(1.0, 0.3)
+    take = r.stop_later()
+    feed(0.5, 0.5)
+    out = take.audio()
+    assert take.done.is_set() and np.sum(out == np.float32(0.1)) >= 2.0 * RATE  # the pre-roll, whole
+    assert np.sum(out == np.float32(0.3)) == RATE and np.sum(out == np.float32(0.5)) == int(0.3 * RATE)
+    assert r._blocksize() == block and audio.BLOCK_SECONDS >= 0.05
+
+
+def test_the_level_is_worked_out_only_when_something_shows_it(monkeypatch):
+    r = _recorder(monkeypatch, warm_seconds=float("inf"))
+    r.keep_open()
+    calls = []
+    real_mean = np.mean
+    monkeypatch.setattr(audio.np, "mean", lambda *a, **k: calls.append(1) or real_mean(*a, **k))
+    _feed(r, 1.0, value=0.25)  # the always-on microphone keeping its pre-roll: no level per block
+    assert calls == []
+    assert r.level == pytest.approx(0.25) and len(calls) == 1  # the pill asked
+    r.start()
+    assert r.level == 0.0  # a new recording starts from silence, as before
+    _feed(r, 0.1, value=0.5)
+    assert r.level == pytest.approx(0.5)
+    r.stop()
+    assert r.level == 0.0
+
+
+def test_a_level_meter_shows_the_latest_block():
+    meter = audio.LevelMeter()
+    meter._on_audio(np.full((BLOCK, 1), 0.2, dtype=np.float32), BLOCK, None, None)
+    assert meter.level == pytest.approx(0.2)
+
+
 def test_the_tail_after_the_release_is_recorded_without_waiting_for_it(monkeypatch):
     r = _recorder(monkeypatch, warm_seconds=300, tail=0.3)
     r.start()

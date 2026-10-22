@@ -113,6 +113,12 @@ class FakeListener:
     def __init__(self, hotkey):
         import queue
         self.hotkey, self.events, self.recording, self.running = hotkey, queue.Queue(), False, False
+        self.on_event = None
+
+    def send(self, event, at=0.0):
+        """As the keyboard hook does: queue the event, then wake the app up (it polls nothing)."""
+        self.events.put((event, at))
+        self.on_event()
 
     def start(self):
         self.running = True
@@ -643,15 +649,40 @@ def test_ctrl_alt_l_starts_and_stops_live_translation_from_any_app(tray_app, mon
     assert app.live_action.text() == "Live translation\tCtrl+Alt+L"
     toggled = []
     monkeypatch.setattr(app, "toggle_live", lambda: toggled.append(True))
-    listener.events.put(("press", 0.0))
-    listener.events.put(("release", 0.0))
-    app._live_key_pump()
+    listener.send("press")
+    listener.send("release")
     assert toggled == [True]  # once per press
     app.apply_settings(dataclasses.replace(app.settings, translate_shortcut="ctrl+alt+l"))  # Translate's keys now
     assert app.live_listener is None and not listener.running and app.live_shortcut_clash() == "Translate"
     assert app.live_action.text() == "Live translation"
     app.apply_settings(dataclasses.replace(app.settings, translate_shortcut="ctrl+c+c", live_shortcut="win+alt+l"))
     assert app.live_listener.hotkey.label == "Win+Alt+L" and app.live_action.text() == "Live translation\tWin+Alt+L"
+
+
+def test_idle_in_the_tray_nothing_polls(tray_app, monkeypatch):
+    """Hidden in the tray, Rflow wakes up for a key event, not 200 times a second to look for one (phase 44)."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtTest import QTest
+    app, _, _ = tray_app
+    app.window.hide()
+    controllers = (app.transforms, app.translator)
+    assert not app.ticker.isActive()  # no recording, the microphone closed: no housekeeping either
+    assert not any(t.isActive() for c in controllers for t in c.findChildren(QTimer))
+    handled = []
+    monkeypatch.setattr(app.dictation, "handle", lambda event, at: handled.append((event, at)))
+    app.listener.send("press", 1.0)  # from the hook's thread in the real app: queued to this one
+    app.listener.send("release", 2.0)
+    QTest.qWait(10)
+    assert handled == [("press", 1.0), ("release", 2.0)]
+    # A recording, or the microphone kept open, needs the 1-second housekeeping (the time limit, closing or watching
+    # the microphone), and only then.
+    warm = {"on": True}
+    monkeypatch.setattr(type(app.recorder), "warm", property(lambda self: warm["on"]))
+    app._wake_ticker()
+    assert app.ticker.isActive() and app.ticker.interval() == 1000
+    warm["on"] = False
+    app._tick()
+    assert not app.ticker.isActive()
 
 
 def test_where_the_bar_was_left_is_used_at_the_next_start(tray_app, monkeypatch):

@@ -30,6 +30,7 @@ import re
 import sys
 import threading
 import time
+from collections.abc import Callable, Mapping
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -3061,13 +3062,15 @@ class _KeyRow(QWidget):
         self.address = QLineEdit()
         self.address.setPlaceholderText("Your server's address, e.g. http://localhost:8000/v1")
         field(self.address)
-        self.address.setVisible(self.server)
+        if not self.server:  # hide only: shown before it has a parent, it would flash up as its own window
+            self.address.hide()
         form.addWidget(self.address)
         self.key = KeyField("", "Your server's key, only if it needs one" if self.server else "Paste your key")
         self.get_key = button("Get a free key" if name == "gemini" else "Get a key",
                               lambda _=False: QDesktopServices.openUrl(QUrl(p.key_page)), link=True, size="sm",
                               icon="external", icon_after=True)
-        self.get_key.setVisible(bool(p and p.key_page) and not self.server)
+        if not (p and p.key_page) or self.server:
+            self.get_key.hide()
         key_line = row(self.key, self.get_key)
         key_line.setStretch(0, 1)
         form.addLayout(key_line)
@@ -3537,17 +3540,17 @@ class _SetupsCard:
         for column in range(3):
             self.grid.setColumnStretch(column, 1 if column < columns else 0)
 
-    def current(self) -> str:
+    def in_use(self) -> list[str]:
         app = self.app
         pending = app.downloading[0] if app.downloading else ""
-        return setups.current(app.settings, app.gateway, pending)
+        return setups.in_use(app.settings, app.gateway, pending)
 
     def refresh(self) -> None:
-        app, current = self.app, self.current()
+        app, in_use = self.app, self.in_use()
         if self.selected != "local" and app.settings.speech_model in setups.LOCAL_MODELS:
             self.local_choice = app.settings.speech_model  # Local opens on the model on this PC in use
         for key, tile in self.tiles.items():
-            setup = setups.SETUPS[key]
+            setup = setups.for_app(app, key)  # what it would use now, for the language spoken
             local = self.local_choice if key == "local" else "parakeet"
             if setup.needs:
                 needs = f"{_key_name(setup.needs)} key" + (": saved" if app.gateway.key_for(setup.needs) else
@@ -3555,14 +3558,14 @@ class _SetupsCard:
             else:
                 needs = "No key" if key == "local" else "Keys from Your API keys"
             state, lamp = "", "ok"
-            if key == current:
+            if key in in_use:
                 downloading = app.downloading
                 if downloading and downloading[0] in SPEECH_MODELS:
                     done, total = downloading[1], downloading[2] or 1
                     state, lamp = f"Downloading {done * 100 // total}%", "warn"
                 else:
                     state = "In use"
-            if key == "custom" and current != "custom":  # what another setup uses isn't Custom's
+            if key == "custom" and "custom" not in in_use:  # what another setup uses isn't Custom's
                 uses, estimate = ("Any speech model you choose", "Any AI you choose"), None
             else:
                 uses, estimate = setup_uses(app, setup, local), setup_cost(app, setup, local)
@@ -3589,8 +3592,8 @@ class _SetupsCard:
     # -- the details of the open one
 
     def _show_panel(self) -> None:
-        app, setup, key = self.app, setups.SETUPS[self.selected], self.selected
-        current = self.current() == key
+        app, setup, key = self.app, setups.for_app(self.app, self.selected), self.selected
+        current = key in self.in_use()
         self.panel_title.setText(setup.name)
         self.panel_state.setText("In use" if current else "")
         self.panel_status.setVisible(current)
@@ -3639,7 +3642,7 @@ class _SetupsCard:
             return f"Speech: {speech.name}, on this PC. Your voice stays here. {speech.languages}."
         name, model = CLOUD[setup.speech].name, setups.speech_model_for(setup, s.speech_language)
         words = f"Speech: {setups.model_name(model)}, at {name}. Your voice goes to {name} each time you dictate."
-        if setup.key == "multilingual":
+        if setup.speech_model == "gemini-3.5-transcribe":
             words += (" Tamil goes to Gemini 3.5 Flash-Lite: Transcribe has no Tamil." if model != setup.speech_model
                       else " For Tamil, Rflow uses Gemini 3.5 Flash-Lite (Transcribe has no Tamil).")
         return words
@@ -3710,7 +3713,7 @@ class _SetupsCard:
             self.use.setEnabled(not self.app.loading_speech)
 
     def _open_key_page(self) -> None:
-        missing = setups.SETUPS[self.selected].needs if self.selected else ""
+        missing = setups.for_app(self.app, self.selected).needs if self.selected else ""
         if missing:
             QDesktopServices.openUrl(QUrl(PROVIDERS[missing].key_page))
 
@@ -3721,7 +3724,7 @@ class _SetupsCard:
 
     def _use(self) -> None:
         """Use the open setup: its key first if it's missing (saved, nothing else changed), then its two parts."""
-        app, setup = self.app, setups.SETUPS[self.selected]
+        app, setup = self.app, setups.for_app(self.app, self.selected)
         missing = setups.key_missing(setup, app.gateway)
         typed = self.key.text().strip()
         if missing and not typed:
@@ -3880,7 +3883,7 @@ class ModelsPage(Page):
         self.advanced_card.hide()
         self.add(self.advanced_card)
         self.body.addStretch()
-        self._show_call_warning()
+        self.call_warning.hide()  # until shown (refresh): asking means restarting PortAudio (refresh_devices)
 
     @staticmethod
     def _named(name: QLabel, detail: QLabel, change: QPushButton) -> QHBoxLayout:
@@ -5796,12 +5799,6 @@ WELCOME_FLOWS = {"recommended": ["setup", "key", "try"], "fastest": ["setup", "k
                  "multilingual": ["setup", "key", "try"], "local": ["setup", "check", "try"],
                  "custom": ["setup", "hear", "try", "ai"]}
 WELCOME_STEPS = {"setup": "Setup", "key": "Key", "check": "This PC", "hear": "Hear you", "try": "Try it", "ai": "AI"}
-# A setup on the welcome's first step, in a line
-WELCOME_USES = {"recommended": "Parakeet on this PC + Gemini 3.5 Flash-Lite",
-                "fastest": "Whisper turbo + GPT-OSS 20B, both on Groq",
-                "multilingual": "Gemini 3.5 Transcribe + Gemini 3.5 Flash-Lite",
-                "local": "Parakeet or Whisper on this PC · AI cleanup coming soon",
-                "custom": "Choose the speech model and the AI yourself"}
 
 
 class WelcomePage(QWidget):
@@ -5901,6 +5898,7 @@ class WelcomePage(QWidget):
         self.options: dict[str, OptionCard] = {}
         self.option_costs: dict[str, QLabel] = {}
         self.option_keys: dict[str, QLabel] = {}
+        self.option_uses: dict[str, QLabel] = {}
         for key in setups.ORDER:
             setup = setups.SETUPS[key]
             option = OptionCard()
@@ -5913,7 +5911,8 @@ class WelcomePage(QWidget):
             words = QVBoxLayout()
             words.setSpacing(2)
             words.addWidget(label(setup.name, "heading", wrap=False))
-            words.addWidget(caption(WELCOME_USES[key], "2", wrap=False))
+            self.option_uses[key] = caption(setups.uses_line(setup), "2", wrap=False)  # for the language: _show_setups
+            words.addWidget(self.option_uses[key])
             line.addLayout(words, 1)
             right = QVBoxLayout()
             right.setSpacing(2)
@@ -5940,7 +5939,9 @@ class WelcomePage(QWidget):
 
     def _show_setups(self) -> None:
         app = self.app
-        for key, setup in setups.SETUPS.items():
+        for key in setups.ORDER:
+            setup = setups.for_app(app, key)  # what it would use, for the language spoken
+            self.option_uses[key].setText(setups.uses_line(setup, app.settings.speech_language))
             if key == "custom":
                 cost, needs = "Its cost shows as you choose", "The keys you choose"
                 tone = None
@@ -5991,7 +5992,7 @@ class WelcomePage(QWidget):
         return page
 
     def _show_key(self) -> None:
-        setup = setups.SETUPS[self.setup]
+        setup = setups.for_app(self.app, self.setup)
         if not setup.needs:
             return
         name = provider_name(setup.needs)
@@ -6016,7 +6017,7 @@ class WelcomePage(QWidget):
                               f"{setup.free_key}")
 
     def _open_setup_key_page(self) -> None:
-        needs = setups.SETUPS[self.setup].needs
+        needs = setups.for_app(self.app, self.setup).needs
         if needs:
             QDesktopServices.openUrl(QUrl(PROVIDERS[needs].key_page))
 
@@ -6027,7 +6028,7 @@ class WelcomePage(QWidget):
 
     def _connect_setup(self) -> None:
         """Check the key with the setup's AI model, then save the key (alone) and use the setup."""
-        app, setup = self.app, setups.SETUPS[self.setup]
+        app, setup = self.app, setups.for_app(self.app, self.setup)
         p, api_key = PROVIDERS[setup.provider], self.setup_key.text().strip()
         gateway = GatewayConfig("", api_key, p.key, {k: v for k, v in app.gateway.entries().items() if k != p.key})
         self.primary.setEnabled(False)
@@ -6349,13 +6350,12 @@ class WelcomePage(QWidget):
         self.primary.icon_name, self.primary.icon_after = "arrow-right", True
         self.primary.setText("Continue")
         if name == "setup":
-            parakeet = self.setup == "recommended" and not installed and not fetching and not app.speech_in_use()
-            self.foot_note.setText({"recommended": f"Parakeet ({_size(SPEECH_MODELS[DEFAULT_MODEL].download.size)}) "
-                                                   "downloads once you've added the key." if parakeet else
-                                                   "Next: your Gemini key.",
-                                    "fastest": "Next: your Groq key.", "multilingual": "Next: your Gemini key.",
-                                    "local": "Next: a check of this PC.", "custom": "Next: each part, one by one."}
-                                   [self.setup])
+            setup = setups.for_app(app, self.setup)  # Recommended and Fastest choose by the language spoken
+            parakeet = setup.speech == DEFAULT_MODEL and not installed and not fetching and not app.speech_in_use()
+            self.foot_note.setText(f"Parakeet ({_size(SPEECH_MODELS[DEFAULT_MODEL].download.size)}) downloads once "
+                                   "you've added the key." if parakeet else
+                                   {"local": "Next: a check of this PC.", "custom": "Next: each part, one by one."}
+                                   .get(self.setup, f"Next: your {_key_name(setup.needs)} key."))
         elif name == "key":
             self.primary.setText("Connect and continue")
             self.primary.setEnabled(bool(self.setup_key.text().strip()))
@@ -6646,6 +6646,32 @@ class NavButton(Button):
         p.end()
 
 
+class Pages(Mapping):
+    """The window's pages by key, each built the first time it is wanted (shown, or asked for as `pages[key]`). All
+    fifteen built at once took 3-5 s, 1,170 widgets and 107 MB, mostly for pages never opened. Iterating gives every key;
+    values() and items() build what they reach, like a dict would hold them. `built` has only those built so far."""
+
+    def __init__(self, makers: dict[str, Callable[[], QWidget]], on_built: Callable[[str, QWidget], None]):
+        self._makers, self._on_built = makers, on_built
+        self.built: dict[str, QWidget] = {}
+
+    def __getitem__(self, key: str) -> QWidget:
+        page = self.built.get(key)
+        if page is None:
+            page = self.built[key] = self._makers[key]()
+            self._on_built(key, page)
+        return page
+
+    def __contains__(self, key) -> bool:
+        return key in self._makers
+
+    def __iter__(self):
+        return iter(self._makers)
+
+    def __len__(self) -> int:
+        return len(self._makers)
+
+
 class MainWindow(QWidget):
     def __init__(self, app):
         super().__init__()
@@ -6729,18 +6755,15 @@ class MainWindow(QWidget):
         banner.addWidget(self.update_button)
         self.banner.hide()
 
-        self.pages = {"home": HomePage(app, self.show_page), "dictionary": DictionaryPage(app, self.show_page),
-                      "snippets": SnippetsPage(app, self.show_page),
-                      "live": LivePage(app, self.show_page),
-                      "transform": TransformPage(app, self.show_page), "translate": TranslatePage(app, self.show_page),
-                      "formatting": FormattingPage(app, self.show_page), "report": ReportPage(app, self.show_page),
-                      "models": ModelsPage(app, self.show_page), "speech": SpeechPage(app, self.show_page),
-                      "cleanup": CleanupPage(app, self.show_page), "settings": SettingsPage(app, self.show_page),
-                      "reading": ReadingTestPage(app, self.show_page), "profiles": ProfilesPage(app, self.show_page),
-                      "welcome": WelcomePage(app, self.show_page)}
+        self._update_status = ""  # Settings' update line, kept for when that page is built
+        kinds = {"home": HomePage, "dictionary": DictionaryPage, "snippets": SnippetsPage, "live": LivePage,
+                 "transform": TransformPage, "translate": TranslatePage, "formatting": FormattingPage, "report": ReportPage,
+                 "models": ModelsPage, "speech": SpeechPage, "cleanup": CleanupPage, "settings": SettingsPage,
+                 "reading": ReadingTestPage, "profiles": ProfilesPage, "welcome": WelcomePage}
         self.stack = QStackedWidget()
-        for page in self.pages.values():
-            self.stack.addWidget(page)
+        self.pages = Pages({key: lambda kind=kind: kind(app, self.show_page) for key, kind in kinds.items()},
+                           self._page_built)
+        self.pages["home"]  # noqa: B018 (built now: the page the window opens on, and the one set_status keeps current)
         self.content = Host("base")
         content = QVBoxLayout(self.content)
         content.setContentsMargins(0, 0, 0, 0)
@@ -6774,14 +6797,24 @@ class MainWindow(QWidget):
         p.end()
 
     def apply_theme(self, name: str | None = None) -> None:
-        """Obsidian or Porcelain, as Windows is set (or `name`, e.g. "light" for the website's screenshots)."""
+        """Obsidian or Porcelain, as Windows is set (or `name`, e.g. "light" for the website's screenshots). It restyles
+        the pages built so far; one built later takes the theme in use from the window's style sheet as it joins."""
         theme.set_theme(name if isinstance(name, str) else "dark" if dark_mode() else "light")
         self.setStyleSheet(theme.stylesheet())
         for widget in self.findChildren(QWidget):
             widget.update()
         self.update()
-        if hasattr(self, "pages"):
-            self.refresh()
+        self.refresh()
+
+    def _page_built(self, key: str, page: QWidget) -> None:
+        """A page built on first use: the window's present state, as it would have had from the start."""
+        self.stack.addWidget(page)
+        if isinstance(page, Page) and self.compact is not None:
+            page.set_compact(self.compact)
+        if key == "home":
+            page.set_ready(self.ready)
+        elif key == "settings" and self._update_status:
+            page.update_status.setText(self._update_status)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -6839,7 +6872,7 @@ class MainWindow(QWidget):
         self.status_title.setAlignment(Qt.AlignmentFlag.AlignHCenter if compact else Qt.AlignmentFlag.AlignLeft)
         self.profile_button.setVisible(not compact and len(self.app.profiles.items) > 1)
         self.update_link.setVisible(not compact and bool(self.update_link.text()))
-        for page in self.pages.values():
+        for page in self.pages.built.values():
             if isinstance(page, Page):
                 page.set_compact(compact)
         self._fit_sidebar()
@@ -6914,7 +6947,7 @@ class MainWindow(QWidget):
         self.pages["profiles"].new_name.setFocus()
 
     def current_page(self) -> str:
-        return next(key for key, page in self.pages.items() if page is self.stack.currentWidget())
+        return next(key for key, page in self.pages.built.items() if page is self.stack.currentWidget())
 
     def open(self, page: str | None = None) -> None:
         if not self.app.settings.welcomed:
@@ -6938,7 +6971,8 @@ class MainWindow(QWidget):
 
     def set_status(self, message: str, ready: bool) -> None:
         self.ready, self.status_message = ready, message
-        self.pages["home"].set_ready(ready)
+        if "home" in self.pages.built:
+            self.pages["home"].set_ready(ready)
         self._show_status()
         current = self.current_page()
         if current == "welcome":
@@ -6981,7 +7015,9 @@ class MainWindow(QWidget):
             self._fit_sidebar()
 
     def set_update_status(self, message: str) -> None:
-        self.pages["settings"].update_status.setText(message)
+        self._update_status = message
+        if "settings" in self.pages.built:
+            self.pages["settings"].update_status.setText(message)
 
     def closeEvent(self, event):
         # Closing the window doesn't quit: dictation keeps working from the tray, like Wispr Flow.

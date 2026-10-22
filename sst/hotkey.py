@@ -7,10 +7,12 @@ A hotkey is modifiers plus an optional key, or a double tap of Ctrl or Shift:
   double ctrl  Ctrl tapped twice quickly, on its own   Ctrl passes through: alone it does nothing in apps
   ctrl+c+c     Ctrl+C pressed twice quickly            nothing is blocked: the app copies as usual (the translator)
 
-The hook runs on its own thread and reports "press", "release", "cancel" (Esc while recording),
-"handsfree" (Space added to a modifier-only hotkey: Ctrl+Win+Space, as in Wispr Flow) and "interrupt"
-(any other key added, e.g. Ctrl+Win+D: a Windows shortcut, not dictation) on a queue. A double tap has no "press":
-it reports "release" as the second tap is let go.
+One hook (HOOK), on its own thread, serves every listener: Windows calls a low-level hook for every key typed in any
+app, so four hooks cost four trips through Python per key. Each listener reports "press", "release", "cancel" (Esc
+while recording), "handsfree" (Space added to a modifier-only hotkey: Ctrl+Win+Space, as in Wispr Flow) and "interrupt"
+(any other key added, e.g. Ctrl+Win+D: a Windows shortcut, not dictation) on its queue, and calls its `on_event` then, so
+the app wakes up only when there is something to do (no timer polling the queue). A double tap has no "press": it
+reports "release" as the second tap is let go.
 
 While a menu that must not take the keyboard focus is open (Text Transform's, so the app keeps its selection), the
 listener can capture keys: their presses are hidden from every app and reported as "key:<virtual-key code>".
@@ -315,19 +317,18 @@ class Matcher:
 
 
 class HotkeyListener:
-    """Runs the keyboard hook on its own thread; events arrive on `events` as (event, time.monotonic())."""
+    """One shortcut, watched through the shared keyboard hook (HOOK); events arrive on `events` as
+    (event, time.monotonic()), and `on_event()` (if set) is called on the hook's thread after each one is queued: the
+    app connects it to a Qt signal, so its thread wakes up only for an event."""
 
     def __init__(self, hotkey: Hotkey):
         self.hotkey = hotkey
         self.events: queue.Queue[tuple[str, float]] = queue.Queue()
+        self.on_event: Callable[[], None] | None = None
         self._matcher = Matcher(hotkey, is_held=lambda vk: bool(user32.GetAsyncKeyState(vk) & 0x8000),
                                 pointer=_pointer if hotkey.double else None)
         # Pressing Win or Alt with no other key opens the Start menu / an app's menu bar on release.
         self._mask = bool(hotkey.modifiers & {"win", "alt"})
-        self._thread_id = 0
-        self._ready = threading.Event()
-        self._error = ""
-        self._proc = HOOKPROC(self._on_key)  # keep a reference: Windows calls it for as long as the hook lives
 
     @property
     def recording(self) -> bool:
@@ -343,20 +344,72 @@ class HotkeyListener:
         self._matcher.capture = frozenset(keys or ())
 
     def start(self) -> None:
-        threading.Thread(target=self._run, name="keyboard-hook", daemon=True).start()
-        self._ready.wait(5)
-        if self._error:
-            raise OSError(self._error)
+        """Start listening, through the shared hook (installed with the first listener)."""
+        HOOK.add(self)
 
     def stop(self) -> None:
-        if self._thread_id:
-            user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
+        HOOK.remove(self)
+
+    def feed(self, vk: int, is_down: bool) -> bool:
+        """One physical key event, on the hook's thread: True hides it from the other apps. Kept short (no waiting):
+        Windows holds every app's keystroke until the hook answers."""
+        hide, event = self._matcher.feed(vk, is_down)
+        if event:
+            # A captured key is hidden, so a Win or Alt held with it would look pressed alone on release.
+            if (event == "press" and self._mask) or (
+                    event.startswith("key:") and self._matcher._held_modifiers() & {"win", "alt"}):
+                send_keys([(VK_MASK, False), (VK_MASK, True)])
+            self.events.put((event, time.monotonic()))
+            if self.on_event is not None:
+                self.on_event()
+        return hide
+
+
+class KeyboardHook:
+    """The one low-level keyboard hook, on its own thread, that feeds every started HotkeyListener (dictation, Text
+    Transform, Translate, live translation). It is installed with the first listener and removed with the last."""
+
+    def __init__(self):
+        self.listeners: tuple[HotkeyListener, ...] = ()  # replaced, never changed in place: the hook reads it unlocked
+        self._lock = threading.Lock()
+        self._thread_id = 0  # the hook's thread, while it runs
+        self._ident = 0  # the same thread, as Python knows it: a hook still ending after a restart feeds nobody
+        self._ready = threading.Event()
+        self._error = ""
+
+    def add(self, listener: HotkeyListener) -> None:
+        with self._lock:
+            if listener in self.listeners:
+                return
+            self.listeners = (*self.listeners, listener)
+            if self._thread_id:
+                return
+            self._ready.clear()
+            self._error = ""
+            threading.Thread(target=self._run, name="keyboard-hook", daemon=True).start()
+            self._ready.wait(5)
+            if self._error:
+                self.listeners = tuple(item for item in self.listeners if item is not listener)
+                raise OSError(self._error)
+
+    def remove(self, listener: HotkeyListener) -> None:
+        with self._lock:
+            self.listeners = tuple(item for item in self.listeners if item is not listener)
+            if not self.listeners and self._thread_id:
+                user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
+                self._thread_id = self._ident = 0
+
+    @property
+    def idle(self) -> bool:
+        return all(listener._matcher.idle for listener in self.listeners)
 
     def _run(self) -> None:
-        self._thread_id = kernel32.GetCurrentThreadId()
-        hook = self._hook()
+        proc = HOOKPROC(self._on_key)  # kept while the hook lives: Windows calls it
+        self._thread_id, self._ident = kernel32.GetCurrentThreadId(), threading.get_ident()
+        hook = self._hook(proc)
         if not hook:
             self._error = f"could not install the keyboard hook (Windows error {ctypes.get_last_error()})"
+            self._thread_id = self._ident = 0
         self._ready.set()
         if not hook:
             return
@@ -364,7 +417,7 @@ class HotkeyListener:
         msg = wintypes.MSG()
         try:
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:  # Windows calls the hook from in here
-                if msg.message == WM_TIMER and self._matcher.idle and (fresh := self._hook()):
+                if msg.message == WM_TIMER and self.idle and (fresh := self._hook(proc)):
                     user32.UnhookWindowsHookEx(hook)  # the new one is in first: there's never a moment with none
                     hook = fresh
         finally:
@@ -372,23 +425,26 @@ class HotkeyListener:
                 user32.KillTimer(None, timer)
             user32.UnhookWindowsHookEx(hook)
 
-    def _hook(self):
-        return user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._proc, kernel32.GetModuleHandleW(None), 0)
+    @staticmethod
+    def _hook(proc):
+        return user32.SetWindowsHookExW(WH_KEYBOARD_LL, proc, kernel32.GetModuleHandleW(None), 0)
 
     def _on_key(self, code: int, wparam: int, lparam: int) -> int:
         try:
-            if code == HC_ACTION:
+            if code == HC_ACTION and threading.get_ident() == self._ident:
                 info = ctypes.cast(lparam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
                 if info.dwExtraInfo != OUR_INPUT:
-                    hide, event = self._matcher.feed(info.vkCode, wparam in (WM_KEYDOWN, WM_SYSKEYDOWN))
-                    if event:
-                        # A captured key is hidden, so a Win or Alt held with it would look pressed alone on release.
-                        if (event == "press" and self._mask) or (
-                                event.startswith("key:") and self._matcher._held_modifiers() & {"win", "alt"}):
-                            send_keys([(VK_MASK, False), (VK_MASK, True)])
-                        self.events.put((event, time.monotonic()))
+                    vk, is_down, hide = info.vkCode, wparam in (WM_KEYDOWN, WM_SYSKEYDOWN), False
+                    for listener in self.listeners:  # every one sees every key, so each knows which keys are held
+                        try:
+                            hide = listener.feed(vk, is_down) or hide
+                        except Exception:  # one listener's error never costs the others their key
+                            log.exception("Keyboard hook error (%s)", listener.hotkey.text)
                     if hide:
                         return 1
         except Exception:  # never let an error here swallow or delay the user's typing
             log.exception("Keyboard hook error")
         return user32.CallNextHookEx(None, code, wparam, lparam)
+
+
+HOOK = KeyboardHook()

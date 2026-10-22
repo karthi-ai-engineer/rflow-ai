@@ -161,6 +161,7 @@ SPEECH: dict[tuple[str, str], SpeechPrice] = {
     ("groq", "whisper-large-v3"): SpeechPrice(per_minute=0.111 / 60, minimum=10),
     # Google Gemini, by the token
     ("gemini", "gemini-3.5-transcribe"): SpeechPrice(audio=2.00, output=12.00, transcribe=True),
+    ("gemini", "gemini-3.5-transcribe-live"): SpeechPrice(audio=3.50, output=21.00, transcribe=True),  # the Live API
     ("gemini", "gemini-2.5-flash-lite"): SpeechPrice(audio=0.30, text=0.10, output=0.40),
     ("gemini", "gemini-3.1-flash-lite"): SpeechPrice(audio=0.50, text=0.25, output=1.50, thinking="minimal"),
     ("gemini", "gemini-3.5-flash-lite"): SpeechPrice(audio=0.30, text=0.30, output=2.50, thinking="minimal"),
