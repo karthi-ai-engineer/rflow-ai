@@ -66,7 +66,7 @@ class FakeEndpoint:
 def fake(monkeypatch):
     monkeypatch.setattr(gateway, "ANSWER_TIMEOUT", 0.4)
     monkeypatch.setattr(gateway, "ANSWER_PER_WORD", 0.0)
-    monkeypatch.setattr(gateway, "CONNECT_TIMEOUT", 0.3)
+    monkeypatch.setattr(gateway, "CONNECT_BUDGET", 0.3)
     server = FakeEndpoint()
     yield server
     server.server.shutdown()
@@ -129,7 +129,7 @@ def test_an_implausible_answer_raises(fake):
 
 
 def test_an_unreachable_endpoint_raises(monkeypatch):
-    monkeypatch.setattr(gateway, "CONNECT_TIMEOUT", 0.3)
+    monkeypatch.setattr(gateway, "CONNECT_BUDGET", 0.3)
     with pytest.raises(LLMError, match="could not be reached"):
         GatewayLLM(GatewayConfig("http://127.0.0.1:9/v1", "k"), "good").polish(HEARD)  # nothing listens there
 

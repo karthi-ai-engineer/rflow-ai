@@ -7,10 +7,24 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from sst import gateway
+from sst import gateway, netconnect
 from sst.gateway import GatewayConfig, GatewayError, Polisher, plausible
 
 HEARD = "so we merge the five pr's today"
+CLEAN = "So we merge the five PRs today."
+# Answers that say asking again won't help, as the providers write them (a model by this name gets it)
+REFUSALS = {"no-credit": (402, {"error": {"message": "Insufficient balance"}}),
+            "bad-key": (401, {"error": {"message": "Invalid API Key"}}),
+            "quota": (429, [{"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "You exceeded your current "
+                                       "quota", "details": [{"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                                                            "violations": [{"quotaId": "RequestsPerDayPerModel"}]}]}}])}
+
+
+@pytest.fixture(autouse=True)
+def no_refusals():
+    netconnect.forget_refusals()  # what one test's fake provider refused never reaches another test
+    yield
+    netconnect.forget_refusals()
 
 
 class FakeGateway:
@@ -37,6 +51,8 @@ class FakeGateway:
                 anthropic = self.path.endswith("/messages")  # Anthropic's Messages API, not OpenAI's chat/completions
                 text = body["messages"][-1]["content"]
                 model = body["model"]
+                if model in REFUSALS:
+                    return self._reply(*REFUSALS[model])
                 if model.startswith("error"):
                     if anthropic:
                         return self._reply(400, {"type": "error", "error": {"type": "invalid_request_error",
@@ -89,7 +105,7 @@ class FakeGateway:
 def fake(monkeypatch):
     monkeypatch.setattr(gateway, "ANSWER_TIMEOUT", 0.4)
     monkeypatch.setattr(gateway, "ANSWER_PER_WORD", 0.0)
-    monkeypatch.setattr(gateway, "CONNECT_TIMEOUT", 0.3)
+    monkeypatch.setattr(gateway, "CONNECT_BUDGET", 0.3)
     server = FakeGateway()
     yield server
     server.server.shutdown()
@@ -133,21 +149,80 @@ def test_both_models_failing_gives_the_heard_text(fake):
 
 
 def test_a_slow_answer_gives_the_heard_text_in_time(fake):
-    p = fake.polisher(model="slow", fallback="good")
+    p = fake.polisher(model="slow")
     t0 = time.perf_counter()
     assert p.polish(HEARD) == HEARD
     assert time.perf_counter() - t0 < 0.9  # waited for the answer timeout (0.4 s), not the 1 s answer
     assert "took too long" in p.last_error
-    assert [r["model"] for r in fake.requests] == ["slow"]  # no second wait on the other model
+
+
+def test_a_slow_answer_gives_way_to_the_backup_model(fake):
+    p = fake.polisher(model="slow", fallback="good")
+    t0 = time.perf_counter()
+    assert p.polish(HEARD) == "So we merge the five PRs today." and p.last_error == ""
+    assert time.perf_counter() - t0 < 0.9  # the answer timeout (0.4 s), then the backup's quick answer
+    assert [r["model"] for r in fake.requests] == ["slow", "good"]
+
+
+def test_the_backup_is_never_the_chosen_model_again(fake):
+    p = fake.polisher(model="error", fallback="error")
+    assert p.polish(HEARD) == HEARD and [r["model"] for r in fake.requests] == ["error"]
 
 
 def test_an_unreachable_gateway_is_skipped_for_a_while(monkeypatch):
-    monkeypatch.setattr(gateway, "CONNECT_TIMEOUT", 0.3)
+    monkeypatch.setattr(gateway, "CONNECT_BUDGET", 0.3)
     p = Polisher(GatewayConfig("http://127.0.0.1:9/v1", "k"), "good")  # nothing listens there
     assert p.polish(HEARD) == HEARD and "could not be reached" in p.last_error
     t0 = time.perf_counter()
     assert p.polish(HEARD) == HEARD  # skipped at once, no new connection attempts
     assert time.perf_counter() - t0 < 0.05
+
+
+@pytest.mark.parametrize("model, said", [("no-credit", "no credit left on the account"),
+                                          ("bad-key", "didn't accept the API key")])
+def test_a_refused_key_is_said_plainly_and_not_asked_again(fake, model, said):
+    p = fake.polisher(model=model, fallback="good")  # the same key: the backup model is refused too
+    assert p.polish(HEARD) == HEARD and said in p.last_error and "HTTP 4" in p.last_error
+    t0 = time.perf_counter()
+    assert fake.polisher(model=model).polish(HEARD) == HEARD  # a new polisher (Text Transform makes one each time)
+    assert time.perf_counter() - t0 < 0.05 and len(fake.requests) == 1  # not asked again
+    with pytest.raises(GatewayError, match=said):
+        fake.polisher(model=model).complete(HEARD)
+    assert len(fake.requests) == 1
+    p = Polisher(GatewayConfig(fake.url, "new-key"), model)  # a new key is asked
+    p.polish(HEARD)
+    assert len(fake.requests) == 2
+
+
+def test_a_used_up_quota_is_the_models_and_its_backup_answers(fake):
+    p = fake.polisher(model="quota", fallback="good")  # Gemini's error, wrapped in a list
+    assert p.polish(HEARD) == CLEAN and p.last_error == ""
+    assert p.polish(HEARD) == CLEAN
+    assert [r["model"] for r in fake.requests] == ["quota", "good", "good"]  # the used-up model wasn't asked again
+    p = fake.polisher(model="quota")
+    assert p.polish(HEARD) == HEARD and "quota is used up" in p.last_error
+
+
+def test_the_test_button_asks_anyway_and_an_answer_clears_the_refusal(fake):
+    fake.polisher(model="bad-key").polish(HEARD)  # the key is refused...
+    p = fake.polisher()
+    assert p.polish(HEARD) == HEARD and "a moment ago" in p.last_error  # ...for every model on it
+    assert "answered in" in fake.polisher().check()  # the user fixed it and pressed Test
+    assert fake.polisher().polish(HEARD) == CLEAN
+
+
+def test_the_backup_at_another_provider_answers_when_the_chosen_one_refuses(fake):
+    # Groq chosen (here, the fake), and a Gemini key saved too: Gemini's setup model stands in.
+    others = {"gemini": (fake.url, "gemini-key")}
+    p = Polisher(GatewayConfig(fake.url, "groq-key", "groq", others), "no-credit")
+    assert p.polish(HEARD) == CLEAN and p.last_error == ""
+    assert [(r["model"], r["auth"]) for r in fake.requests] == [("no-credit", "Bearer groq-key"),
+                                                               ("gemini-3.5-flash-lite", "Bearer gemini-key")]
+    assert p.polish(HEARD) == CLEAN and len(fake.requests) == 3  # straight to the backup now
+    # Without another provider's key, nothing else is asked; an own server's text never goes to a cloud provider.
+    for config in (GatewayConfig(fake.url, "groq-key-2", "groq"), GatewayConfig(fake.url, "k", "vllm", others)):
+        assert Polisher(config, "no-credit").polish(HEARD) == HEARD
+    assert len(fake.requests) == 5
 
 
 @pytest.mark.parametrize("model", ["long"])
@@ -197,7 +272,7 @@ def test_load_models_lists_local_models_first(fake):
 
 
 def test_load_models_reports_an_unreachable_endpoint(monkeypatch):
-    monkeypatch.setattr(gateway, "CONNECT_TIMEOUT", 0.3)
+    monkeypatch.setattr(gateway, "CONNECT_BUDGET", 0.3)
     with pytest.raises(GatewayError, match="could not reach"):
         Polisher(GatewayConfig("http://127.0.0.1:9/v1", "k"), "").models()
 
