@@ -564,3 +564,75 @@ def test_the_speakers_capture_reads_whether_the_output_is_headphones(monkeypatch
     monkeypatch.setattr(wasapi, "_output_private", lambda: True)
     stream = Capture.speakers()._opener()
     assert stream.private is True
+
+
+# ---- the apps lowered while the voice speaks, lifted back for the translation (#201)
+
+class At:
+    def __init__(self, now=0.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def lowered_by(factor, clock=None):
+    lowering = wasapi.Lowering(clock or At())
+    lowering.set(factor)
+    lowering._clock.now = 10.0  # long after: the change applies to all that's captured
+    return lowering
+
+
+@pytest.mark.parametrize("factor", [0.1, 0.0003])  # the slider at 10%, and at 0% (INAUDIBLE)
+def test_a_lowered_meeting_reaches_the_translation_at_its_own_level(factor):
+    speech = sine(300, 0.1, 16_000) * 0.3
+    lift = wasapi.Lifter(lowered_by(factor))
+    out = np.concatenate([lift((speech * np.float32(factor)).astype(np.float32)) for _ in range(5)])
+    assert np.allclose(out[-1600:], speech, atol=1e-6)  # float: nothing lost, even 70 dB down
+
+
+def test_what_wasnt_lowered_isnt_blown_up_and_loud_sound_isnt_made_quieter():
+    lift = wasapi.Lifter(lowered_by(0.0003))
+    ding = sine(880, 0.01, 16_000) * 0.5  # a system sound: Windows' own, not lowered
+    out = lift(ding)
+    assert np.max(np.abs(out)) <= wasapi.LIFT_LIMIT + 1e-6 and np.max(np.abs(out)) > 0.85
+    assert np.allclose(wasapi.Lifter(lowered_by(1.0))(ding), ding)  # nothing lowered: as it is
+    assert np.allclose(wasapi.Lifter(lowered_by(0.5))(sine(880, 0.01, 16_000) * 0.95), sine(880, 0.01, 16_000) * 0.95)
+
+
+def test_the_lift_follows_the_ducker_s_ramps_without_overshooting():
+    clock = At()
+    lowering = wasapi.Lowering(clock)
+    lowering.set(0.5)
+    clock.now = 0.02
+    lowering.set(0.1)  # going down: the audio captured now may still be at 1.0 or 0.5
+    assert lowering.factor() == 1.0
+    clock.now = 0.02 + wasapi.LIFT_LAG + 0.01
+    assert lowering.factor() == 0.1
+    lift = wasapi.Lifter(lowering)
+    out = lift(np.full(160, 0.01, np.float32))
+    assert out[0] == pytest.approx(0.01) and out[-1] == pytest.approx(0.1)  # up across the read, no jump
+    lowering.set(1.0)  # back up: at once (audio still lowered is lifted too little for a moment, never too much)
+    assert lowering.factor() == 1.0 and np.allclose(lift(np.full(160, 0.5, np.float32)), 0.5)
+
+
+def test_the_computer_s_capture_lifts_and_the_microphone_doesnt(monkeypatch):
+    monkeypatch.setattr(wasapi, "lowering", lowered_by(0.1))
+    quiet = [sine(300, 0.1, 48_000) * 0.03] * 10  # speech at 0.3 lowered to 10%
+    frames, _ = run_capture([FakeStream(quiet)], 0.3, lift=True)
+    assert level_db(frames[3:8]) == pytest.approx(level_db_of(0.3), abs=0.5)
+    frames, _ = run_capture([FakeStream(quiet)], 0.3)
+    assert level_db(frames[3:8]) == pytest.approx(level_db_of(0.03), abs=0.5)
+    assert Capture.speakers().lift and not Capture.microphone().lift
+
+
+def level_db_of(amplitude):
+    return 20 * np.log10(amplitude / np.sqrt(2))
+
+
+def test_the_check_still_switches_with_the_call_lowered(monkeypatch):
+    monkeypatch.setattr(wasapi, "lowering", lowered_by(0.0003))
+    quiet_call = [sine(300, 0.1, 48_000) * 0.02 * 0.0003] * 40  # a quiet call at 0%: under WHOLE_SOUND as it comes
+    checked, *_ = checked_with([], quiet_call)
+    read_all(checked, 20)
+    assert checked.switched

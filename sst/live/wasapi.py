@@ -21,7 +21,8 @@ before the 16-bit frames are made: turned far down, it would otherwise be lost i
                           while the speakers play instead)
     -> IAudioClient -> its format (usually 48 kHz float; process loopback is asked for 16 kHz mono and converts) ->
     mono (the channels' average, or the loudest channel where they cancel out) -> 16 kHz (a box filter, then
-    interpolation; state kept across packets) -> its level (quiet sound raised; the microphone's noise floor kept down)
+    interpolation; state kept across packets) -> what the laptop plays: lifted by the factor Rflow lowered the other apps
+    by while its voice speaks (Lifter) -> its level (quiet sound raised; the microphone's noise floor kept down)
     -> 100 ms frames
 
 About once a second the output devices' peak meters are read (IAudioMeterInformation, no audio): when nothing has
@@ -761,7 +762,7 @@ MISSING = 0.1  # process loopback's energy under this share of the mix's (10 dB 
 CARRIES = 0.5  # and over this share (3 dB under at most): it carries it again (between the two: no change)
 BUFFERED = 4.0  # seconds of the whole mix kept while process loopback is used, sent on a switch
 WHOLE_EVERY = 0.05  # seconds between reads of the mix while it's only compared (its buffer holds 0.2 s): less work
-WHOLE_SOUND = 1e-5  # a peak above this (-100 dBFS) is something playing: an app lowered to Ducker's INAUDIBLE is above it
+WHOLE_SOUND = 1e-5  # a peak above this (-100 dBFS) is something playing; x the factor the Ducker lowers the apps by
 VOICE_MARGIN = 0.5  # seconds after Rflow's own voice was last queued during which the whole mix may still carry it
 _voice_until = 0.0  # time.monotonic() until which Rflow's own voice may be playing (Player.play)
 _voice_device = ""  # the output Rflow's voice plays on (Player), "" before it has played
@@ -773,6 +774,62 @@ def _peak(x: np.ndarray) -> float:
 
 def _energy(x: np.ndarray) -> float:
     return float(np.dot(x.astype(np.float64), x.astype(np.float64))) if len(x) else 0.0
+
+
+# ---- the other apps lowered while the voice speaks (sst.live.ducking), lifted back for the translation
+
+LIFT_LAG = 0.3  # seconds: what's captured now may have been played up to a buffer (0.2 s) before the latest change
+LIFT_LIMIT = 0.9  # a lifted peak never goes above this: what wasn't lowered (a ding, an app not lowered yet) isn't blown up
+
+
+class Lowering:
+    """The factor the Ducker holds the other apps' volume at (1.0: as the user left them): set() by it at each change.
+    Windows applies an app's volume before every loopback, exactly (measured 2026-10-22, #201: a session at 0.1 and at
+    0.0003 came 20.0 and 70.5 dB lower through process loopback, of one app or all, and through the whole mix alike, in
+    32-bit float, nothing lost). factor(): the largest in the last LIFT_LAG seconds, so a change isn't applied to audio
+    played before it (lifting by a smaller factor than the audio had would raise it too much)."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic):
+        self._clock, self._lock = clock, threading.Lock()
+        self._now, self._before = 1.0, deque()  # the factor now; (when it ended, an earlier factor)
+
+    def set(self, factor: float) -> None:
+        with self._lock:
+            if factor != self._now:
+                self._before.append((self._clock(), self._now))
+                self._now = factor
+
+    def factor(self) -> float:
+        with self._lock:
+            since = self._clock() - LIFT_LAG
+            while self._before and self._before[0][0] < since:
+                self._before.popleft()
+            return max([self._now, *(f for _, f in self._before)])
+
+
+lowering = Lowering()  # the one Rflow's Ducker sets
+
+
+class Lifter:
+    """One capture's lift: its samples x 1 / the factor the other apps are lowered by (from `source`, the shared
+    `lowering` by default), so a meeting held at 0% for the user reaches the translation at its own level. Every app the
+    Ducker lowers is lowered by that same factor, so for them it's exact. What it didn't lower is raised as well, so the
+    gain is held where a peak would pass LIFT_LIMIT (never below 1); the gain falls at once and rises across a read."""
+
+    def __init__(self, source: Lowering | None = None):
+        self.source, self.gain = source, 1.0
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        want = 1.0 / (self.source or lowering).factor()
+        if want == 1.0 and self.gain == 1.0 or not len(x):
+            return x
+        peak = _peak(x)
+        if peak * want > LIFT_LIMIT:
+            want = max(LIFT_LIMIT / peak, 1.0)
+        old, self.gain = self.gain, want
+        if want <= old:
+            return (x * np.float32(want)).astype(np.float32)
+        return (x * np.linspace(old, want, len(x), dtype=np.float32)).astype(np.float32)
 
 
 class _Checked:
@@ -846,8 +903,9 @@ class _Checked:
                 del self._bins[old]
         cell[0] += _energy(a)
         cell[1] += _energy(b)
-        cell[2] += len(a) / self.rate if _peak(a) > WHOLE_SOUND else 0.0
-        cell[3] += len(b) / self.rate if _peak(b) > WHOLE_SOUND else 0.0
+        floor = WHOLE_SOUND * lowering.factor()  # the apps lowered while the voice speaks are as quiet in both
+        cell[2] += len(a) / self.rate if _peak(a) > floor else 0.0
+        cell[3] += len(b) / self.rate if _peak(b) > floor else 0.0
 
     def _decide(self, now: float, back: bool) -> bool:
         first = int(now // CHECK_BIN) - CHECK_WINDOW / CHECK_BIN
@@ -862,7 +920,7 @@ class _Checked:
     def _keep(self, a: np.ndarray, b: np.ndarray) -> None:
         """The mix of this read kept for a switch, unless process loopback carried it (then what's kept is dropped:
         it was sent through process loopback)."""
-        if _peak(a) > WHOLE_SOUND and _energy(a) >= CARRIES * _energy(b):
+        if _peak(a) > WHOLE_SOUND * lowering.factor() and _energy(a) >= CARRIES * _energy(b):
             self._kept.clear()
             self._kept_len = 0
             return
@@ -1086,8 +1144,10 @@ class Capture:
     sounding(seconds): what's captured had sound at a level one would hear in the last `seconds` (before it's raised)."""
 
     def __init__(self, opener: Callable = _Stream, clock: Callable[[], float] = time.monotonic,
-                 what: str = "output device", level: bool | Callable[[], Leveler] = False, highpass: bool = False):
+                 what: str = "output device", level: bool | Callable[[], Leveler] = False, highpass: bool = False,
+                 lift: bool = False):
         self._opener, self._clock, self.what, self.level, self.highpass = opener, clock, what, level, highpass
+        self.lift = lift  # the apps lowered while the voice speaks are lifted back (Lifter)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.device_rate = 0  # the device's own rate, once opened (for the log)
@@ -1100,7 +1160,8 @@ class Capture:
 
     @classmethod
     def speakers(cls) -> "Capture":
-        return cls(lambda: _Speakers(_speakers(), private=_output_private()), what="output device", level=True)
+        return cls(lambda: _Speakers(_speakers(), private=_output_private()), what="output device", level=True,
+                   lift=True)
 
     @classmethod
     def microphone(cls, wanted: str | Callable[[], str] = "") -> "Capture":
@@ -1172,6 +1233,7 @@ class Capture:
         resample, frame = Resampler(stream.rate), Framer()
         level = None if not self.level else Leveler() if self.level is True else self.level()
         rumble = HighPass() if self.highpass else None
+        lift = Lifter() if self.lift else None
         poll = getattr(stream, "poll", None)
         last_packet = last_fill = last_check = last_poll = sound_at = self._clock()
         told = False  # that Windows' output is muted, until sound comes again
@@ -1185,7 +1247,9 @@ class Capture:
                 if rumble is not None:
                     samples = rumble(samples)
                 if len(samples) and _energy(samples) >= AUDIBLE * AUDIBLE * len(samples):
-                    self.heard_at = now
+                    self.heard_at = now  # as it plays in the room: lowered for the user, not lifted
+                if lift is not None:
+                    samples = lift(samples)
                 if level is not None:
                     if len(samples) and float(np.max(np.abs(samples))) > SOUND:
                         sound_at, told = now, False
