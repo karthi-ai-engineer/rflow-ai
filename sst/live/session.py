@@ -138,6 +138,9 @@ class LiveSession:
             log.info("The voice said %d sentences (%d skipped to keep up); the voice skipped a repeat %d times", old.said,
                      old.skipped, old.repeats)
         if speaker is not None:
+            ducker = getattr(speaker, "ducker", None)
+            if ducker is not None:  # what the computer's way translates is never lowered (sst.live.ducking)
+                ducker.captured = lambda: SYSTEM in self.lanes
             speaker.start()
 
     def note(self, lane: str, message: str) -> None:

@@ -12,6 +12,13 @@ volume the user changes meanwhile keeps the user's. Rflow hears the lowered apps
 its own level (sst.live.level) and Gemini translates speech down to -70 dBFS (measured), so the meeting is still
 translated. Even at 0%: an app at a mixer volume of exactly 0 is silence in the mix Rflow hears, so 0% is INAUDIBLE
 instead (phase 37 measured an app at 0.03% translated in full, and nobody hears it).
+
+The app being translated is never lowered (#201): while live translation hears the computer (`captured()`, the session
+says so), the apps playing on the outputs it captures (Windows' default output and its default for calls) are what it
+translates, and they stay as they are; only apps on other outputs are lowered then. Calling apps (CALLS: Teams, Zoom,
+Webex...) are never lowered: a call isn't background sound. An app lowered before (the microphone alone) that becomes
+translated (the computer's sound added) is put back. In 3 of 6 of the owner's Teams sessions Teams sat at 0-15%,
+which also hid the call from the check that finds it (sst.live.wasapi._Checked).
 """
 import ctypes
 import json
@@ -26,7 +33,19 @@ from ctypes import POINTER, byref, c_float, c_int, c_void_p, wintypes
 from dataclasses import dataclass
 from pathlib import Path
 
-from sst.live.wasapi import _CLSCTX_ALL, _GUID, E_RENDER, _com, _enumerator, _method, _release
+from sst.live.wasapi import (
+    _CLSCTX_ALL,
+    _GUID,
+    E_COMMUNICATIONS,
+    E_CONSOLE,
+    E_RENDER,
+    _com,
+    _default_id,
+    _device_id,
+    _enumerator,
+    _method,
+    _release,
+)
 
 STEP = 0.02  # seconds between steps
 DOWN = 0.15  # seconds from full volume to silence (a smaller step down takes less)
@@ -36,6 +55,8 @@ INAUDIBLE = 0.0003  # the lowest mixer volume Rflow sets: 0% for the user, still
 CHANGED = 0.02  # a volume this far from what Rflow set was changed by the user: theirs from now on
 KEEP = 7 * 86_400  # seconds a lowered app that isn't running is remembered, to be put back when it runs again
 RECORD = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "sst" / "lowered-apps.json"
+CALLS = re.compile(r"(?:^|[\\/|%])(ms-?teams|teams|zoom|cpthost|webex\w*|ciscocollabhost|atmgr|skype|lync|slack|discord)\.exe",
+                   re.IGNORECASE)  # the calling apps, by the program in the session's identifier
 
 log = logging.getLogger(__name__)
 
@@ -50,12 +71,15 @@ class _Lowered:
 class Ducker:
     """start() keeps the other apps at `depth` on its own thread; stop() puts every app back at once. `find(playing)`
     lists the apps' sounds (all of them, or only those playing now): the real ones by default, fakes in the tests.
-    `depth`: how loud the other apps stay, 0.0 to 1.0 (1.0: as they are; 0.0: INAUDIBLE)."""
+    `depth`: how loud the other apps stay, 0.0 to 1.0 (1.0: as they are; 0.0: INAUDIBLE). `captured()`: live
+    translation hears the computer now (set by the session), `outputs()` the ids of the outputs it captures then."""
 
     def __init__(self, depth: float, find: Callable[[bool], list] | None = None, record: Path = RECORD,
-                 clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time,
+                 captured: Callable[[], bool] = lambda: False, outputs: Callable[[], set[str]] | None = None):
         self.depth = _bounded(depth)
         self._find = find or apps
+        self.captured, self._outputs = captured, outputs or captured_outputs
         self.record, self._clock, self._wall = record, clock, wall
         self._lowered: dict[str, _Lowered] = {}
         self._level = 1.0  # where the apps are: 1.0 as the user left them, `depth` lowered
@@ -64,6 +88,7 @@ class Ducker:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._said: set[str] = set()  # the apps the log has named
+        self._spared: set[str] = set()  # the apps the log has named as left alone
 
     def set_depth(self, depth: float) -> None:
         self.depth = _bounded(depth)
@@ -118,8 +143,19 @@ class Ducker:
         except OSError as e:
             log.debug("The apps' sound couldn't be listed: %s", e)
             return
+        spare = self._spare()
+        for key, item in list(self._lowered.items()):
+            if spare(item.sound):  # translated now (the computer's sound added): back to its own volume
+                self._put_back(key, item)
         added = []
         for sound in found:
+            if spare(sound):
+                name = _app_name(sound.name)
+                if name not in self._spared:
+                    self._spared.add(name)
+                    log.info("While live translation speaks, %s is left as it is: it's what's translated, or a call", name)
+                sound.close()
+                continue
             try:
                 volume = sound.volume() if sound.key not in self._lowered else 0.0
             except OSError:
@@ -136,6 +172,31 @@ class Ducker:
                 self._said |= names
                 log.info("While live translation speaks, lowered to %d%%: %s", round(self.depth * 100),
                          ", ".join(sorted(names)))
+
+    def _spare(self) -> Callable[[object], bool]:
+        """Which apps are left alone now: calling apps, and while the computer is translated, those it hears."""
+        translated, outputs = self.captured(), None
+        if translated:
+            try:
+                outputs = self._outputs()
+            except OSError as e:  # not known: every app may be what's translated
+                log.debug("The captured outputs couldn't be read: %s", e)
+
+        def spare(sound) -> bool:
+            if CALLS.search(sound.name or ""):
+                return True
+            device = getattr(sound, "device", "")
+            return translated and (outputs is None or not device or device in outputs)
+        return spare
+
+    def _put_back(self, key: str, item: _Lowered) -> None:
+        try:
+            if abs(item.sound.volume() - item.now) <= CHANGED:  # not moved by the user meanwhile
+                item.sound.set_volume(item.original)
+                log.info("%s is translated now: back to its own volume", _app_name(item.sound.name))
+        except OSError:
+            pass
+        self._drop(key)
 
     def _apply(self) -> None:
         for key, item in list(self._lowered.items()):
@@ -259,10 +320,10 @@ _ACTIVE = 1  # DEVICE_STATE_ACTIVE, and AudioSessionStateActive: a session playi
 
 class _AppSound:
     """One app's sound on one output (an audio session): `key` this run of it, `name` the app (Windows remembers the
-    volume by it). Used on the thread that found it."""
+    volume by it), `device` the output's id. Used on the thread that found it."""
 
-    def __init__(self, volume: c_void_p, key: str, name: str, pid: int = 0):
-        self._volume, self.key, self.name, self.pid = volume, key, name, pid
+    def __init__(self, volume: c_void_p, key: str, name: str, pid: int = 0, device: str = ""):
+        self._volume, self.key, self.name, self.pid, self.device = volume, key, name, pid, device
 
     def volume(self) -> float:
         value = c_float()
@@ -301,9 +362,25 @@ def apps(playing: bool = True, own: int | None = None) -> list[_AppSound]:
     return found
 
 
+def captured_outputs() -> set[str]:
+    """The outputs live translation captures from the computer: Windows' default output and its default for calls
+    (sst.live.wasapi._Speakers). COM must be set up on the calling thread."""
+    enumerator, found = _enumerator(), set()
+    try:
+        for role in (E_CONSOLE, E_COMMUNICATIONS):
+            try:
+                found.add(_default_id(enumerator, E_RENDER, role))
+            except OSError:  # no such default now
+                pass
+    finally:
+        _release(enumerator)
+    return found
+
+
 def _sessions(device, playing: bool, own: int) -> list[_AppSound]:
     manager, sessions, out = c_void_p(), c_void_p(), []
     try:
+        device_id = _device_id(device)
         _method(device, 3, POINTER(_GUID), wintypes.DWORD, c_void_p, POINTER(c_void_p))(
             byref(_IID_SESSION_MANAGER2), _CLSCTX_ALL, None, byref(manager))  # IMMDevice::Activate
         _method(manager, 5, POINTER(c_void_p))(byref(sessions))  # GetSessionEnumerator
@@ -326,7 +403,7 @@ def _sessions(device, playing: bool, own: int) -> list[_AppSound]:
                     continue
                 key, name = _text(control2, 13), _text(control2, 12)  # GetSessionInstanceIdentifier, -Identifier
                 _query(control, _IID_SIMPLE_VOLUME, volume)
-                out.append(_AppSound(volume, key, name, pid.value))
+                out.append(_AppSound(volume, key, name, pid.value, device_id))
                 volume = c_void_p()  # the sound keeps it
             except OSError as e:
                 log.debug("An app's sound was skipped: %s", e)
