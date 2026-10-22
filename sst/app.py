@@ -32,13 +32,13 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QFontMetrics, QGuiApplication, QIcon, QPainter
-from PySide6.QtNetwork import QLocalServer, QLocalSocket
+from PySide6.QtNetwork import QLocalServer
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
-from sst import DOWNLOADS_DIR, __version__, bench, downloads, scan, theme, updates
+from sst import DOWNLOADS_DIR, __version__, bench, downloads, instance, scan, theme, updates
 from sst.audio import PREROLL_SECONDS, TAIL_SECONDS, Recorder, default_microphone, input_device_names
 from sst.commands import UNDO, match_command, phrases_for
-from sst.dictate import DEFAULT_HOTKEY, Dictation, already_running, wispr_flow_running
+from sst.dictate import DEFAULT_HOTKEY, Dictation, wispr_flow_running
 from sst.engines import DEFAULT_MODEL, SPEECH_MODELS, load_engine, usable
 from sst.engines.cloud import CLOUD, REMOTE, SERVER, CloudEngine
 from sst.gateway import PROVIDERS, SPEECH_SERVER, GatewayConfig, Polisher
@@ -78,9 +78,7 @@ UPDATE_DIR = Path(os.environ.get("TEMP", Path.home())) / "Rflow-update"  # downl
 # The sentence models are tried on (the scan, a cloud or server card's Test): 7.4 s of a LibriVox reading, as in
 # sherpa-onnx's model packages. It comes with Rflow, since Parakeet may not be downloaded.
 SAMPLE_FILE = Path(__file__).resolve().parent / "static" / "sample.wav"
-# Opening Rflow while it runs asks the running copy, through this local pipe, to show its window.
-SERVER_NAME = f"Rflow-window-{os.environ.get('USERNAME', 'user')}"
-ASFW_ANY = -1  # AllowSetForegroundWindow: any process
+SERVER_NAME = instance.SERVER_NAME  # the local pipe a second Rflow asks to show the window (sst/instance.py)
 WARM_SECONDS = 300  # the microphone stays open this long after a dictation (the owner chose 5 minutes)
 DEBUG_DIR = LOG_DIR.parent / "debug"  # each dictation's stages and chunk audio, when Settings asks for them
 
@@ -157,7 +155,8 @@ def close_log_files() -> None:
 # transcripts; the last scan) and %LOCALAPPDATA%\sst (logs, reading tests, the installed app's recordings, the debug
 # steps, and the downloaded speech models and voice in "models"). The source code's recordings/ is never touched.
 DATA_DIRS = (CONFIG_DIR, LOG_DIR.parent)
-AFTER = "--after="  # Rflow started again by Start over waits for the one that started it (its process id) to end
+AFTER = instance.AFTER  # Rflow started again by Start over waits for the one that started it (its process id) to end
+wait_for_exit = instance.wait_for_exit
 
 
 def erase_data(folders=DATA_DIRS, keep: tuple[str, ...] = ()) -> list[Path]:
@@ -187,20 +186,7 @@ def restart_command(pid: int) -> list[str]:
     """How to start this Rflow again once process `pid` (this one) has ended: Rflow.exe, or the app from the source."""
     if getattr(sys, "frozen", False):
         return [sys.executable, f"{AFTER}{pid}"]
-    return [sys.executable, "-c", "import sys; from sst.app import main; sys.exit(main())", f"{AFTER}{pid}"]
-
-
-def wait_for_exit(pid: int, seconds: float = 30) -> None:
-    """Wait for the Rflow that started this one to end: until then it holds the mutex that says Rflow runs, and this
-    one would only ask it to show its window."""
-    SYNCHRONIZE = 0x00100000
-    _kernel32.OpenProcess.restype = ctypes.c_void_p
-    _kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
-    _kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-    handle = _kernel32.OpenProcess(SYNCHRONIZE, False, pid)
-    if handle:  # none: it has ended already
-        _kernel32.WaitForSingleObject(handle, int(seconds * 1000))
-        _kernel32.CloseHandle(handle)
+    return [sys.executable, "-c", "import sys; from sst.instance import launch; sys.exit(launch())", f"{AFTER}{pid}"]
 
 
 # ---------------------------------------------------------------- the recording pill
@@ -385,17 +371,7 @@ def release_running_mutex() -> None:
 
 def show_running_window() -> bool:
     """Ask a running Rflow to show its window; False if none answers (e.g. the console `sst dictate` or 1.1 and older)."""
-    socket = QLocalSocket()
-    socket.connectToServer(SERVER_NAME)
-    if not socket.waitForConnected(1500):
-        return False
-    # Windows only lets the process the user just started take the foreground. Pass that on to the running copy,
-    # or its window would only flash in the taskbar.
-    ctypes.windll.user32.AllowSetForegroundWindow(ASFW_ANY)
-    socket.write(b"show\n")
-    socket.waitForBytesWritten(1500)
-    socket.disconnectFromServer()
-    return True
+    return instance.show_running_window(SERVER_NAME)
 
 
 # ---------------------------------------------------------------- the app
@@ -1814,19 +1790,14 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if "--self-test" in argv:
         return self_test()
-    after = next((a.removeprefix(AFTER) for a in argv if a.startswith(AFTER)), "")
-    if after.isdigit():  # started again by Start over
-        wait_for_exit(int(after))
+    if instance.hand_over(argv):  # asked already by Rflow.exe's entry (instance.launch), before these imports
+        return 0
     log_dir = setup_logging()
     log.info("%s %s starting (%s)", APP_NAME, __version__, scan.machine())  # which kind of computer the log is from
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)  # closing the window keeps Rflow in the tray
     app.setWindowIcon(QIcon(str(ICON_FILE)))
-    if already_running():
-        if "--startup" not in argv and not show_running_window():
-            QMessageBox.information(None, APP_NAME, f"{APP_NAME} is already running. Look for its icon in the tray.")
-        return 0
     hold_running_mutex()
     if not QSystemTrayIcon.isSystemTrayAvailable():
         QMessageBox.critical(None, APP_NAME, "Windows has no notification area (system tray) available.")
