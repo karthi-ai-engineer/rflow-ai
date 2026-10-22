@@ -78,6 +78,7 @@ SAMPLE_FILE = Path(__file__).resolve().parent / "static" / "sample.wav"
 SERVER_NAME = f"Rflow-window-{os.environ.get('USERNAME', 'user')}"
 ASFW_ANY = -1  # AllowSetForegroundWindow: any process
 WARM_SECONDS = 300  # the microphone stays open this long after a dictation (the owner chose 5 minutes)
+TICK_MS = 1000  # dictation's housekeeping: none of it needs to be sooner (Dictation.tick, Recorder.tick)
 DEBUG_DIR = LOG_DIR.parent / "debug"  # each dictation's stages and chunk audio, when Settings asks for them
 
 log = logging.getLogger("sst.app")
@@ -413,6 +414,8 @@ class _Signals(QObject):
     voice_done = Signal(str)  # "" or why the voice couldn't be downloaded
     scan_progress = Signal(str)
     scan_done = Signal(object)  # the scan's result (sst.scan.save), or {"error": why}
+    key = Signal()  # the dictation shortcut's listener queued an event, from the keyboard hook's thread
+    live_key = Signal()  # the same for live translation's shortcut
 
 
 class TrayApp:
@@ -461,6 +464,8 @@ class TrayApp:
         self.signals.voice_done.connect(self._on_voice_done)
         self.signals.scan_progress.connect(self._on_scan_progress)
         self.signals.scan_done.connect(self._on_scan_done)
+        self.signals.key.connect(self._pump)  # the keys wake the app up: nothing polls between them
+        self.signals.live_key.connect(self._live_key_pump)
 
         self.icon = QIcon(str(ICON_FILE))
         self.recording_icon = _with_red_dot(self.icon)
@@ -478,8 +483,7 @@ class TrayApp:
         self.live.moved.connect(self._live_moved)
         self.live.speak_toggled.connect(lambda on: self.set_live_speak(on))
         self.live.noted.connect(lambda _: self.window.isVisible() and self.window.refresh())  # the Live page shows it
-        self.live_listener = None  # live translation's shortcut (Ctrl+Alt+L), watched by live_keys
-        self.live_keys = QTimer(interval=30, timeout=self._live_key_pump)
+        self.live_listener = None  # live translation's shortcut (Ctrl+Alt+L)
         self.window = MainWindow(self)
 
         self.tray = QSystemTrayIcon(self.icon)
@@ -526,9 +530,11 @@ class TrayApp:
         if not self.server.listen(SERVER_NAME):
             log.warning("No window server (%s); opening Rflow again won't show this window", self.server.errorString())
 
-        self.pump = QTimer()
-        self.pump.setInterval(15)
-        self.pump.timeout.connect(self._pump)
+        # Dictation's housekeeping (the 30-minute limit, closing or watching the open microphone), once a second and only
+        # while recording or while the microphone is open; the keys themselves arrive through signals.key.
+        self.ticker = QTimer()
+        self.ticker.setInterval(TICK_MS)
+        self.ticker.timeout.connect(self._tick)
         self._load_speech()
         if getattr(sys, "frozen", False):  # the source checkout is updated with git, not by the app
             # The installer of an update that has finished (it started this version) isn't needed any more.
@@ -624,7 +630,7 @@ class TrayApp:
         self._apply_cleanup()  # also gives the new model Your words, and builds its voice pipeline
         if first:
             self._start_listener()
-            self.pump.start()
+            self._wake_ticker()
         self.window.refresh()
         if not first:
             return
@@ -660,6 +666,7 @@ class TrayApp:
             log.warning("Bad hotkey %r in the settings (%s); using %s", self.settings.hotkey, e, DEFAULT_HOTKEY)
             key = parse_hotkey(DEFAULT_HOTKEY)
         self.listener = HotkeyListener(key)
+        self.listener.on_event = self.signals.key.emit
         self.listener.start()
         self.dictation.listener = self.listener
         self._update_status()
@@ -753,11 +760,28 @@ class TrayApp:
     # -- running
 
     def _pump(self) -> None:
+        """The dictation shortcut's events, as they come (signals.key)."""
+        if self.listener is None or self.dictation is None:
+            return
         events = self.listener.events
         while not events.empty():
             event, at = events.get_nowait()
             self.dictation.handle(event, at)
-        self.dictation.tick(time.monotonic())
+        self._wake_ticker()  # a recording may have started, and the microphone opened
+
+    def _tick(self) -> None:
+        if self.dictation is not None:
+            self.dictation.tick(time.monotonic())
+        if not self._needs_ticks():
+            self.ticker.stop()
+
+    def _needs_ticks(self) -> bool:
+        r = self.recorder
+        return self.dictation is not None and (self.dictation.recording or r.warm or r.busy)
+
+    def _wake_ticker(self) -> None:
+        if self._needs_ticks() and not self.ticker.isActive():
+            self.ticker.start()
 
     def _on_result(self, heard: str, typed: str, seconds: float) -> None:
         self.transforms.note_typed(typed + " ")  # as Dictation pasted it: Text Transform's text where Ctrl+A copies nothing
@@ -845,6 +869,8 @@ class TrayApp:
                 recorder.keep_open()
             except Exception as e:  # no microphone yet: it opens at the first dictation
                 log.warning("Could not keep the microphone open: %s", e)
+        if hasattr(self, "ticker"):  # not while starting: the ticks begin with dictation (_on_loaded)
+            self._wake_ticker()
 
     def apply_settings(self, new: Settings) -> None:
         """Save the settings and use them at once (the Settings page and the welcome change them one by one)."""
@@ -1157,13 +1183,12 @@ class TrayApp:
         if self.live_listener is not None:
             self.live_listener.stop()
             self.live_listener = None
-        self.live_keys.stop()
         shortcut, label = self.settings.live_shortcut, ""
         if shortcut and not self.live_shortcut_clash():
             try:
                 self.live_listener = HotkeyListener(parse_hotkey(shortcut))
+                self.live_listener.on_event = self.signals.live_key.emit
                 self.live_listener.start()
-                self.live_keys.start()
                 label = parse_hotkey(shortcut).label
             except (ValueError, OSError) as e:
                 log.warning("Live translation's shortcut %r doesn't work: %s", shortcut, e)
@@ -1699,8 +1724,7 @@ class TrayApp:
         Rflow again: it opens on the welcome, like a new install."""
         log.info("Starting over: the downloaded speech models are %s", "kept" if keep_models else "deleted too")
         self._cancel_download.set()  # a download in progress stops writing into the models folder
-        for timer in (self.pump, self.live_keys):
-            timer.stop()
+        self.ticker.stop()
         self._stop_all()
         self.dictation, self._local = None, None  # the speech models let go of, so their files can be deleted too
         gc.collect()
