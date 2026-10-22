@@ -82,7 +82,12 @@ class FakeAccess:
 
 class FakeListener:
     def __init__(self, hotkey):
-        self.hotkey, self.events, self.captured = hotkey, queue.Queue(), None
+        self.hotkey, self.events, self.captured, self.on_event = hotkey, queue.Queue(), None, None
+
+    def send(self, event):
+        """As the keyboard hook does: queue the event, then wake the controller up (it polls nothing)."""
+        self.events.put((event, 0.0))
+        self.on_event()
 
     def start(self):
         pass
@@ -153,7 +158,7 @@ def wait_until(condition, ms=2000):
 
 
 def press(controller):
-    controller.listener.events.put(("release", 0.0))
+    controller.listener.send("release")
 
 
 def shown(controller):
@@ -266,7 +271,7 @@ def test_esc_closes_the_popup(qt):
     controller, _, _ = make()
     press(controller)
     assert shown(controller)
-    controller.listener.events.put((f"key:{VK_ESCAPE}", 0.0))
+    controller.listener.send(f"key:{VK_ESCAPE}")
     assert wait_until(lambda: not controller.popup.isVisible()) and controller.listener.captured is None
 
 
@@ -279,6 +284,16 @@ def test_the_popup_closes_when_the_user_goes_to_another_app_but_not_for_rflows_o
     assert controller.popup.isVisible()
     access.window = 8  # another app
     assert wait_until(lambda: not controller.popup.isVisible())
+    assert wait_until(lambda: not controller.watch.isActive())  # the popup is gone: nothing is watched any more
+
+
+def test_nothing_runs_while_waiting_for_the_shortcut(qt):
+    """Rflow sits in the tray all day: Translate wakes up for its shortcut's events, it never polls for them."""
+    from PySide6.QtCore import QTimer
+    controller, _, _ = make()
+    assert not any(timer.isActive() for timer in controller.findChildren(QTimer))
+    press(controller)
+    assert shown(controller) and controller.watch.isActive()  # only while the popup is open
 
 
 def test_a_failing_model_is_explained_with_try_again(qt):
@@ -351,7 +366,7 @@ def test_more_shows_every_language_and_esc_goes_back(qt):
     popup = controller.popup
     popup.more.click()
     assert not popup.grid_box.isHidden() and popup.result.isHidden() and len(popup.all_languages) >= 25
-    controller.listener.events.put((f"key:{VK_ESCAPE}", 0.0))
+    controller.listener.send(f"key:{VK_ESCAPE}")
     assert wait_until(lambda: popup.grid_box.isHidden()) and popup.isVisible() and not popup.result.isHidden()
     popup.more.click()
     popup.all_languages["Korean"].click()

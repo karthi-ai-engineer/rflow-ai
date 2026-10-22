@@ -3,9 +3,10 @@ vLLM or any other OpenAI-compatible server (a company AI gateway, LM Studio...).
 are the user's settings; each provider gets the request format it understands (PROVIDERS).
 
 Parakeet transcribes on the laptop; only the finished text goes to the endpoint. Built never to hold up typing:
-if the chosen model fails the backup model is tried, a slow answer or an unreachable endpoint gives the text as heard
-(and an unreachable endpoint is skipped for a minute), and the connection is opened while the user is still speaking.
-Standard library only; connections go direct (no proxy).
+if the chosen model fails or is slow the backup model is tried (Polisher.routes), an unreachable endpoint gives the text
+as heard within a few seconds (sst.netconnect) and is skipped for a minute, a provider that refused the key (no credit,
+quota used up, key not accepted) is skipped for a few minutes, and the connection is opened while the user is still
+speaking. Standard library only; connections go direct (no proxy).
 """
 import base64
 import ctypes
@@ -14,7 +15,6 @@ import http.client
 import json
 import logging
 import re
-import ssl
 import threading
 import time
 from ctypes import wintypes
@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from sst import modelrules
+from sst import modelrules, netconnect
 from sst.settings import CONFIG_DIR
 
 GATEWAY_FILE = CONFIG_DIR / "gateway.json"  # the API keys, encrypted for the Windows user; never in git
@@ -32,8 +32,8 @@ DEFAULT_URL = ""  # the user chooses a provider, or enters their own server's ad
 SPEECH_SERVER = "speech-server"
 ANTHROPIC_VERSION = "2023-06-01"  # the Messages API version header Anthropic requires
 
-CONNECT_TIMEOUT = 1.5    # a first connect sometimes stalls (seen from Python); a retry gets through in milliseconds
-CONNECT_ATTEMPTS = 3
+CONNECT_BUDGET = netconnect.CONNECT_BUDGET  # seconds to connect, whatever the network does (name lookup included)
+MAX_ASKED = 2            # models asked for one text: the chosen one and one backup (one that refused isn't asked)
 ANSWER_TIMEOUT = 2.0     # seconds, plus ANSWER_PER_WORD for each word; a normal sentence takes 0.5-0.7 s
 ANSWER_PER_WORD = 0.04
 DOWN_FOR = 60.0          # after the gateway couldn't be reached (e.g. off the office network), skip cleanup this long
@@ -65,7 +65,9 @@ class Unreachable(OSError):
 
 
 class GatewayError(Exception):
-    pass
+    def __init__(self, message: str, refusal: netconnect.Refusal | None = None):
+        super().__init__(message)
+        self.refusal = refusal  # no credit, quota used up, key not accepted (sst.netconnect)
 
 
 @dataclass(frozen=True)
@@ -277,6 +279,24 @@ class Polisher:
         self._used = 0.0
         self._down_until = 0.0
         self._lock = threading.Lock()
+        self._other: Polisher | None | bool = None  # the backup at another provider; None: not looked for yet
+
+    def routes(self) -> list[tuple["Polisher", str]]:
+        """The models to ask, in order: the chosen one; the backup model, never the chosen one again; and, when a cloud
+        provider is chosen and the user has a key for another one, that provider's model from the ready-made setups
+        (sst.setups), so no credit or a used-up quota at one provider doesn't stop the cleanup. Without such a key,
+        nothing else is asked."""
+        routes = [(self, self.model)]
+        if self.fallback and self.fallback != self.model:
+            routes.append((self, self.fallback))
+        if self._other is None:
+            from sst.setups import backup_for  # sst.setups builds on this module
+            found = backup_for(self.config) if not self.config.service.own_server else None  # own servers stay private
+            self._other = Polisher(*found) if found and found[1] != self.model else False
+        if self._other:
+            self._other.vocabulary, self._other.system_prompt = self.vocabulary, self.system_prompt
+            routes.append((self._other, self._other.model))
+        return routes
 
     # ---- used by the dictation
 
@@ -291,15 +311,26 @@ class Polisher:
         if time.monotonic() < self._down_until:
             self.last_error = "the AI endpoint could not be reached a moment ago"
             return text
-        for model in [self.model] + ([self.fallback] if self.fallback and self.fallback != self.model else []):
+        asked = 0
+        for polisher, model in self.routes():
+            if refused := polisher._refused(model):  # asked a moment ago and refused: the next one, without waiting
+                self.last_error = self.last_error or refused  # the answer just given says more
+                continue
+            if asked == MAX_ASKED:
+                break
+            asked += 1
             t0 = time.perf_counter()
             try:
-                cleaned = self._ask(model, text)
+                cleaned = polisher._ask(model, text)
             except TimeoutError:
                 self.last_error = f"{_short(model)} took too long"
-                return text  # the time for this dictation is used up; don't start on the other model
+                log.warning("Cleanup with %s took too long", model)
+                continue  # the backup may answer in time
             except (OSError, http.client.HTTPException) as e:
-                self._mark_down(e)
+                if polisher is self:
+                    self._mark_down(e)
+                else:
+                    self.last_error = f"the backup AI could not be reached ({e})"
                 return text
             except GatewayError as e:
                 self.last_error = str(e)
@@ -321,11 +352,17 @@ class Polisher:
         with a readable reason."""
         if not self.address or not self.model:
             raise GatewayError("no AI model is set up: choose one in AI cleanup")
-        words, reason = len(text.split()), ""
+        words, reason, asked = len(text.split()), "", 0
         timeout, limit = TRANSFORM_TIMEOUT + TRANSFORM_PER_WORD * words, TRANSFORM_TOKENS + TRANSFORM_TOKENS_PER_WORD * words
-        for model in [self.model] + ([self.fallback] if self.fallback and self.fallback != self.model else []):
+        for polisher, model in self.routes():
+            if refused := polisher._refused(model):
+                reason = reason or refused
+                continue
+            if asked == MAX_ASKED:
+                break
+            asked += 1
             try:
-                return self._ask(model, text, timeout, limit)
+                return polisher._ask(model, text, timeout, limit)
             except TimeoutError:
                 reason = f"{_short(model)} took too long"
             except (OSError, http.client.HTTPException) as e:
@@ -352,7 +389,7 @@ class Polisher:
         path = "/models?limit=1000" if self.config.service.api == "anthropic" else "/models"
         try:
             with self._lock:
-                status, data = self._request(path, None, 10.0, method="GET")
+                status, data, _ = self._request(path, None, 10.0, method="GET")
         except TimeoutError:
             raise GatewayError("no answer in time") from None
         except (OSError, http.client.HTTPException) as e:
@@ -417,11 +454,23 @@ class Polisher:
         words = len(text.split())
         path, body = self._body(model, text, limit or ANSWER_TOKENS + ANSWER_TOKENS_PER_WORD * words)
         with self._lock:
-            status, data = self._request(path, json.dumps(body), timeout or ANSWER_TIMEOUT + ANSWER_PER_WORD * words)
+            status, data, headers = self._request(path, json.dumps(body), timeout or ANSWER_TIMEOUT + ANSWER_PER_WORD * words)
         try:
             answer = json.loads(data)
         except ValueError:
-            raise GatewayError(f"{_short(model)}: HTTP {status}, not JSON") from None
+            answer = None
+        if status == 200:
+            netconnect.forgive(self._where, self.config.api_key, model)
+        elif isinstance(answer, list) and answer and isinstance(answer[0], dict):
+            answer = answer[0]  # an error wrapped in a list (Gemini's OpenAI-compatible endpoint)
+        if status != 200 and (found := netconnect.refusal(status, data, headers)):
+            # Said plainly, and remembered: the next texts go to the backup at once (and cloud speech on the same key
+            # to Parakeet).
+            netconnect.refuse(self._where, self.config.api_key, model, found)
+            raise GatewayError(f"{self.config.service.name}: {found.reason} (HTTP {status} {_detail(answer, data)})",
+                               found)
+        if answer is None:
+            raise GatewayError(f"{_short(model)}: HTTP {status}, not JSON")
         if not isinstance(answer, dict):
             raise GatewayError(f"{_short(model)}: HTTP {status}, an unexpected answer")
         if self.config.service.api == "anthropic":
@@ -442,7 +491,8 @@ class Polisher:
             content = content[1:-1].strip()  # some models wrap the answer in quotes
         return content
 
-    def _request(self, path: str, body: str | None, timeout: float, method: str = "POST") -> tuple[int, str]:
+    def _request(self, path: str, body: str | None, timeout: float,
+                 method: str = "POST") -> tuple[int, str, http.client.HTTPMessage]:
         headers = {"Content-Type": "application/json"}
         if self.config.service.api == "anthropic":
             headers.update({"x-api-key": self.config.api_key, "anthropic-version": ANTHROPIC_VERSION})
@@ -465,7 +515,7 @@ class Polisher:
                 self._close()
                 raise
             self._used = time.monotonic()
-            return response.status, data
+            return response.status, data, response.headers
         raise AssertionError("unreachable")
 
     def _prepare(self) -> None:
@@ -480,20 +530,21 @@ class Polisher:
 
     def _connect(self) -> None:
         self._close()
-        error: OSError | None = None
-        for _ in range(CONNECT_ATTEMPTS):
-            conn = (http.client.HTTPSConnection(self._host, self._port, timeout=CONNECT_TIMEOUT,
-                                                context=ssl.create_default_context())
-                    if self._https else http.client.HTTPConnection(self._host, self._port, timeout=CONNECT_TIMEOUT))
-            try:
-                conn.connect()
-            except OSError as e:
-                error = e
-                conn.close()
-                continue
-            self._conn, self._used = conn, time.monotonic()
-            return
-        raise Unreachable(f"cannot reach {self._host}: {error}")
+        try:
+            self._conn = netconnect.http_connection(self._https, self._host, self._port, CONNECT_BUDGET)
+        except OSError as e:  # every address was tried within the budget
+            raise Unreachable(f"cannot reach {self._host}: {e}") from None
+        self._used = time.monotonic()
+
+    @property
+    def _where(self) -> str:
+        """The provider's host, as sst.netconnect remembers refusals (cloud speech on the same host and key shares them)."""
+        return f"{self._host}:{self._port or ''}"
+
+    def _refused(self, model: str) -> str:
+        """Why the provider refused this key or model a moment ago (sst.netconnect), or ""."""
+        reason = netconnect.refused(self._where, self.config.api_key, model)
+        return f"{self.config.service.name}: {reason} (a moment ago)" if reason else ""
 
     def _close(self) -> None:
         if self._conn is not None:

@@ -72,7 +72,8 @@ SPEECH_MODELS = {m.key: m for m in [
     SpeechModel("gemini", "Google Gemini", "cloud",
                 "Gemini 3.5 Transcribe writes down exactly what was said, with the time of each word; Gemini's Flash "
                 "models are there too. Good with names and mixed languages. Transcribe doesn't know Tamil: for Tamil, "
-                "choose gemini-3.5-flash-lite.",
+                "choose gemini-3.5-flash-lite. gemini-3.5-transcribe-live (a preview) transcribes while you speak: the "
+                "text is there about half a second after you stop, at about twice the price.",
                 "Many languages", "Nothing to download", language_choice=True),
     SpeechModel("server", "Your own server", "server",
                 "Whisper or another speech model on a server you run or trust: vLLM, your company's AI gateway, or any "
@@ -109,6 +110,10 @@ def load_engine(name: str, language: str = "", api_key: str = "", model: str = "
         return ParakeetEngine()
     if name == "whisper-turbo":
         return whisper.WhisperEngine(language=language)
+    if name == "gemini":  # streams while a live model is chosen (gemini-3.5-transcribe-live)
+        from .gemini_stream import GeminiEngine
+
+        return GeminiEngine(api_key, model, language, fallback)
     if name in REMOTE:
         return CloudEngine(name, api_key, model, language, fallback, url)
     raise ValueError(f"Unknown engine '{name}'. Available: {', '.join(ENGINES)}")

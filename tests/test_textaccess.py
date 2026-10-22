@@ -485,6 +485,22 @@ def test_set_clipboard_leaves_text_and_html_for_the_user(desktop):
     assert "".join(d.units) == "x"
 
 
+@pytest.mark.parametrize("use", [lambda: copy_selection(timeout=0.05), lambda: paste_rich("new"), lambda: set_clipboard("new")])
+def test_the_clipboard_waits_for_a_dictations_restore_first(desktop, use):
+    """A dictation's paste puts the user's clipboard back in the background, 0.5 s later: Text Transform copying or
+    pasting meanwhile would save the dictation as the user's clipboard, or be overwritten by the restore."""
+    import threading
+    import time
+
+    from sst import paste
+    d = desktop("x")
+    released = []
+    paste._pasting.acquire()  # a paste whose restore is still to come
+    threading.Timer(0.2, lambda: (released.append(time.monotonic()), paste._pasting.release())).start()
+    use()
+    assert released and d.sessions >= 1 and paste.settle(0)  # it went on only after the restore, which it left free
+
+
 def test_set_clipboard_without_html_puts_only_text(desktop):
     d = desktop()
     set_clipboard("plain\r\ntext")

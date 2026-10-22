@@ -29,7 +29,8 @@ import numpy as np
 from sst import snippets
 from sst.audio import Recorder, Take, save_recording
 from sst.hotkey import HotkeyListener, parse_hotkey
-from sst.paste import paste_text
+from sst.paste import paste_text, settle
+from sst.pipeline import streaming
 from sst.snippets import Snippet
 
 HOLD_SECONDS = 0.4   # key held longer than this = push-to-talk; a quicker tap = hands-free
@@ -129,6 +130,7 @@ class Dictation:
         close = getattr(self.recorder, "close", None)
         if close:
             close()
+        settle()  # the user's clipboard back before Rflow quits (a paste puts it back half a second later)
 
     def wait(self) -> None:
         """Block until every recording so far is transcribed and typed."""
@@ -224,8 +226,9 @@ class Dictation:
                     break
                 preroll.append(block)
                 n += len(block)
-            session = self.pipeline.start(take.rate, np.concatenate(preroll) if preroll else None,
-                                          START_BEEP if self.sounds else None)
+            preroll_audio = np.concatenate(preroll) if preroll else None
+            session = self.pipeline.start(take.rate, preroll_audio, START_BEEP if self.sounds else None)
+            session = streaming.attach(session, self.engine, preroll_audio)  # an engine that hears it as it's said
             _Feeder(take, session, skip=len(preroll)).start()
             return session
         except Exception:  # the classic way still types the text
@@ -337,11 +340,9 @@ class Dictation:
             return
         typed = final.text
         heard = final.stages.get("merged") or typed
-        failed = self._type(typed)
+        failed = self._type(typed)  # returns at once: the clipboard is put back in the background (sst.paste)
         if len(audio) and float(np.abs(audio).max()) < 0.01:
             self.on_state("warning", "Almost silent: check the microphone.")
-        if self.save:
-            save_recording(audio, rate, typed)
         if typed:
             self.on_result(heard, typed, len(audio) / rate)
         if failed:
@@ -352,6 +353,8 @@ class Dictation:
             self.on_state("typed_raw", final.error)
         else:
             self.on_state("typed" if typed else "idle", typed)
+        if self.save:  # after the user is told: writing a long recording takes a moment
+            save_recording(audio, rate, typed)
 
     def _beep(self, frequency: int, after: threading.Event | None = None) -> None:
         if not self.sounds:

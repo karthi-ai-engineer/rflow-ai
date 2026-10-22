@@ -22,7 +22,7 @@ import threading
 import time
 from dataclasses import dataclass
 
-from PySide6.QtCore import QObject, QPoint, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import QCursor, QFontMetrics, QGuiApplication, QPainter
 from PySide6.QtWidgets import QWidget
 
@@ -237,6 +237,7 @@ class TransformController(QObject):
     _ready = Signal(object)  # a Target, or why there is no text (str), from the capture thread
     _done = Signal(object)  # (Target, TransformResult or error str), from the transform thread
     _restored = Signal(object)  # (Done, "") after an undo, or (None, "transformed:<name>" or what went wrong): the end
+    _key = Signal()  # the shortcut's listener queued an event, from the keyboard hook's thread
 
     def __init__(self, app, access=None, listener_factory=HotkeyListener):
         super().__init__()
@@ -250,9 +251,7 @@ class TransformController(QObject):
         self._ready.connect(self._show_menu)
         self._done.connect(self._finish)
         self._restored.connect(self._after)
-        self.pump = QTimer(self)
-        self.pump.setInterval(15)
-        self.pump.timeout.connect(self._pump)
+        self._key.connect(self._pump)  # queued from the hook's thread: nothing runs here between keys
         self.busy = False  # reading the text, transforming or pasting: the shortcut waits
         self.pending: Target | None = None  # the text the open menu is for
         self.last: Done | None = None  # the last transform, for undo
@@ -267,16 +266,15 @@ class TransformController(QObject):
             return
         try:
             self.listener = self._listener_factory(parse_hotkey(hotkey))
+            self.listener.on_event = self._key.emit
             self.listener.start()
         except (ValueError, OSError) as e:
             log.warning("Text Transform's shortcut %r doesn't work: %s", hotkey, e)
             self.listener = None
             return
-        self.pump.start()
         log.info("Text Transform on %s", hotkey)
 
     def stop(self) -> None:
-        self.pump.stop()
         self.menu.close_menu()
         if self.listener is not None:
             self.listener.stop()
