@@ -12,7 +12,6 @@ for the provider and key (or the model, when the limit is the model's), so the n
 straight to their fallback instead of asking again. A success clears it; a new key or model is another entry.
 """
 import errno
-import hashlib
 import http.client
 import json
 import re
@@ -227,28 +226,24 @@ def retry_after(body: str, headers=None) -> float | None:
     return None
 
 
-_refused: dict[tuple[str, str, str], tuple[float, str]] = {}  # (where, key's fingerprint, model or "") -> (until, why)
+# (where, key, model or "") -> (until, why). In memory only, like the gateway's own copy of the key: never logged or saved.
+_refused: dict[tuple[str, str, str], tuple[float, str]] = {}
 _refused_lock = threading.Lock()
-
-
-def _fingerprint(key: str) -> str:
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]  # the key itself is never kept
 
 
 def refuse(where: str, key: str, model: str, found: Refusal) -> None:
     """Remember a refusal from `where` (the provider's host) for this key, and for this model only when it's the
     model's limit."""
     with _refused_lock:
-        _refused[(where, _fingerprint(key), model if found.model_only else "")] = (time.monotonic() + found.seconds,
-                                                                                   found.reason)
+        _refused[(where, key, model if found.model_only else "")] = (time.monotonic() + found.seconds, found.reason)
 
 
 def refused(where: str, key: str, model: str) -> str:
     """Why this key (or this model on it) was refused a moment ago, or ""."""
-    now, fingerprint = time.monotonic(), _fingerprint(key)
+    now = time.monotonic()
     with _refused_lock:
         for scope in ("", model):
-            until, reason = _refused.get((where, fingerprint, scope), (0.0, ""))
+            until, reason = _refused.get((where, key, scope), (0.0, ""))
             if until > now:
                 return reason
     return ""
@@ -256,10 +251,9 @@ def refused(where: str, key: str, model: str) -> str:
 
 def forgive(where: str, key: str, model: str) -> None:
     """An answer came: whatever was refused for this key and model is no more (credit added, a new day's quota)."""
-    fingerprint = _fingerprint(key)
     with _refused_lock:
         for scope in ("", model):
-            _refused.pop((where, fingerprint, scope), None)
+            _refused.pop((where, key, scope), None)
 
 
 def forget_refusals() -> None:
