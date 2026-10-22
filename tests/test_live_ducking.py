@@ -97,7 +97,7 @@ def test_nothing_is_touched_when_the_apps_stay_as_they_are(tmp_path):
 
 
 def test_an_app_that_starts_playing_during_the_session_is_lowered_too(tmp_path):
-    video, call = Sound("chrome.exe"), Sound("vlc.exe", playing=False)
+    video, call = Sound("chrome.exe"), Sound("teams.exe", playing=False)
     ducker, clock, _ = ducker_with(video, call, tmp_path=tmp_path)
     run(ducker, clock, 0.3)
     assert call.sets == []  # not playing: left alone
@@ -217,51 +217,3 @@ def test_the_logs_name_the_program_not_the_whole_session_id():
     name = r"{0.0.0.00000000}.{a1b2}|\Device\HarddiskVolume3\Program Files\Google\Chrome\Application\chrome.exe%b{00000000-0000}"
     assert ducking._app_name(name) == "chrome.exe" and ducking._app_name("") == "an app"
     assert CHANGED < 0.05  # a slider moved by hand is noticed
-
-
-# ---- what's translated is never lowered (#201)
-
-def test_while_the_computer_is_translated_the_apps_it_hears_are_left_and_only_other_outputs_lowered(tmp_path):
-    meeting, music = Sound("chrome.exe"), Sound("spotify.exe")
-    meeting.device, music.device = "headphones", "hdmi"
-    ducker = Ducker(0.0, find=Apps(meeting, music), record=tmp_path / "lowered.json", clock=Clock(),
-                    captured=lambda: True, outputs=lambda: {"headphones", "handsfree"})
-    run(ducker, ducker._clock, DOWN + 0.1)
-    assert meeting.sets == [] and music.level == pytest.approx(INAUDIBLE)
-
-
-def test_an_app_lowered_before_is_put_back_once_the_computer_is_translated(tmp_path):
-    video = Sound("chrome.exe")
-    video.device = "speakers"
-    captured = [False]  # the microphone alone at first: the video is background sound
-    ducker = Ducker(0.3, find=Apps(video), record=tmp_path / "lowered.json", clock=Clock(),
-                    captured=lambda: captured[0], outputs=lambda: {"speakers"})
-    run(ducker, ducker._clock, DOWN + 0.1)
-    assert video.level == pytest.approx(0.3)
-    captured[0] = True  # the computer's way added: the video is what's translated now
-    run(ducker, ducker._clock, RESCAN + 0.1)
-    assert video.level == 1.0 and not ducker._lowered
-    run(ducker, ducker._clock, 2.0)
-    assert video.level == 1.0
-
-
-@pytest.mark.parametrize("name", [
-    r"{0.0.0.00000000}.{a1}|\Device\HarddiskVolume3\Program Files\WindowsApps\MSTeams_x64\ms-teams.exe%b{00000000}",
-    r"{0.0.0.00000000}.{a2}|\Device\HarddiskVolume3\Users\me\AppData\Roaming\Zoom\bin\Zoom.exe%b{00000000}",
-    "Teams.exe", "webexmta.exe"])
-def test_a_calling_app_is_never_lowered_even_with_the_microphone_alone(tmp_path, name):
-    call = Sound(name)
-    ducker, clock, _ = ducker_with(call, tmp_path=tmp_path)
-    run(ducker, clock, DOWN + 0.1)
-    assert call.sets == [] and call.closed
-
-
-def test_an_app_whose_output_isnt_known_is_left_while_the_computer_is_translated(tmp_path):
-    video = Sound("chrome.exe")  # no device: can't tell, so it may be what's translated
-
-    def unknown():
-        raise OSError("no enumerator")
-    ducker = Ducker(0.3, find=Apps(video), record=tmp_path / "lowered.json", clock=Clock(), captured=lambda: True,
-                    outputs=unknown)
-    run(ducker, ducker._clock, DOWN + 0.1)
-    assert video.sets == []

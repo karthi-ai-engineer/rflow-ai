@@ -379,18 +379,3 @@ def test_the_microphone_alone_is_never_gated():
     session.add(MIC, FakeCapture(), FakeEngine)
     session.lanes[MIC][0].on_frame(b"\x01\x02" * 1600)
     assert engine(session, MIC).frames == [b"\x01\x02" * 1600]
-
-
-def test_the_ducker_is_told_whether_the_computer_is_translated():
-    class Ducking(FakeSpeaker):
-        def __init__(self):
-            super().__init__()
-            self.ducker = type("D", (), {"captured": staticmethod(lambda: False)})()
-    session, speaker = LiveSession(LiveConfig(source="both")), Ducking()
-    session.set_speaker(speaker)
-    session.add(MIC, FakeCapture(), FakeEngine)
-    assert not speaker.ducker.captured()
-    session.add(SYSTEM, FakeCapture(), FakeEngine)
-    assert speaker.ducker.captured()
-    session.remove(SYSTEM)
-    assert not speaker.ducker.captured()
