@@ -30,6 +30,7 @@ from sst import snippets
 from sst.audio import Recorder, Take, save_recording
 from sst.hotkey import HotkeyListener, parse_hotkey
 from sst.paste import paste_text
+from sst.pipeline import streaming
 from sst.snippets import Snippet
 
 HOLD_SECONDS = 0.4   # key held longer than this = push-to-talk; a quicker tap = hands-free
@@ -224,8 +225,9 @@ class Dictation:
                     break
                 preroll.append(block)
                 n += len(block)
-            session = self.pipeline.start(take.rate, np.concatenate(preroll) if preroll else None,
-                                          START_BEEP if self.sounds else None)
+            preroll_audio = np.concatenate(preroll) if preroll else None
+            session = self.pipeline.start(take.rate, preroll_audio, START_BEEP if self.sounds else None)
+            session = streaming.attach(session, self.engine, preroll_audio)  # an engine that hears it as it's said
             _Feeder(take, session, skip=len(preroll)).start()
             return session
         except Exception:  # the classic way still types the text
