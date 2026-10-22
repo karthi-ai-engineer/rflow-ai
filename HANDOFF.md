@@ -12,7 +12,7 @@ _Last updated: 2026-10-22_
 ## Start here (a new session, or the owner's other laptop)
 
 **Where things stand (2026-10-22):**
-- **Phase 44, a light, fast Rflow** (#184, the owner's "build all 16"; built in 6 parts by parallel builders, merged on
+- **Rflow 2.6.0 = phase 44, a light, fast Rflow** (#184, the owner's "build all 16"; built in 6 parts by parallel builders, merged on
   `phase-44/speed`). Measured first (2026-10-22, 311 logged dictations, idle profiling, network, models): the window's
   orb, 4 keyboard hooks and 15 ms timers, OpenBLAS's thread buffers and the eager pages made Rflow heavy; Gemini's speech
   (~2.3 s) and cleanup (~0.9 s) the wait. Parts: A #185 light window (orb still unless live, `window.pages` built on
