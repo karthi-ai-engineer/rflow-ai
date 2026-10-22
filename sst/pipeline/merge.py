@@ -487,6 +487,11 @@ class TranscriptMerger:
         self._tokens += tokens
         return self._snapshot(final=False)
 
+    @property
+    def tokens(self) -> list[Token]:
+        """The merged tokens so far (a copy), each with its chunk's end: what the session cleans up early."""
+        return list(self._tokens)
+
     def final(self) -> MergedTranscript:
         """The session is complete: the transcript that goes on (no more add() after this)."""
         self._final = True

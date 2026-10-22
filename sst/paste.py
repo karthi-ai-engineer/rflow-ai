@@ -1,15 +1,19 @@
 """Type text into whichever app has keyboard focus: put it on the clipboard, press Ctrl+V,
-then put back whatever was on the clipboard before.
+then put back whatever was on the clipboard before (half a second later, in the background).
 
 Pasting is used instead of simulating each key press because it is instant for long text and
 code editors do not auto-close brackets or pop up suggestions halfway through.
 """
 import ctypes
+import logging
+import threading
 import time
 from contextlib import contextmanager
 from ctypes import wintypes
 
 from sst.hotkey import send_keys
+
+log = logging.getLogger(__name__)
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -51,23 +55,52 @@ _NOT_MEMORY = {2, 3, 9, 14, 0x80, 0x82, 0x83, 0x8E}
 
 RESTORE_DELAY = 0.5  # seconds the target app gets to read the clipboard before the old content returns
 HELD_WAIT = 200.0  # seconds a dictation waits for held keys: they may be held for the next one already (up to 3 min)
+# Held from a paste's first clipboard write until the user's clipboard is back, released by the restore (on a timer
+# thread): the dictation goes on at once, and a next paste waits for the restore instead of saving our own text as the
+# user's (or replacing the text before the app has read it).
+_pasting = threading.Lock()
 
 
 def paste_text(text: str) -> None:
-    """Paste `text` into the focused app, leaving the user's clipboard as it was. Raises OSError when it can't: the
-    clipboard held by another app, or keys held down for more than HELD_WAIT."""
+    """Paste `text` into the focused app, leaving the user's clipboard as it was: put back RESTORE_DELAY later, in the
+    background. Raises OSError when it can't: the clipboard held by another app, or keys held down for more than
+    HELD_WAIT."""
     _wait_until_keys_released()
-    with _clipboard():
-        saved = _snapshot()
-        # Windows text has "\r\n" line breaks (a snippet's lines): a classic edit box shows a bare "\n" as nothing.
-        text = text.replace("\r\n", "\n").replace("\n", "\r\n")
-        _put([(CF_UNICODETEXT, (text + "\0").encode("utf-16-le")), (CF_EXCLUDE_FROM_HISTORY, b"\0" * 4)])
-    ours = user32.GetClipboardSequenceNumber()
-    _press_ctrl_v()
-    time.sleep(RESTORE_DELAY)
-    if user32.GetClipboardSequenceNumber() == ours:  # skip if the user copied something new meanwhile
+    _pasting.acquire()
+    try:
         with _clipboard():
-            _put(saved + [(CF_EXCLUDE_FROM_HISTORY, b"\0" * 4)] if saved else [])
+            saved = _snapshot()
+            # Windows text has "\r\n" line breaks (a snippet's lines): a classic edit box shows a bare "\n" as nothing.
+            text = text.replace("\r\n", "\n").replace("\n", "\r\n")
+            _put([(CF_UNICODETEXT, (text + "\0").encode("utf-16-le")), (CF_EXCLUDE_FROM_HISTORY, b"\0" * 4)])
+        ours = user32.GetClipboardSequenceNumber()
+        _press_ctrl_v()
+    except BaseException:
+        _pasting.release()
+        raise
+    # The app reads the clipboard when it handles Ctrl+V, a moment later: the old content returns after that.
+    timer = threading.Timer(RESTORE_DELAY, _restore, (saved, ours))
+    timer.daemon = True
+    timer.start()
+
+
+def _restore(saved: list[tuple[int, bytes]], ours: int) -> None:
+    try:
+        if user32.GetClipboardSequenceNumber() == ours:  # skip if the user copied something new meanwhile
+            with _clipboard():
+                _put(saved + [(CF_EXCLUDE_FROM_HISTORY, b"\0" * 4)] if saved else [])
+    except Exception as e:  # the clipboard busy for a whole second: the user's old content is lost, never the dictation
+        log.warning("Couldn't put the clipboard back: %s", e)
+    finally:
+        _pasting.release()
+
+
+def settle(timeout: float = 2.0) -> bool:
+    """Wait until the last paste's clipboard is put back (before quitting, or before using the clipboard otherwise)."""
+    if not _pasting.acquire(timeout=timeout):
+        return False
+    _pasting.release()
+    return True
 
 
 def _modifiers_held() -> bool:

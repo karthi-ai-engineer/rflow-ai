@@ -312,7 +312,9 @@ class Chunker:
         self._prev_end: int | None = None  # the last emitted chunk's end
         self._held: AudioChunk | None = None  # the last chunk sent: a short rest at the release joins it
         self._held_audio: np.ndarray | None = None  # its audio (the scheduler releases the chunk's own once accepted)
+        self._held_segments: list[tuple[int, int]] = []  # its speech spans
         self._min_alone = n(getattr(config, "min_alone_speech_ms", 0))
+        self._context = n(getattr(config, "join_context_ms", 0))
         self._sequence = 0
         self._segments: list[list[int]] = []  # voiced speech spans that may still fall in a chunk
         self._last_voiced: int | None = None
@@ -344,8 +346,9 @@ class Chunker:
                 out += self._on_frame()
         return out
 
-    def finish(self) -> list[AudioChunk]:
-        """The key is released and the tail is in: the rest of the audio, as the last chunk(s) (boundary "end")."""
+    def finish(self, timed: bool = False) -> list[AudioChunk]:
+        """The key is released and the tail is in: the rest of the audio, as the last chunk(s) (boundary "end").
+        `timed`: the engine gives word times, so a short rest can go with only the end of the part before it."""
         if self._finished:
             return []
         self._finished = True
@@ -353,7 +356,7 @@ class Chunker:
         while self._seen - self._start > self._max + self._lookahead:  # the last partial frame went past the maximum
             out += self._cut(self._quietest(), "max")
         if self._seen > self._start:
-            joined = self._join_rest()
+            joined = self._join_rest(timed)
             out += [joined] if joined is not None else self._cut(self._seen, "end")
         self._buf, self._segments = np.zeros(0, dtype=np.float32), []
         return out
@@ -414,24 +417,67 @@ class Chunker:
         energy = np.concatenate(([0.0], np.cumsum(x * x)))
         return lo + int(np.argmin(energy[w:] - energy[:-w])) + w // 2
 
-    def _join_rest(self) -> AudioChunk | None:
+    def _join_rest(self, timed: bool = False) -> AudioChunk | None:
         """The rest at the key release with little speech of its own (min_alone_speech_ms) isn't sent alone: after a
         cut at the maximum it is mostly the repeated overlap, after a pause often only the release click, and a cloud
         model given that wrote text never said. The part before it goes again with the rest, as one chunk that replaces
-        it; the session merges that chunk instead of the two. None: send the rest as usual."""
+        it; the session merges that chunk instead of the two. With word times (`timed`), only the end of that part goes
+        with the rest, as an overlap the merge takes out like any other: the part itself is already being transcribed, and
+        sending it all again made the last answer, the one the user waits for, the slowest (a 19 s part, 2026-10-22).
+        None: send the rest as usual."""
         held, audio, end = self._held, self._held_audio, self._seen
         if held is None or audio is None or not self._worth(self._own, end):
             return None
-        if self._speech(self._own, end) >= self._min_alone or end - held.start_sample > 2 * self._max:
+        rest = self._speech(self._own, end)
+        if rest >= self._min_alone or end - held.start_sample > 2 * self._max:
             return None  # enough speech of its own, or a long wait before the release: the rest is sent as it is
+        lead = self._lead_in(held, self._speech(held.end_sample, end)) if timed else None
+        start = held.start_sample if lead is None else lead
         self._sequence += 1
-        speech = held.speech_seconds + self._speech(held.end_sample, end) / self.rate
+        speech = (held.speech_seconds if lead is None else self._held_speech(lead, held.end_sample) / self.rate) \
+            + self._speech(held.end_sample, end) / self.rate
         # Silence after a pause cut may already be dropped (the next part's start follows the present): it goes back as
         # zeros, so the chunk's audio still spans its samples.
         kept = max(held.end_sample, self._buf_start)
-        audio = np.concatenate([audio, np.zeros(kept - held.end_sample, dtype=np.float32), self._audio(kept, end)])
+        audio = np.concatenate([audio[start - held.start_sample:], np.zeros(kept - held.end_sample, dtype=np.float32),
+                                self._audio(kept, end)])
+        if lead is not None:
+            return AudioChunk(self.session_id, self._sequence, audio, self.rate, lead, end, held.end_sample, speech, "end")
         return AudioChunk(self.session_id, self._sequence, audio, self.rate, held.start_sample, end,
                           held.overlap_end_sample, speech, "end", replaces=held.sequence)
+
+    def _held_speech(self, start: int, end: int) -> int:
+        return sum(max(0, min(e, end) - max(s, start)) for s, e in self._held_segments)
+
+    def _lead_in(self, held: AudioChunk, rest: int) -> int | None:
+        """Where the rest's chunk starts in the part before it: back far enough for join_context_ms of speech in all,
+        then to the quietest moment just before (not inside a word), never into the part before that one (its words are
+        settled). None: the whole part goes again (no word times, not enough speech in reach, or too little saved)."""
+        need = self._context - rest
+        if self._context <= 0:
+            return None
+        floor = max(held.start_sample, held.overlap_end_sample)
+        point, got = held.end_sample, 0
+        for s, e in reversed(self._held_segments):
+            if need <= got:
+                break
+            s, e = max(s, floor), min(e, held.end_sample)
+            if e <= s:
+                continue
+            point = e - min(e - s, need - got)
+            got += e - point
+        if got < need or held.end_sample - point > 2 * self._context:
+            return None
+        point = max(floor, min(point, self._start))  # at least the overlap the rest has anyway (after a cut at the maximum)
+        lo = max(floor, point - round(0.5 * self.rate))  # up to half a second earlier: a gap between words
+        if point - lo >= self._window:
+            x = self._held_audio[lo - held.start_sample:point - held.start_sample].astype(np.float64)
+            x -= x.mean()
+            energy = np.concatenate(([0.0], np.cumsum(x * x)))
+            point = lo + int(np.argmin(energy[self._window:] - energy[:-self._window])) + self._window // 2
+        if point - held.start_sample < 2 * self.rate:
+            return None  # less than two seconds saved: not worth a second kind of chunk
+        return point
 
     def _cut(self, cut: int, boundary: str) -> list[AudioChunk]:
         out = []
@@ -442,6 +488,8 @@ class Chunker:
                                self._start, cut, overlap_end, self._speech(self._start, cut) / self.rate, boundary)
             out.append(chunk)
             self._held, self._held_audio = chunk, chunk.audio
+            self._held_segments = [(max(s, self._start), min(e, cut)) for s, e in self._segments
+                                   if e > self._start and s < cut]
             self._prev_end = cut
         # The overlap protects words cut at the maximum length. A pause cut sits after the last word plus keep_silence_ms,
         # so a 1 s overlap would reach back into that word: on the owner's recordings Parakeet then decoded the next part
