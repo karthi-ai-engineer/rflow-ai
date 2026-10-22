@@ -486,6 +486,7 @@ class TrayApp:
         self.live.noted.connect(lambda _: self.window.isVisible() and self.window.refresh())  # the Live page shows it
         self.live_listener = None  # live translation's shortcut (Ctrl+Alt+L)
         self.window = MainWindow(self)
+        self.wake.on_change = self._on_wake_changed
 
         self.tray = QSystemTrayIcon(self.icon)
         menu = QMenu()
@@ -783,11 +784,18 @@ class TrayApp:
     def _needs_ticks(self) -> bool:
         r = self.recorder
         # The wake word listens on an open microphone, so its ticks are those of an open microphone: once a second
-        return self.dictation is not None and (self.dictation.recording or r.warm or r.busy or self.wake.listening)
+        return self.dictation is not None and (self.dictation.recording or r.warm or r.busy or self.wake.wants_ticks)
 
     def _wake_ticker(self) -> None:
         if self._needs_ticks() and not self.ticker.isActive():
             self.ticker.start()
+
+    def _on_wake_changed(self) -> None:
+        """The wake word started or stopped listening, or paused: the ticks it needs, and the Settings card's status."""
+        if hasattr(self, "ticker"):
+            self._wake_ticker()
+        if self.window.isVisible():
+            self.window.show_wake()
 
     def _on_result(self, heard: str, typed: str, seconds: float) -> None:
         self.transforms.note_typed(typed + " ")  # as Dictation pasted it: Text Transform's text where Ctrl+A copies nothing

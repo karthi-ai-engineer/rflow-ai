@@ -5331,9 +5331,8 @@ def risky_end_phrases(phrases: list[str]) -> list[str]:
 
 class WakeCard:
     """Settings' "Start with your voice" (sst.wakeui): the switch; when on, where it listens, the models it needs, the
-    keyword and its 10-try setup, the end phrases, the voice check, and a word on privacy and battery."""
-
-    STATUS_MS = 1000  # the status line follows a pause (live translation, Text Transform) while shown
+    keyword and its 10-try setup, the end phrases, the voice check, and a word on privacy and battery. Its status line
+    is told when the wake word starts, stops or pauses (MainWindow.show_wake): nothing polls."""
 
     def __init__(self, app):
         self.app = app
@@ -5399,7 +5398,6 @@ class WakeCard:
         privacy.setContentsMargins(0, 12, 0, 14)
         details.addWidget(privacy)
         layout.addWidget(self.details)
-        self.timer = QTimer(self.frame, interval=self.STATUS_MS, timeout=self._refresh_status)
         self.refresh()
 
     def refresh(self) -> None:
@@ -5411,10 +5409,6 @@ class WakeCard:
         self.voice.setChecked(s.wake_voice_check)
         self.voice.blockSignals(False)
         self.details.setVisible(s.wake_enabled)
-        if s.wake_enabled and not self.timer.isActive() and QGuiApplication.platformName() != "offscreen":
-            self.timer.start()
-        elif not s.wake_enabled:
-            self.timer.stop()
         if not self.phrases.hasFocus():
             self.phrases.setText(", ".join(s.wake_end_phrases))
         risky = risky_end_phrases(s.wake_end_phrases)
@@ -5448,7 +5442,7 @@ class WakeCard:
         self.setup.setToolTip("" if state.models == "ready" else "Download the voice models first.")
         self._show_status(state)
 
-    def _refresh_status(self) -> None:
+    def show_status(self) -> None:
         if self.frame.isVisible():
             self._show_status(self.app.wake_state())
 
@@ -7013,6 +7007,11 @@ class MainWindow(QWidget):
             self.update_link.setText(f"Update to {version}")
             self.update_link.setVisible(not self.compact)  # the rail has no room for it: the banner says it
             self._fit_sidebar()
+
+    def show_wake(self) -> None:
+        """The wake word's status changed (TrayApp._on_wake_changed): its card says so, if it's built."""
+        if "settings" in self.pages.built:
+            self.pages["settings"].wake.show_status()
 
     def set_update_status(self, message: str) -> None:
         self._update_status = message

@@ -1,6 +1,6 @@
 """The wake word in the app (sst.wakeui): the listener's thread and frames, where it listens (never a Bluetooth headset's
-microphone), the keyword trimmed, and the 10-try setup. sst.wake is a stand-in (wake_stub); no microphone, no model, no
-real keys: the setup's recorder is a fake and the dialog is built off-screen."""
+microphone), the keyword trimmed, and the 10-try setup. sst.wake is the real one with its models faked (conftest's `wake`);
+no microphone, no real keys: the setup's recorder is a fake and the dialog is built off-screen."""
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -9,7 +9,6 @@ from types import SimpleNamespace  # noqa: E402
 
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-import wake_stub  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -21,11 +20,6 @@ from sst.wakeui import BLUETOOTH, FRAME, WakeController, WakeFeeder, WakeSetupDi
 @pytest.fixture(scope="module", autouse=True)
 def qt():
     return QApplication.instance() or QApplication([])
-
-
-@pytest.fixture
-def wake(monkeypatch):
-    return wake_stub.install(monkeypatch)
 
 
 def _wait(condition, ms: int = 3000) -> bool:
@@ -140,7 +134,7 @@ def test_a_turns_trim_takes_the_keyword_and_the_end_phrase_out(wake):
 # ---- the 10-try setup
 
 class FakeMic:
-    """The setup's microphone: each try records what the test says next (a level above 0.05 is heard by the stub)."""
+    """The setup's microphone: each try records what the test says next (a level above 0.05 is heard: conftest)."""
 
     def __init__(self, rate=48_000):
         self.rate, self.level, self.warm_seconds = rate, 0.0, 0.0
@@ -207,16 +201,17 @@ def test_each_try_says_heard_or_not_and_a_prompt_not_heard_is_tried_once_more(wa
     dialog.start_button.click()
     assert _wait(lambda: dialog.record_button.isEnabled()) and dialog.pages.currentIndex() == 1
     assert mic.opened and mic.warm_seconds == float("inf")  # open from now on: each try starts at once
-    assert dialog.counter.text() == "Try 1 of 10" and dialog.prompt_label.text() == "Say “okay type” normally"
+    prompts = wake.prompts("okay type")
+    assert dialog.counter.text() == "Try 1 of 10" and dialog.prompt_label.text() == prompts[0]
     _try(dialog, mic, heard=False)
-    assert dialog.verdict.text() == "Not heard: try again" and dialog.prompt_label.text() == "Say “okay type” normally"
+    assert dialog.verdict.text() == "Not heard: try again" and dialog.prompt_label.text() == prompts[0]
     assert dialog.counter.text() == "Try 2 of 10" and dialog.record_button.text() == "Try again"  # it counted
     assert [d.state for d in dialog.dots[:2]] == ["err", "off"]
     _try(dialog, mic, heard=True)
-    assert dialog.verdict.text() == "Heard" and dialog.prompt_label.text() == "Say “okay type” quietly"
+    assert dialog.verdict.text() == "Heard" and dialog.prompt_label.text() == prompts[1]
     _try(dialog, mic, heard=False)
     _try(dialog, mic, heard=False)  # its one retry, not heard either: on to the next
-    assert dialog.prompt_label.text() == "Say “okay type” loudly"
+    assert dialog.prompt_label.text() == prompts[2]
     for _ in range(6):
         _try(dialog, mic, heard=True)
     assert _wait(lambda: dialog.result_title.text() == "Not saved")  # 7 of 10: one short
@@ -236,7 +231,7 @@ def test_a_keyword_heard_8_of_10_times_is_saved(wake):
     assert _wait(lambda: dialog.result_title.text() == "Saved")
     assert [s.heard for s in saved] == [8] and saved[0].keyword == "okay type"
     assert dialog.result_words.text() == "Rflow heard “okay type” 8 of 10 times."
-    assert all(len(take) == 16_000 for take in enrollments[0].takes)  # 16 kHz, from the microphone's 48 kHz
+    assert all(len(take) == 16_000 for take in enrollments[0]._takes)  # 16 kHz, from the microphone's 48 kHz
     assert mic.closed  # the microphone is let go of once the tries are done
     dialog.done_button.click()
     assert dialog.result() == 1

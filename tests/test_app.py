@@ -957,7 +957,8 @@ def test_rflow_started_again_waits_for_the_one_that_started_it():
     assert child.poll() is not None and time.monotonic() - began >= 0.3
 
 
-# ---- Start with your voice (sst.wakeui): sst.wake is a stand-in, the microphones are fakes, nothing is typed for real
+# ---- Start with your voice (sst.wakeui): sst.wake with its models faked (conftest), the microphones are fakes, nothing
+# is typed for real
 
 class WakeMic:
     """A microphone kept open (always-on), faked: start() opens a take whose pre-roll holds the keyword; stop_later()
@@ -995,14 +996,13 @@ class WakeMic:
 
 
 @pytest.fixture
-def wake_app(tray_app, monkeypatch, tmp_path):
+def wake_app(tray_app, wake, monkeypatch, tmp_path):
     """The tray app with the wake word on and set up ("okay type"), its models downloaded, listening on a fake
-    always-on microphone; dictation types into a list, without sounds, through the classic path."""
-    import wake_stub
-
+    always-on microphone; dictation types into a list, without sounds, through the classic path. Its listeners are made
+    at once, not on a thread."""
     from sst import audio, downloads, wakeui
-    wake = wake_stub.install(monkeypatch)
     app, saved, history = tray_app
+    app.wake.background = lambda work, done: done(work(), None)
     monkeypatch.setattr(downloads.Download, "installed", lambda self, root=None: True)
     monkeypatch.setattr(audio, "call_quality", lambda device: False)
     monkeypatch.setattr(audio, "input_device_names", lambda refresh=True: ["Mic A"])
@@ -1095,6 +1095,27 @@ def test_a_command_said_after_the_keyword_runs_on_the_text_box_without_waiting(w
     assert _wait_for(lambda: listener.ended == 1, QTest.qWait)
 
 
+def test_the_listener_is_made_on_a_thread_and_its_status_and_ticks_follow_it(wake_app, monkeypatch):
+    # Its spotter loads a model the first time (up to ~2 s): never on the UI thread. Nothing polls for its status.
+    from PySide6.QtTest import QTest
+
+    from sst import wakeui
+    app, wake = wake_app.app, wake_app.wake
+    app.wake.background = lambda work, done: wakeui._in_background(app.wake, work, done)
+    told = []
+    monkeypatch.setattr(app.window, "isVisible", lambda: True)
+    monkeypatch.setattr(app.window, "show_wake", lambda: told.append(app.wake_state().listening))
+    app.ticker.stop()
+    app.apply_settings(dataclasses.replace(app.settings, wake_end_phrases=["stop it", "end it"]))
+    assert not app.wake.listening and told == [""]  # being made
+    assert _wait_for(lambda: app.wake.listening, QTest.qWait)
+    assert wake.WakeListener.made[-1].thread != "MainThread" and told == ["", "Mic A"] and app.ticker.isActive()
+    app.apply_settings(dataclasses.replace(app.settings, wake_end_phrases=["end it"]))
+    app.apply_settings(dataclasses.replace(app.settings, wake_enabled=False))  # off before the new one was made
+    QTest.qWait(300)
+    assert not app.wake.listening and wake.WakeListener.made[-1].end_phrases == ["end it"]  # made, then dropped
+
+
 def test_listening_pauses_for_live_translation_dictation_with_the_keys_and_text_transform(wake_app):
     from sst.live.contracts import LiveConfig
     app = wake_app.app
@@ -1157,13 +1178,11 @@ def test_a_saved_setup_belongs_to_its_profile_and_goes_with_it(wake_app):
     assert not rahul.wake_file.exists()
 
 
-def test_switching_on_downloads_the_models_once_with_their_progress(tray_app, monkeypatch):
-    import wake_stub
+def test_switching_on_downloads_the_models_once_with_their_progress(tray_app, wake, monkeypatch):
     from PySide6.QtTest import QTest
 
     from sst import downloads
     app, _, _ = tray_app
-    wake = wake_stub.install(monkeypatch)
     fetched, shown = [], []
 
     def download(model, progress, cancelled):

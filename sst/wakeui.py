@@ -21,6 +21,7 @@ import importlib
 import logging
 import math
 import queue
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -57,6 +58,15 @@ log = logging.getLogger(__name__)
 def wake_api():
     """sst.wake, imported when first needed: its models load only when the wake word is used."""
     return importlib.import_module("sst.wake")
+
+
+def _unload() -> None:
+    """The wake word was switched off: its models' memory goes back (they load again when it's switched on)."""
+    api = sys.modules.get("sst.wake")
+    for part in ("spotter", "voiceprint"):
+        unload = getattr(getattr(api, part, None), "unload", None)
+        if unload is not None:
+            unload()
 
 
 def keyword_trim(setup, end_phrases) -> Callable[[str], str]:
@@ -175,7 +185,11 @@ class WakeFeeder:
 class WakeController(QObject):
     """Listens while the wake word is on and set up, and runs the turns it starts (on the UI thread; the listener's
     callbacks arrive from the feeder's thread through signals). `app` is the TrayApp: its settings, profile, dictation,
-    recorder, live translation and Text Transform."""
+    recorder, live translation and Text Transform. Nothing here polls: tick() comes with the keys' events and the app's
+    once-a-second housekeeping, which runs while a microphone is open (the wake word keeps one open: wants_ticks).
+
+    The listener is made on a thread (`background`): its spotter loads a model the first time (0.8-2.2 s in the spike),
+    which mustn't hold up the tray or the window. on_change() is called when what the Settings card shows changes."""
 
     _woke = Signal()
     _paused = Signal()
@@ -186,9 +200,11 @@ class WakeController(QObject):
                  default_microphone: Callable[[], str] | None = None,
                  call_quality: Callable[[str | None], bool] | None = None,
                  new_recorder: Callable[[str | None], Recorder] | None = None,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic, background=None):
         super().__init__()
         self.app = app
+        self.background = background or (lambda work, done: _in_background(self, work, done))
+        self.on_change: Callable[[], None] | None = None
         # Looked up when used (sst.audio's by default), so a test can replace them after the app is built
         self._microphones = microphones or (lambda: audio.input_device_names())
         self._default = default_microphone or (lambda: audio.default_microphone())
@@ -209,6 +225,9 @@ class WakeController(QObject):
         self._trim: Callable[[str], str] | None = None  # this turn's
         self._phrases: list[str] = []  # the end phrases listened for
         self._key: tuple | None = None  # what the listener was made for
+        self._making: tuple | None = None  # the key of a listener being made on a thread
+        self._made: tuple | None = None  # (key, listener) made and not yet listening
+        self._shown: tuple | None = None  # what on_change last told
         self._began = 0.0
         self._looked = 0.0
         self._woke.connect(self._on_wake)
@@ -253,14 +272,29 @@ class WakeController(QObject):
             return False, None, "", BLUETOOTH
         return False, pick, pick, ""
 
+    @property
+    def wants_ticks(self) -> bool:
+        """tick() is needed once a second: listening (on an open microphone), or waiting for a microphone to listen on."""
+        return self.listening or self.active or self.problem == BLUETOOTH or self.problem.startswith("Couldn't open")
+
     def apply(self) -> None:
         """Listen, or stop, as the settings, the setup, the models and the microphones say now. Called whenever one of
         them may have changed (settings saved, profile switched, model loaded or downloaded, setup saved). Dictation's
         microphone gets its own settings back from TrayApp._configure_dictation_mic, which calls this after."""
+        try:
+            self._apply()
+        finally:
+            self._changed()
+
+    def _apply(self) -> None:
         s, app = self.app.settings, self.app
         self.problem = ""
         if not s.wake_enabled:
+            was = self.listener is not None or self._making is not None or self._made is not None
             self._stop_listening()
+            self._made = None
+            if was:
+                _unload()
             return
         if not self.models_ready():
             self.problem = "Download the voice models to start."
@@ -279,13 +313,14 @@ class WakeController(QObject):
         phrases = [p for p in s.wake_end_phrases if p.strip()] or ["stop it"]
         key = (repr(self.setup.to_json()), tuple(phrases), s.wake_voice_check, shared, device, s.raw_audio)
         if self.listener is None or key != self._key:
+            if self.listener is None and self._making == key:
+                return  # being made: apply() comes again when it's ready
             self._stop_listening()
-            try:
-                listener = wake_api().WakeListener(self.setup, phrases, voice_check=s.wake_voice_check)
-            except Exception as e:
-                log.exception("The wake word couldn't start")
-                self.problem = f"The wake word couldn't start: {e}"
+            made, self._made = self._made, None
+            if made is None or made[0] != key:
+                self._make(key, phrases, s.wake_voice_check)  # apply() again once it's made
                 return
+            listener = made[1]
             listener.on_wake, listener.on_pause, listener.on_end = self._woke.emit, self._paused.emit, self._ended.emit
             recorder = app.recorder if shared else self._new_recorder(device)
             if not shared:
@@ -302,6 +337,30 @@ class WakeController(QObject):
             log.warning("The wake word couldn't open the microphone: %s", e)
             self._stop_listening()
             self.problem = f"Couldn't open the microphone: {e}"
+
+    def _make(self, key: tuple, phrases: list[str], voice_check: bool) -> None:
+        """The listener for `key`, made on a thread; then apply() again, unless something else is wanted by then."""
+        self._making, setup = key, self.setup
+
+        def done(listener, error) -> None:
+            if self._making != key:
+                return  # switched off, or changed meanwhile: another one is being made, or none is wanted
+            self._making = None
+            if error is not None:
+                log.error("The wake word couldn't start: %s", error)
+                self.problem = f"The wake word couldn't start: {error}"
+                self._changed()
+                return
+            self._made = (key, listener)
+            self.apply()
+        self.background(lambda: wake_api().WakeListener(setup, phrases, voice_check=voice_check), done)
+
+    def _changed(self) -> None:
+        shown = (self.listening, self.microphone, self.problem, self.note)
+        if shown != self._shown:
+            self._shown = shown
+            if self.on_change is not None:
+                self.on_change()
 
     def _hold_open(self) -> None:
         """The microphone listened to stays open, with PREROLL seconds kept, and taps into the feeder."""
@@ -326,12 +385,13 @@ class WakeController(QObject):
         if self.listener is not None:
             log.info("Wake word: stopped listening")
         self.listener, self.feeder, self.recorder, self._key, self.microphone = None, None, None, None, ""
+        self._making = None  # a listener still being made is dropped when it's ready (apply() makes the one wanted)
 
     def stop(self) -> None:
         """Rflow quits or starts over."""
         self._stop_listening()
 
-    # -- every pump (15 ms, on the UI thread)
+    # -- with the keys' events and the app's once-a-second housekeeping (on the UI thread)
 
     def pause_reason(self) -> str:
         app = self.app
@@ -365,6 +425,7 @@ class WakeController(QObject):
         if now - self._looked >= CHECK_EVERY:
             self._looked = now
             self._look()
+        self._changed()
 
     def _look(self) -> None:
         """A microphone that closed (a Bluetooth headset became Windows' default), or a Bluetooth headset that now has
