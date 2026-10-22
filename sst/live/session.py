@@ -57,6 +57,19 @@ def dbfs(frame: bytes) -> float:
     return 20 * np.log10(rms) if rms > 0 else -np.inf
 
 
+def _path(capture) -> str:
+    """How a way's sound was captured, for the log: the capture's own word for it (`path`) if it has one, else what its
+    attributes say (sst.live.wasapi.Capture: the device, and whether Rflow's own sound was in it)."""
+    path = getattr(capture, "path", None)
+    if isinstance(path, str) and path:
+        return path
+    what = getattr(capture, "what", "") or type(capture).__name__
+    if what == "output device":
+        what += ", the whole mix" if getattr(capture, "hears_self", False) else ", process loopback"
+    rate = getattr(capture, "device_rate", 0)
+    return f"{what} at {rate} Hz" if rate else what
+
+
 @dataclass
 class _Hearing:
     """What a way has heard so far, for its note."""
@@ -119,11 +132,14 @@ class LiveSession:
         with self._lock:
             self._hearing.pop(lane, None)
         lags, lines = self.lags.get(lane, []), self.lines.get(lane, 0)
+        report = getattr(engine, "report", None)  # the engine's numbers (GeminiLiveTranslate.report): never any text
+        engine_says = f"; {report()}" if callable(report) else ""
         if lags:
-            log.info("Live captions stopped (%s): %d lines; translation complete %.1f s after the voice paused "
-                     "(median of %d), %.1f s at most", lane, lines, statistics.median(lags), len(lags), max(lags))
+            log.info("Live captions stopped (%s, %s): %d lines; translation complete %.1f s after the voice paused "
+                     "(median of %d), %.1f s at most%s", lane, _path(capture), lines, statistics.median(lags), len(lags),
+                     max(lags), engine_says)
         else:
-            log.info("Live captions stopped (%s): %d lines", lane, lines)
+            log.info("Live captions stopped (%s, %s): %d lines%s", lane, _path(capture), lines, engine_says)
 
     def stop(self) -> None:
         for lane in list(self.lanes):
