@@ -9,14 +9,29 @@ research notes "Rflow model costs and setups" (2026-10-06); sst.costs holds the 
   Multilingual  Gemini gemini-3.5-transcribe         + Gemini gemini-3.5-flash-lite   a Gemini key   ~$3.60
   Local         Parakeet or Whisper on this PC       + AI cleanup off (a model on this PC comes later)   free
 
+Those are for English, the language Rflow assumes until the user chooses theirs (How Rflow hears you). Recommended
+and Fastest choose by the languages spoken (resolve(); phase 44, measured 2026-10-22: Parakeet ~0.8 s after the key
+is released on a plugged-in laptop, Gemini ~2.2 s, Groq's Whisper ~0.5 s, as accurate on the owner's English):
+
+  English only  Recommended: as above. Fastest: Parakeet + Groq's AI where the last Check this PC found Parakeet
+                quick here (it's slow on battery and weak processors), else Groq for both.
+  Other         Parakeet hears English only, so the cloud: the fastest model that hears every language well
+                (Groq's Whisper, weak at Tamil; else Gemini), with that provider's AI. Recommended takes the fastest
+                one whose key the user has (else asks for the fastest's); Fastest always the fastest.
+
+Multilingual, Local and Custom don't change with the language. A setup in use is never changed by this: the choice
+is made when a setup is applied, and every model a setup may choose counts as that setup (in_use()).
+
 No Qt here: apply() works on the TrayApp (sst.app), or the window's PreviewApp, through the same calls the pages use.
 A setup's key is saved before (TrayApp.save_key, which changes nothing else); apply() then sets the two parts.
 """
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, replace
 
 from sst import costs
 from sst.engines import SPEECH_MODELS
 from sst.engines.cloud import CLOUD
+from sst.engines.whisper import LANGUAGES
 from sst.gateway import PROVIDERS, GatewayConfig
 
 
@@ -56,13 +71,118 @@ NO_TRANSCRIBE = {"ta": "gemini-3.5-flash-lite"}
 # The models' names as people read them
 NAMES = {"gemini-3.5-flash-lite": "Gemini 3.5 Flash-Lite", "openai/gpt-oss-20b": "GPT-OSS 20B",
          "whisper-large-v3-turbo": "Whisper large-v3 turbo", "gemini-3.5-transcribe": "Gemini 3.5 Transcribe"}
+SHORT = {"whisper-large-v3-turbo": "Whisper turbo"}  # where a line is short
 
 
-def speech_model_for(setup: Setup, language: str = "") -> str:
-    """The setup's cloud speech model for the language spoken (Multilingual: Flash-Lite for Tamil)."""
-    if setup.key == "multilingual":
-        return NO_TRANSCRIBE.get(language, setup.speech_model)
+def spoken(languages: str | Iterable[str] = "") -> tuple[str, ...]:
+    """The languages the user speaks, as codes: a speech_language setting ("" = not chosen: English, Rflow's default)
+    or several codes."""
+    codes = [languages] if isinstance(languages, str) else list(languages)
+    return tuple(sorted({code for code in codes if code})) or ("en",)
+
+
+def speech_model_for(setup: Setup, language: str | Iterable[str] = "") -> str:
+    """The setup's cloud speech model for the language(s) spoken (Gemini Transcribe: Flash-Lite for Tamil)."""
+    if setup.speech == "gemini" and setup.speech_model == "gemini-3.5-transcribe":
+        return next((NO_TRANSCRIBE[code] for code in spoken(language) if code in NO_TRANSCRIBE), setup.speech_model)
     return setup.speech_model
+
+
+# ---- choosing by the languages spoken
+
+# What Recommended and Fastest may use, besides their own (SETUPS). Free-key words: what each provider does with them.
+_GROQ_FREE = SETUPS["fastest"].free_key
+_GEMINI_VOICE_FREE = SETUPS["multilingual"].free_key
+PARAKEET_GROQ = Setup("", "", "", "parakeet", "", "groq", "openai/gpt-oss-20b", "groq", _GROQ_FREE)
+GROQ = Setup("", "", "", "groq", "whisper-large-v3-turbo", "groq", "openai/gpt-oss-20b", "groq", _GROQ_FREE)
+GEMINI = Setup("", "", "", "gemini", "gemini-3.5-transcribe", "gemini", "gemini-3.5-flash-lite", "gemini",
+               _GEMINI_VOICE_FREE)
+# The cloud's speech, fastest first (measured after the key is released): Groq's Whisper ~0.5 s, Gemini ~2.2 s. The
+# languages each hears badly: Whisper's Tamil was weak on the owner's clips. (GEMINI_LIVE, a streaming Gemini engine,
+# can go first here once its speed and languages are measured.)
+CLOUD_SPEED = (GROQ, GEMINI)
+WEAK = {"groq": {"ta"}, "gemini": set()}
+SECONDS = {"parakeet": "under a second", "groq": "about half a second", "gemini": "about 2 seconds"}
+PARAKEET_QUICK = 1.0  # Fastest uses Parakeet where Check this PC found a sentence takes at most this (s): Groq's pace
+
+
+def _cloud_for(languages: tuple[str, ...]) -> list[Setup]:
+    """The cloud setups that hear every language spoken well, fastest first."""
+    return [option for option in CLOUD_SPEED if not WEAK[option.speech] & set(languages)]
+
+
+def parakeet_quick(scan: dict | None) -> bool:
+    """The last Check this PC found Parakeet as quick as the cloud here (never before a check)."""
+    verdict = next((v for v in (scan or {}).get("verdicts", []) if v.get("key") == "parakeet"), {})
+    return verdict.get("level") in ("recommended", "fast") and verdict.get("seconds", 99.0) <= PARAKEET_QUICK
+
+
+def choices(key: str, languages: str | Iterable[str] = "") -> list[Setup]:
+    """What a setup may use for these languages, in the order it prefers (Local and Custom: themselves)."""
+    langs = spoken(languages)
+    english = langs == ("en",)
+    if key == "recommended":
+        return [SETUPS[key]] if english else _cloud_for(langs)
+    if key == "fastest":
+        return [PARAKEET_GROQ, GROQ] if english else _cloud_for(langs)[:1]
+    if key == "multilingual":
+        return [GEMINI]
+    return [SETUPS[key]]
+
+
+def _names(langs: tuple[str, ...]) -> str:
+    names = [LANGUAGES.get(code, code) for code in langs]
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def resolve(key: str, languages: str | Iterable[str] = "", gateway: GatewayConfig | None = None,
+            scan: dict | None = None) -> Setup:
+    """The setup as it would be used now, for the languages spoken: Recommended's cloud model is the fastest whose key
+    the user has (else the fastest's key is asked for); Fastest uses Parakeet for English where this PC runs it quickly
+    (`scan`: sst.scan's last result). The name and key stay the setup's; the blurb says what it chose."""
+    base, langs = SETUPS[key], spoken(languages)
+    options = choices(key, langs)
+    if key in ("local", "custom", "multilingual"):
+        return base
+    if key == "fastest" and langs == ("en",):
+        chosen = PARAKEET_GROQ if parakeet_quick(scan) else GROQ
+    else:
+        chosen = next((o for o in options if key == "recommended" and gateway and gateway.key_for(o.needs)), options[0])
+    if chosen.speech == "parakeet":
+        blurb = base.blurb if key == "recommended" else \
+            f"Parakeet on this PC hears English in {SECONDS['parakeet']} here, and Groq's AI polishes it in a fraction of one."
+        if not SPEECH_MODELS["parakeet"].installed():
+            blurb += f" Parakeet is a one-time download of {SPEECH_MODELS['parakeet'].size.split(',')[0]}."
+    elif key == "fastest" and chosen is GROQ and langs == ("en",):
+        blurb = base.blurb
+    else:
+        speed = SECONDS[chosen.speech]
+        why = "Parakeet hears English only, so " if key == "recommended" else ""
+        weak = " (Groq's Whisper is weak at Tamil)" if chosen.speech != "groq" and "ta" in langs else ""
+        blurb = (f"{_names(langs)}: {why}{CLOUD[chosen.speech].name.removeprefix('Google ')} hears it in {speed}"
+                 f"{weak}, and its AI polishes it.")
+    return replace(chosen, key=key, name=base.name, blurb=blurb)
+
+
+def for_app(app, key: str) -> Setup:
+    """A setup as it would be used now by the TrayApp (or PreviewApp): its language, keys and last Check this PC."""
+    return resolve(key, app.settings.speech_language, app.gateway, getattr(app, "last_scan", None))
+
+
+def uses_line(setup: Setup, languages: str | Iterable[str] = "") -> str:
+    """What a setup uses, in a line (the welcome's first step)."""
+    if setup.key == "local":
+        return "Parakeet or Whisper on this PC · AI cleanup coming soon"
+    if setup.key == "custom":
+        return "Choose the speech model and the AI yourself"
+    ai = model_name(setup.model)
+    if setup.speech == "parakeet":
+        return f"Parakeet on this PC + {ai}"
+    model = speech_model_for(setup, languages)
+    if model == setup.model:
+        return f"{ai} hears you and polishes the text"
+    where = "" if setup.speech == "gemini" else f", both on {CLOUD[setup.speech].name}"  # Gemini's names say it
+    return f"{SHORT.get(model, model_name(model))} + {ai}{where}"
 
 
 def speech_cost(setup: Setup, language: str = "", local: str = "parakeet") -> costs.Estimate:
@@ -88,25 +208,28 @@ def in_use_cost(settings, gateway: GatewayConfig) -> tuple[costs.Estimate, costs
     return costs.speech_cost(speech, model), ai
 
 
-def current(settings, gateway: GatewayConfig, pending: str = "") -> str:
-    """The setup the settings match, else "custom". `pending`: a speech model being downloaded to be used (a setup
-    chosen with Parakeet or Whisper not here yet counts as chosen)."""
+def in_use(settings, gateway: GatewayConfig, pending: str = "") -> list[str]:
+    """Every setup the settings match, its own models first (["custom"] when none): two can use the same models (for
+    Tamil, Recommended chooses what Multilingual uses). A setup matches with any model it may choose for the language
+    (choices()), so adding a key or checking this PC never takes it out of use. `pending`: a speech model being
+    downloaded to be used (a setup chosen with Parakeet or Whisper not here yet counts as chosen)."""
     speech = pending or settings.speech_model
     cloud_model = settings.speech_cloud_models.get(speech) or (CLOUD[speech].models[0] if speech in CLOUD else "")
     cleanup = (gateway.chosen, settings.cleanup_model) if settings.cleanup and settings.cleanup_model else None
-    for setup in SETUPS.values():
-        if setup.key == "custom":
-            continue
-        if setup.key == "local":
-            if speech in LOCAL_MODELS and cleanup is None:
-                return "local"
-            continue
-        if speech != setup.speech or cleanup != (setup.provider, setup.model):
-            continue
-        if speech in CLOUD and cloud_model != speech_model_for(setup, settings.speech_language):
-            continue
-        return setup.key
-    return "custom"
+    language = settings.speech_language
+
+    def uses(option: Setup) -> bool:
+        return speech == option.speech and cleanup == (option.provider, option.model) and \
+            (speech not in CLOUD or cloud_model == speech_model_for(option, language))
+    own = [key for key, setup in SETUPS.items() if key not in ("local", "custom") and uses(setup)]
+    chosen = [key for key in SETUPS if key not in ("local", "custom", *own) and any(map(uses, choices(key, language)))]
+    local = ["local"] if speech in LOCAL_MODELS and cleanup is None else []
+    return own + chosen + local or ["custom"]
+
+
+def current(settings, gateway: GatewayConfig, pending: str = "") -> str:
+    """The setup the settings match, else "custom" (in_use(): the first)."""
+    return in_use(settings, gateway, pending)[0]
 
 
 def key_missing(setup: Setup, gateway: GatewayConfig) -> str:
@@ -117,8 +240,8 @@ def key_missing(setup: Setup, gateway: GatewayConfig) -> str:
 def apply(app, setup_key: str, local: str = "parakeet") -> str:
     """Use a setup: its speech model (downloaded first through the usual flow when it isn't on this PC: it's used
     once it's here), then its AI (Local: AI cleanup off, its model kept for later). The key is saved before. Returns
-    the speech model being downloaded ("" when none)."""
-    setup = SETUPS[setup_key]
+    the speech model being downloaded ("" when none). What it uses is chosen now, for the user's language (resolve())."""
+    setup = for_app(app, setup_key)
     if setup.key == "custom":
         return ""
     s = app.settings
