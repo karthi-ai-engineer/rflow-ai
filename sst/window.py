@@ -30,6 +30,7 @@ import re
 import sys
 import threading
 import time
+from collections.abc import Callable, Mapping
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -3881,7 +3882,7 @@ class ModelsPage(Page):
         self.advanced_card.hide()
         self.add(self.advanced_card)
         self.body.addStretch()
-        self._show_call_warning()
+        self.call_warning.hide()  # until shown (refresh): asking means restarting PortAudio (refresh_devices)
 
     @staticmethod
     def _named(name: QLabel, detail: QLabel, change: QPushButton) -> QHBoxLayout:
@@ -6473,6 +6474,32 @@ class NavButton(Button):
         p.end()
 
 
+class Pages(Mapping):
+    """The window's pages by key, each built the first time it is wanted (shown, or asked for as `pages[key]`). All
+    fifteen built at once took 3-5 s, 1,170 widgets and 107 MB, mostly for pages never opened. Iterating gives every key;
+    values() and items() build what they reach, like a dict would hold them. `built` has only those built so far."""
+
+    def __init__(self, makers: dict[str, Callable[[], QWidget]], on_built: Callable[[str, QWidget], None]):
+        self._makers, self._on_built = makers, on_built
+        self.built: dict[str, QWidget] = {}
+
+    def __getitem__(self, key: str) -> QWidget:
+        page = self.built.get(key)
+        if page is None:
+            page = self.built[key] = self._makers[key]()
+            self._on_built(key, page)
+        return page
+
+    def __contains__(self, key) -> bool:
+        return key in self._makers
+
+    def __iter__(self):
+        return iter(self._makers)
+
+    def __len__(self) -> int:
+        return len(self._makers)
+
+
 class MainWindow(QWidget):
     def __init__(self, app):
         super().__init__()
@@ -6556,18 +6583,15 @@ class MainWindow(QWidget):
         banner.addWidget(self.update_button)
         self.banner.hide()
 
-        self.pages = {"home": HomePage(app, self.show_page), "dictionary": DictionaryPage(app, self.show_page),
-                      "snippets": SnippetsPage(app, self.show_page),
-                      "live": LivePage(app, self.show_page),
-                      "transform": TransformPage(app, self.show_page), "translate": TranslatePage(app, self.show_page),
-                      "formatting": FormattingPage(app, self.show_page), "report": ReportPage(app, self.show_page),
-                      "models": ModelsPage(app, self.show_page), "speech": SpeechPage(app, self.show_page),
-                      "cleanup": CleanupPage(app, self.show_page), "settings": SettingsPage(app, self.show_page),
-                      "reading": ReadingTestPage(app, self.show_page), "profiles": ProfilesPage(app, self.show_page),
-                      "welcome": WelcomePage(app, self.show_page)}
+        self._update_status = ""  # Settings' update line, kept for when that page is built
+        kinds = {"home": HomePage, "dictionary": DictionaryPage, "snippets": SnippetsPage, "live": LivePage,
+                 "transform": TransformPage, "translate": TranslatePage, "formatting": FormattingPage, "report": ReportPage,
+                 "models": ModelsPage, "speech": SpeechPage, "cleanup": CleanupPage, "settings": SettingsPage,
+                 "reading": ReadingTestPage, "profiles": ProfilesPage, "welcome": WelcomePage}
         self.stack = QStackedWidget()
-        for page in self.pages.values():
-            self.stack.addWidget(page)
+        self.pages = Pages({key: lambda kind=kind: kind(app, self.show_page) for key, kind in kinds.items()},
+                           self._page_built)
+        self.pages["home"]  # noqa: B018 (built now: the page the window opens on, and the one set_status keeps current)
         self.content = Host("base")
         content = QVBoxLayout(self.content)
         content.setContentsMargins(0, 0, 0, 0)
@@ -6601,14 +6625,24 @@ class MainWindow(QWidget):
         p.end()
 
     def apply_theme(self, name: str | None = None) -> None:
-        """Obsidian or Porcelain, as Windows is set (or `name`, e.g. "light" for the website's screenshots)."""
+        """Obsidian or Porcelain, as Windows is set (or `name`, e.g. "light" for the website's screenshots). It restyles
+        the pages built so far; one built later takes the theme in use from the window's style sheet as it joins."""
         theme.set_theme(name if isinstance(name, str) else "dark" if dark_mode() else "light")
         self.setStyleSheet(theme.stylesheet())
         for widget in self.findChildren(QWidget):
             widget.update()
         self.update()
-        if hasattr(self, "pages"):
-            self.refresh()
+        self.refresh()
+
+    def _page_built(self, key: str, page: QWidget) -> None:
+        """A page built on first use: the window's present state, as it would have had from the start."""
+        self.stack.addWidget(page)
+        if isinstance(page, Page) and self.compact is not None:
+            page.set_compact(self.compact)
+        if key == "home":
+            page.set_ready(self.ready)
+        elif key == "settings" and self._update_status:
+            page.update_status.setText(self._update_status)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -6666,7 +6700,7 @@ class MainWindow(QWidget):
         self.status_title.setAlignment(Qt.AlignmentFlag.AlignHCenter if compact else Qt.AlignmentFlag.AlignLeft)
         self.profile_button.setVisible(not compact and len(self.app.profiles.items) > 1)
         self.update_link.setVisible(not compact and bool(self.update_link.text()))
-        for page in self.pages.values():
+        for page in self.pages.built.values():
             if isinstance(page, Page):
                 page.set_compact(compact)
         self._fit_sidebar()
@@ -6741,7 +6775,7 @@ class MainWindow(QWidget):
         self.pages["profiles"].new_name.setFocus()
 
     def current_page(self) -> str:
-        return next(key for key, page in self.pages.items() if page is self.stack.currentWidget())
+        return next(key for key, page in self.pages.built.items() if page is self.stack.currentWidget())
 
     def open(self, page: str | None = None) -> None:
         if not self.app.settings.welcomed:
@@ -6765,7 +6799,8 @@ class MainWindow(QWidget):
 
     def set_status(self, message: str, ready: bool) -> None:
         self.ready, self.status_message = ready, message
-        self.pages["home"].set_ready(ready)
+        if "home" in self.pages.built:
+            self.pages["home"].set_ready(ready)
         self._show_status()
         current = self.current_page()
         if current == "welcome":
@@ -6808,7 +6843,9 @@ class MainWindow(QWidget):
             self._fit_sidebar()
 
     def set_update_status(self, message: str) -> None:
-        self.pages["settings"].update_status.setText(message)
+        self._update_status = message
+        if "settings" in self.pages.built:
+            self.pages["settings"].update_status.setText(message)
 
     def closeEvent(self, event):
         # Closing the window doesn't quit: dictation keeps working from the tray, like Wispr Flow.
