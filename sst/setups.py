@@ -109,6 +109,15 @@ def current(settings, gateway: GatewayConfig, pending: str = "") -> str:
     return "custom"
 
 
+def backup_for(gateway: GatewayConfig) -> tuple[GatewayConfig, str] | None:
+    """AI cleanup's backup at another provider (sst.gateway.Polisher.routes): the first setup's AI whose provider isn't
+    the chosen one and whose key the user has, as (that provider's config, its model). None without such a key."""
+    for setup in SETUPS.values():
+        if setup.provider and setup.provider != gateway.service.key and (key := gateway.key_for(setup.provider)):
+            return GatewayConfig(gateway.entries().get(setup.provider, ("", ""))[0], key, setup.provider), setup.model
+    return None
+
+
 def key_missing(setup: Setup, gateway: GatewayConfig) -> str:
     """The provider whose key the setup still needs ("" when it has it, or needs none)."""
     return setup.needs if setup.needs and not gateway.key_for(setup.needs) else ""
