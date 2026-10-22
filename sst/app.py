@@ -28,13 +28,14 @@ from collections.abc import Callable
 from datetime import date, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QFontMetrics, QGuiApplication, QIcon, QPainter
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
-from sst import DOWNLOADS_DIR, __version__, bench, downloads, evaluate, scan, theme, updates
+from sst import DOWNLOADS_DIR, __version__, bench, downloads, scan, theme, updates
 from sst.audio import PREROLL_SECONDS, TAIL_SECONDS, Recorder, default_microphone, input_device_names
 from sst.commands import UNDO, match_command, phrases_for
 from sst.dictate import DEFAULT_HOTKEY, Dictation, already_running, wispr_flow_running
@@ -69,6 +70,9 @@ from sst.transformui import TransformController
 from sst.translate import Translator, system_language
 from sst.translateui import TranslateController
 from sst.window import APP_NAME, ICON_FILE, LOG_DIR, MainWindow, PreviewApp
+
+if TYPE_CHECKING:
+    from sst import evaluate  # imported when a reading test is scored (score_reading), not at every start
 
 UPDATE_DIR = Path(os.environ.get("TEMP", Path.home())) / "Rflow-update"  # downloaded installers
 # The sentence models are tried on (the scan, a cloud or server card's Test): 7.4 s of a LibriVox reading, as in
@@ -1295,10 +1299,11 @@ class TrayApp:
         if self.dictation:
             self._apply_speech()  # the speech model listens for the term too
 
-    def score_reading(self, folders: list[Path], progress) -> evaluate.Results:
+    def score_reading(self, folders: list[Path], progress) -> "evaluate.Results":
         """The speech model alone, then with the cleanup model and the backup model, one at a time (the endpoint may be
         small).
         The report goes into the test's folder, or into 'summary' when several tests are scored together."""
+        from sst import evaluate
         if not self.dictation:
             raise RuntimeError("The speech model is still loading; try again in a moment." if self.loading_speech
                                else "Choose a speech model first, on the Speech recognition page.")
