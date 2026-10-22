@@ -8,8 +8,10 @@ import time
 
 import numpy as np
 import pytest
-from websockets.exceptions import ConnectionClosedError
+from websockets.datastructures import Headers
+from websockets.exceptions import ConnectionClosedError, InvalidStatus
 from websockets.frames import Close
+from websockets.http11 import Response
 
 from sst.live import gemini
 from sst.live.contracts import Kind, LiveConfig
@@ -56,7 +58,7 @@ class FakeServer:
 
     @property
     def frames(self):
-        return [base64.b64decode(m["realtimeInput"]["audio"]["data"]) for m in self.sent if "realtimeInput" in m]
+        return [base64.b64decode(m["realtimeInput"]["audio"]["data"]) for m in self.sent if "audio" in m.get("realtimeInput", {})]
 
 
 def closed_by_google(code, reason):
@@ -352,7 +354,7 @@ def test_a_refused_key_says_so_and_stops_trying(live):
     assert wait_until(lambda: server.sent)
     server.incoming.put(None)  # the server closes the connection with its reason
     assert wait_until(lambda: kinds(events, Kind.ERROR))
-    assert kinds(events, Kind.ERROR)[0].text == "Google refused the key: check the Gemini key in AI & models."
+    assert kinds(events, Kind.ERROR)[0].text == "Gemini didn't accept the key: check the Gemini key in AI & models."
     assert wait_until(lambda: any(e.text == "Stopped" for e in kinds(events, Kind.STATUS)))
 
 
@@ -437,3 +439,193 @@ def test_stop_finishes_the_line_and_says_stopped(live):
     engine.stop()
     assert kinds(events, Kind.LINE)[-1].source == "Last words"
     assert kinds(events, Kind.STATUS)[-1].text == "Stopped" and not threading.current_thread().daemon
+
+
+# -- Google's refusals, said plainly (#202): they arrive as a close frame's code and reason, or a refused handshake
+
+def stopped(events):
+    return any(e.text == "Stopped" for e in kinds(events, Kind.STATUS))
+
+
+def refused_handshake(status, body=b""):
+    return InvalidStatus(Response(status, "refused", Headers(), body))
+
+
+@pytest.mark.parametrize("refusal, message", [
+    (closed_by_google(1011, "Your prepayment credits are depleted. Please go to AI Studio at https://ai.studio/projects "
+                            "to manage your project and billing."), gemini.NO_CREDIT),
+    (refused_handshake(402, b'{"error": {"message": "Payment required"}}'), gemini.NO_CREDIT),
+    (closed_by_google(1008, "Billing account for project is not active"), gemini.NO_CREDIT),
+    (refused_handshake(401), gemini.REFUSED_KEY),
+    (refused_handshake(403, b'{"error": {"status": "PERMISSION_DENIED"}}'), gemini.REFUSED_KEY),
+    (closed_by_google(1008, "API key not valid. Please pass a valid API key."), gemini.REFUSED_KEY),
+    (closed_by_google(1011, "Quota exceeded for metric: generativelanguage.googleapis.com/generate_requests_per_model_per_day,"
+                            " limit: 50"), gemini.QUOTA_DAY),
+])
+def test_a_refusal_says_what_it_is_once_and_stops(live, refusal, message):
+    engine, events, _ = live([FakeServer(refuse_setup=refusal), FakeServer()])
+    engine.start()
+    assert wait_until(lambda: stopped(events))
+    assert [e.text for e in kinds(events, Kind.ERROR)] == [message]  # no retry, no other words
+    assert engine.error == message
+
+
+def test_a_short_rate_limit_is_waited_out_as_google_asks(live, monkeypatch):
+    server = FakeServer()
+    engine, events, _ = live([FakeServer(refuse_setup=closed_by_google(1011, "Rate limit hit. Please retry in 7.2s.")),
+                              server])
+    waits = []
+    monkeypatch.setattr(engine._stop, "wait", lambda seconds: waits.append(seconds) or False)
+    engine.start()
+    assert wait_until(lambda: server.sent)  # tried again
+    assert waits == [7.2] and kinds(events, Kind.ERROR)[0].text == gemini.RATE_LIMITED.format(7)
+
+
+def test_a_quota_that_doesnt_say_when_is_tried_a_few_times_then_stops(live, monkeypatch):
+    """Google's quota message mentions billing ("check your plan and billing details"): a quota, not missing credit."""
+    reason = "You exceeded your current quota, please check your plan and billing details."
+    servers = [FakeServer(refuse_setup=closed_by_google(1011, reason)) for _ in range(gemini.QUOTA_TRIES + 1)]
+    engine, events, _ = live(servers)
+    waits = []
+    monkeypatch.setattr(engine._stop, "wait", lambda seconds: waits.append(seconds) or False)
+    engine.start()
+    assert wait_until(lambda: stopped(events))
+    assert [e.text for e in kinds(events, Kind.ERROR)] == [gemini.QUOTA_NOW] * (gemini.QUOTA_TRIES - 1) + [gemini.QUOTA_STOP]
+    assert waits == [gemini.QUOTA_WAIT] * (gemini.QUOTA_TRIES - 1)
+
+
+# -- silence isn't streamed (#202): Google bills the audio sent
+
+def test_a_long_silence_is_not_sent_and_the_next_sound_comes_with_its_preroll(live):
+    server = FakeServer()
+    engine, _, _ = live([server])
+    engine.start()
+    assert wait_until(lambda: server.sent)
+    engine.feed(VOICE)
+    for _ in range(30):  # 3 s of digital silence
+        engine.feed(SILENCE)
+    engine.feed(VOICE)
+    assert wait_until(lambda: len(server.frames) == 24)  # the voice, 2 s of silence, 200 ms of it again, the voice
+    assert server.frames[0] == VOICE and server.frames[1:21] == [SILENCE] * 20
+    assert server.frames[21:] == [SILENCE, SILENCE, VOICE]
+    messages = [m["realtimeInput"] for m in server.sent if "realtimeInput" in m]
+    assert messages[21] == {"audioStreamEnd": True}  # once, where the silence stopped being sent
+    assert sum("audioStreamEnd" in m for m in messages) == 1
+    assert engine.sent == 24 and round(engine.silence_s, 1) == 0.8
+
+
+def test_quiet_sound_is_not_silence():
+    hum = (np.sin(np.arange(1600) / 5) * 40).astype("<i2").tobytes()  # -58 dBFS peaks: a quiet room, still sent
+    assert gemini._silent(SILENCE) and gemini._silent(b"") and not gemini._silent(hum)
+    assert gemini._silent((np.ones(1600) * gemini.SILENT_PEAK).astype("<i2").tobytes())
+
+
+def test_if_google_refuses_the_stream_end_silence_is_still_left_out_without_it(live, caplog):
+    caplog.set_level("INFO", logger="sst.live.gemini")
+    first, second = FakeServer(), FakeServer()
+    engine, events, _ = live([first, second])
+    engine.start()
+    assert wait_until(lambda: first.sent)
+    for _ in range(25):
+        engine.feed(SILENCE)
+    assert wait_until(lambda: any("audioStreamEnd" in m.get("realtimeInput", {}) for m in first.sent))
+    first.incoming.put(closed_by_google(1007, 'Invalid JSON payload received. Unknown name "audio_stream_end"'))
+    assert wait_until(lambda: second.sent)  # at once, quietly
+    for _ in range(25):
+        engine.feed(SILENCE)
+    engine.feed(VOICE)
+    assert wait_until(lambda: VOICE in second.frames)
+    assert not kinds(events, Kind.ERROR) and not any("audioStreamEnd" in m.get("realtimeInput", {}) for m in second.sent)
+    assert "refused audioStreamEnd" in caplog.text
+
+
+def test_a_connection_google_closes_while_nothing_is_sent_reconnects_without_an_error(live, monkeypatch):
+    first, second = FakeServer(), FakeServer()
+    engine, events, _ = live([first, second])
+    monkeypatch.setattr(engine._stop, "wait", lambda seconds: False)
+    engine.start()
+    assert wait_until(lambda: first.sent)
+    for _ in range(25):
+        engine.feed(SILENCE)
+    assert wait_until(lambda: engine._skipping)
+    first.incoming.put(None)  # closed, no reason given
+    assert wait_until(lambda: second.sent) and not kinds(events, Kind.ERROR)
+    assert engine.reconnects == 1
+
+
+# -- the session goes on across connections (#202): Live API session resumption
+
+def test_a_new_connection_takes_up_the_same_session(live):
+    first, second = FakeServer(), FakeServer()
+    engine, events, _ = live([first, second])
+    engine.start()
+    assert wait_until(lambda: first.sent)
+    assert first.sent[0]["setup"]["sessionResumption"] == {}  # asked for from the start
+    first.incoming.put({"sessionResumptionUpdate": {"newHandle": "h-1", "resumable": True}})
+    first.incoming.put({"sessionResumptionUpdate": {"newHandle": "", "resumable": False}})  # mid-answer: h-1 kept
+    first.say(inputTranscription={"text": "Half a"})
+    assert wait_until(lambda: kinds(events, Kind.SOURCE))
+    first.incoming.put({"goAway": {"timeLeft": "10s"}})
+    assert wait_until(lambda: second.sent)
+    assert second.sent[0]["setup"]["sessionResumption"] == {"handle": "h-1"}
+    second.say(inputTranscription={"text": " sentence."})
+    second.say(turnComplete=True)
+    assert wait_until(lambda: kinds(events, Kind.LINE))
+    assert [e.source for e in kinds(events, Kind.LINE)] == ["Half a sentence."]  # one line, not cut at the reconnect
+    assert engine.reconnects == 1 and engine.resumed == 1
+
+
+def test_a_setup_google_refuses_with_resumption_is_sent_again_without_it(live, caplog):
+    caplog.set_level("INFO", logger="sst.live.gemini")
+    refused = closed_by_google(1007, 'Invalid JSON payload received. Unknown name "sessionResumption" at \'setup\'')
+    second = FakeServer()
+    engine, events, _ = live([FakeServer(refuse_setup=refused), second])
+    engine.start()
+    assert wait_until(lambda: second.sent)
+    assert "sessionResumption" not in second.sent[0]["setup"] and not kinds(events, Kind.ERROR)
+    assert "refused session resumption" in caplog.text
+
+
+def test_a_handle_google_no_longer_knows_starts_a_new_session(live):
+    first, second, third = FakeServer(), FakeServer(refuse_setup=closed_by_google(1008, "Session not found")), FakeServer()
+    engine, events, _ = live([first, second, third])
+    engine.start()
+    assert wait_until(lambda: first.sent)
+    first.incoming.put({"sessionResumptionUpdate": {"newHandle": "old", "resumable": True}})
+    first.incoming.put({"goAway": {}})
+    assert wait_until(lambda: third.sent)
+    assert second.sent[0]["setup"]["sessionResumption"] == {"handle": "old"}
+    assert third.sent[0]["setup"]["sessionResumption"] == {} and not kinds(events, Kind.ERROR)
+
+
+def test_the_renewal_waits_for_a_pause_but_not_for_ever(live):
+    first, second, third = FakeServer(), FakeServer(), FakeServer()
+    engine, events, clock = live([first, second, third], reconnect_s=540, line_pause_s=10_000)
+    engine.start()
+    assert wait_until(lambda: first.sent)
+    first.say(inputTranscription={"text": "Mid sentence"})
+    assert wait_until(lambda: kinds(events, Kind.SOURCE))
+    clock.now += 541  # due, but a line is being built
+    time.sleep(0.5)
+    assert not second.sent
+    first.say(turnComplete=True)  # the line ends: a pause
+    assert wait_until(lambda: second.sent) and first.closed
+    second.say(inputTranscription={"text": "Talking on"})
+    assert wait_until(lambda: len(kinds(events, Kind.SOURCE)) == 2)
+    clock.now += 540 + gemini.RECONNECT_GRACE_S + 1  # no pause for too long: renewed anyway, before Google cuts it
+    assert wait_until(lambda: third.sent)
+
+
+def test_the_report_has_numbers_and_no_words(live):
+    server = FakeServer()
+    engine, events, clock = live([server])
+    engine.start()
+    assert wait_until(lambda: server.sent)
+    engine.feed(VOICE)
+    clock.now += 1.5
+    server.say(inputTranscription={"text": "secret words"})
+    assert wait_until(lambda: kinds(events, Kind.SOURCE) and server.frames)
+    engine.stop()
+    report = engine.report()
+    assert "first words after 1.5 s" in report and "1 frames sent, 0 dropped" in report and "0 reconnects" in report
+    assert "secret" not in report and KEY not in report
