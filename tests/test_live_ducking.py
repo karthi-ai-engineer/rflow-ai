@@ -6,6 +6,15 @@ import pytest
 
 from sst.live import ducking
 from sst.live.ducking import CHANGED, DOWN, INAUDIBLE, KEEP, RESCAN, UP, Ducker, put_back
+from sst.live.wasapi import Lowering
+
+
+@pytest.fixture(autouse=True)
+def lowering(monkeypatch):
+    """Each test's Ducker tells its own Lowering, not the one Rflow's capture reads."""
+    fresh = Lowering(clock=lambda: 0.0)
+    monkeypatch.setattr(ducking.wasapi, "lowering", fresh)
+    return fresh
 
 
 class Sound:
@@ -140,7 +149,7 @@ def test_a_new_level_is_followed_at_once(tmp_path):
     assert ducker.depth == 0.0
 
 
-@pytest.mark.parametrize(("original", "level"), [(1.0, INAUDIBLE), (0.5, INAUDIBLE), (0.002, INAUDIBLE)])
+@pytest.mark.parametrize(("original", "level"), [(1.0, INAUDIBLE), (0.5, 0.5 * INAUDIBLE), (0.002, 0.002 * INAUDIBLE)])
 def test_zero_percent_is_inaudible_but_never_silence_so_live_translation_still_hears_the_meeting(tmp_path, original,
                                                                                                     level):
     """Windows' mix after a session volume of exactly 0 is silence: live translation would hear nothing."""
@@ -217,3 +226,18 @@ def test_the_logs_name_the_program_not_the_whole_session_id():
     name = r"{0.0.0.00000000}.{a1b2}|\Device\HarddiskVolume3\Program Files\Google\Chrome\Application\chrome.exe%b{00000000-0000}"
     assert ducking._app_name(name) == "chrome.exe" and ducking._app_name("") == "an app"
     assert CHANGED < 0.05  # a slider moved by hand is noticed
+
+
+def test_every_app_is_lowered_by_one_factor_which_the_capture_is_told(tmp_path, lowering):
+    """So the capture lifts every lowered app back exactly (sst.live.wasapi.Lifter), the meeting included."""
+    meeting, music = Sound("ms-teams.exe", 0.8), Sound("spotify.exe", 0.5)
+    ducker, clock, _ = ducker_with(meeting, music, depth=0.0, tmp_path=tmp_path)
+    assert lowering.factor() == 1.0
+    run(ducker, clock, DOWN + 0.1)
+    assert lowering._now == INAUDIBLE
+    assert meeting.level / 0.8 == pytest.approx(INAUDIBLE) and music.level / 0.5 == pytest.approx(INAUDIBLE)
+    ducker.set_depth(0.1)
+    run(ducker, clock, UP + 0.1)
+    assert lowering._now == pytest.approx(0.1) and meeting.level == pytest.approx(0.08)
+    ducker.release()
+    assert lowering._now == 1.0 and meeting.level == 0.8
