@@ -150,6 +150,33 @@ def test_home_shows_the_stats_and_the_dictations_by_day():
     assert home.orb.state == "ready" and window.status_title.text() == "Ready"
 
 
+def test_the_orb_moves_only_while_listening_or_cleaning_up():
+    """Each orb frame repaints the soft surfaces under it too: a breathing "ready" cost half a core while Home was open."""
+    from sst.ui import Orb
+    window, app = _window()
+    app.speech_in_use = lambda: "parakeet"
+    window.open("home")
+    window.set_status("Ready: hold Ctrl+Win", True)
+    home = window.pages["home"]
+    assert home.orb.state == "ready" and home.orb.isVisible() and not home.orb.animating
+    window.hide()
+    orb = Orb()
+    orb.show()
+    for state in ("ready", "off", "loading", "done"):
+        orb.set_state(state, 0.5)
+        assert not orb.animating, state
+    for state in ("live", "ai"):
+        orb.set_state(state)
+        assert orb.animating, state
+    orb.hide()
+    assert not orb.animating
+    orb.show()
+    assert orb.animating  # still listening when shown again
+    orb.set_state("ready")
+    assert not orb.animating and not orb.grab().isNull()
+    orb.hide()
+
+
 def test_home_explains_what_to_do_before_the_first_dictation():
     window, _ = _window(settings=Settings(welcomed=True, hotkey="menu"))
     labels = _labels(window.pages["home"])
