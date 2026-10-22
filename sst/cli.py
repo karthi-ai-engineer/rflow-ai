@@ -152,19 +152,20 @@ def cmd_live(args) -> None:
     if args.speak:
         from sst.live.ducking import Ducker
         from sst.live.speaker import Speaker
-        from sst.live.voice import DANNY, VOICES, PiperVoice, install
+        from sst.live.voice import LOCAL, PiperVoice, install, local
         from sst.live.wasapi import Player
-        voice = VOICES.get(settings.live_voice, DANNY)
-        if not voice.ready():
-            print(f"Downloading the voice {voice.name} ({round(voice.size / 1e6)} MB, once)...")
-            install(voice, progress=lambda done, total: print(f"\r  {done * 100 // total}%", end="", flush=True))
+        if not LOCAL.ready():  # the voice on this laptop, for when Gemini's own voice doesn't come
+            print(f"Downloading the voice {LOCAL.name} ({round(LOCAL.size / 1e6)} MB, once)...")
+            install(LOCAL, progress=lambda done, total: print(f"\r  {done * 100 // total}%", end="", flush=True))
             print()
+        voice = local()
         lanes = config.spoken_lanes(voice.language)
         if not lanes:
-            print(f"  (The voice speaks {language_name(voice.language)}: nothing here is translated into it.)")
+            print(f"  (Gemini speaks the translation; {voice.name} speaks only {language_name(voice.language)}, so "
+                  f"can't stand in for it here.)")
         session.set_speaker(Speaker(lambda: PiperVoice(voice), Player(), lanes, voice.language, settings.live_speak_speed,
                                     on_problem=lambda message: print(f"\n  ! {message}", flush=True),
-                                    ducker=Ducker(settings.live_duck)))
+                                    ducker=Ducker(settings.live_duck), own=config.spoken_lanes()))
     try:
         stopped.wait(args.seconds or None)
     finally:
