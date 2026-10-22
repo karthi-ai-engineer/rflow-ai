@@ -11,7 +11,7 @@ import pytest
 
 from sst import downloads
 from sst.downloads import Download, ModelFile
-from sst.wake import KWS, VOICE, Spotter, VoicePrint, models, spotter, voiceprint
+from sst.wake import KWS, VOICE, Spotter, Transcriber, VoicePrint, models, spotter, voiceprint
 
 FIXTURE = Path(__file__).parent / "fixtures" / "wake"
 
@@ -104,6 +104,36 @@ class FakeKeywordSpotter:
         stream.result = ""
 
 
+class FakeRecognizer:
+    """The spotter's model as a recogniser: it "hears" CARTHY in any audio with a sample above 0.5."""
+    made: list["FakeRecognizer"] = []
+
+    def __init__(self, config):
+        self.config, self.streams = config, []
+
+    @classmethod
+    def from_transducer(cls, **config):
+        cls.made.append(cls(config))
+        return cls.made[-1]
+
+    def create_stream(self):
+        stream = types.SimpleNamespace(chunks=[], finished=False, text="")
+        stream.accept_waveform = lambda rate, samples: stream.chunks.append((rate, samples))
+        stream.input_finished = lambda: setattr(stream, "finished", True)
+        self.streams.append(stream)
+        return stream
+
+    def is_ready(self, stream):
+        return bool(stream.chunks) and stream.finished
+
+    def decode_stream(self, stream):
+        rate, samples = stream.chunks.pop(0)
+        stream.text += " CARTHY " if rate == 16000 and samples.dtype == np.float32 and samples.max() > 0.5 else ""
+
+    def get_result(self, stream):
+        return stream.text
+
+
 @pytest.fixture
 def fake_sherpa(monkeypatch):
     """The downloaded model's folder (the tokenizer fixture, stand-in onnx files) passing the check; sherpa-onnx faked."""
@@ -116,8 +146,9 @@ def fake_sherpa(monkeypatch):
         (folder / f.name).write_bytes(data)
         files.append(ModelFile(f.name, len(data), "x"))
     monkeypatch.setattr(models, "KWS", Download(KWS.folder, KWS.base_url, tuple(files)))
-    monkeypatch.setitem(sys.modules, "sherpa_onnx", types.SimpleNamespace(KeywordSpotter=FakeKeywordSpotter))
-    FakeKeywordSpotter.made = []
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", types.SimpleNamespace(KeywordSpotter=FakeKeywordSpotter,
+                                                                          OnlineRecognizer=FakeRecognizer))
+    FakeKeywordSpotter.made, FakeRecognizer.made = [], []
     spotter.unload()
     yield folder
     spotter.unload()
@@ -175,6 +206,22 @@ def test_a_phrase_the_model_has_no_pieces_for_is_refused(fake_sherpa):
         Spotter({"a": ""})
     with pytest.raises(ValueError):
         Spotter({})
+
+
+def test_the_transcriber_is_the_spotters_own_model_as_a_recogniser(fake_sherpa):
+    hear = Transcriber()
+    config = FakeRecognizer.made[0].config
+    assert config["encoder"] == str(fake_sherpa / models.ENCODER) and config["tokens"] == str(fake_sherpa / models.TOKENS)
+    assert config["decoding_method"] == "greedy_search" and config["num_threads"] == 1
+    assert hear(np.full((8000, 1), 0.9, np.float64)) == "CARTHY"  # the whole take, to its end (input_finished)
+    assert hear(np.zeros(8000, np.float32)) == ""
+
+
+def test_a_missing_model_never_reaches_the_transcriber(fake_sherpa):
+    (fake_sherpa / models.DECODER).unlink()
+    with pytest.raises(FileNotFoundError):
+        Transcriber()
+    assert FakeRecognizer.made == []
 
 
 # ---- the voice print, with its model faked
