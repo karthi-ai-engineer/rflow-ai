@@ -40,6 +40,7 @@ import os
 import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable
 from ctypes import POINTER, Structure, byref, c_int, c_long, c_ulong, c_ushort, c_void_p, wintypes
 
@@ -536,8 +537,9 @@ class _Capturing:
         return self.flow == E_RENDER and _output_muted(self.enumerator)
 
     def read(self) -> list[np.ndarray]:
-        """The packets waiting now, as mono float at the device's rate (silent packets as zeros)."""
-        out, size = [], wintypes.UINT()
+        """The packets waiting now, as mono float at the device's rate (silent packets as zeros), decoded together: one
+        array, or none."""
+        raw, size = [], wintypes.UINT()
         next_size = _method(self.capture, 5, POINTER(wintypes.UINT))
         get = _method(self.capture, 3, POINTER(c_void_p), POINTER(wintypes.UINT), POINTER(wintypes.DWORD), c_void_p,
                       c_void_p)
@@ -548,14 +550,13 @@ class _Capturing:
             get(byref(data), byref(frames), byref(flags), None, None)
             try:
                 if flags.value & _SILENT or not data.value:
-                    out.append(np.zeros(frames.value, dtype=np.float32))
+                    raw.append(bytes(frames.value * self.block))  # zeros in any of these formats
                 else:
-                    raw = ctypes.string_at(data.value, frames.value * self.block)
-                    out.append(decode(raw, self.channels, self.bits, self.is_float, self.downmix))
+                    raw.append(ctypes.string_at(data.value, frames.value * self.block))
             finally:
                 release(frames.value)
             next_size(byref(size))
-        return out
+        return [decode(b"".join(raw), self.channels, self.bits, self.is_float, self.downmix)] if raw else []
 
     def close(self) -> None:
         if self.client:
@@ -732,58 +733,131 @@ def _speakers():
         return main
 
 
-WHOLE_AFTER = 1.5  # seconds of sound in the whole mix, with none at all through process loopback, before using the mix
-WHOLE_SOUND = 1e-4  # a peak above this (-80 dBFS) in the whole mix is something playing
+CHECK_WINDOW = 3.0  # seconds of both streams compared (outside Rflow's own voice) to choose between them
+CHECK_BIN = 0.25  # seconds summed together in that window
+WHOLE_AFTER = 1.5  # seconds of sound in the whole mix within the window before process loopback can be found missing it
+BACK_AFTER = 1.0  # seconds of sound through process loopback within the window before it's trusted again
+MISSING = 0.1  # process loopback's energy under this share of the mix's (10 dB under): it misses what plays
+CARRIES = 0.5  # and over this share (3 dB under at most): it carries it again (between the two: no change)
+BUFFERED = 4.0  # seconds of the whole mix kept while process loopback is used, sent on a switch
+WHOLE_EVERY = 0.05  # seconds between reads of the mix while it's only compared (its buffer holds 0.2 s): less work
+WHOLE_SOUND = 1e-5  # a peak above this (-100 dBFS) is something playing: an app lowered to Ducker's INAUDIBLE is above it
 VOICE_MARGIN = 0.5  # seconds after Rflow's own voice was last queued during which the whole mix may still carry it
 _voice_until = 0.0  # time.monotonic() until which Rflow's own voice may be playing (Player.play)
+_voice_device = ""  # the output Rflow's voice plays on (Player), "" before it has played
 
 
-def _loud(packets: list[np.ndarray], floor: float) -> bool:
-    return any(len(p) and float(np.max(np.abs(p))) > floor for p in packets)
+def _peak(x: np.ndarray) -> float:
+    return float(np.max(np.abs(x))) if len(x) else 0.0
+
+
+def _energy(x: np.ndarray) -> float:
+    return float(np.dot(x.astype(np.float64), x.astype(np.float64))) if len(x) else 0.0
 
 
 class _Checked:
-    """Process loopback, checked against the default output's whole mix until it has heard something. On the owner's
-    laptop (2026-10-13/14, #176: a Teams call on Bluetooth earbuds, Teams playing to "Headphones", the laptop's mic)
-    process loopback, even of Teams' process alone, got only silence while the whole mix carried the call, and the
-    output meters read 0 as well. So both are read: once process loopback hears a sound the mix is closed; if instead the
-    mix has had WHOLE_AFTER seconds of sound (not Rflow's own voice) while process loopback had none, the mix is used for
-    the rest of this stream. Rflow's voice is in it then (`hears_self`), so the session silences it meanwhile."""
+    """Process loopback, checked against the default output's whole mix the whole time. On the owner's laptop
+    (2026-10-13/14, #176: a Teams call on Bluetooth earbuds, Teams playing to "Headphones", the laptop's mic) process
+    loopback, even of Teams' process alone, got only silence while the whole mix carried the call; a browser's call is
+    heard by both. Both stay open and their energy is compared over the last CHECK_WINDOW seconds (Rflow's own voice,
+    in the mix only, left out): the mix with WHOLE_AFTER seconds of sound and process loopback under MISSING of its
+    energy switches to the mix; process loopback with BACK_AFTER seconds of sound and over CARRIES switches back. A
+    ratio, so it holds at any volume (the apps lowered while the voice speaks are lowered in both); the gap between the
+    two and a fresh window after each switch keep it from flapping. A notification heard early no longer ends the check.
+
+    While process loopback is used, the last BUFFERED seconds of the mix it didn't carry are kept (16 kHz, as sent):
+    on a switch they are sent first, so the start of the call isn't lost; what process loopback carried itself (a ding)
+    isn't kept, so it isn't sent twice. On the mix Rflow's voice is in it when it plays on that same output
+    (`hears_self`), so the session silences it meanwhile."""
 
     def __init__(self, main, whole, clock: Callable[[], float] = time.monotonic):
         self.main, self.whole, self._clock = main, whole, clock
         self.rate, self.channels, self.bits, self.is_float = main.rate, main.channels, main.bits, main.is_float
         self.device_id, self.note = getattr(main, "device_id", ""), getattr(main, "note", "")
         self._resample = Resampler(whole.rate, main.rate)
-        self._whole_sound = 0.0
+        self._bins: dict[int, list[float]] = {}  # bin -> [process loopback's energy, the mix's, seconds of sound in each]
+        self._kept: deque[np.ndarray] = deque()  # the mix process loopback didn't carry, BUFFERED seconds at most
+        self._kept_len = 0
+        self._whole_at = -1e9  # when the mix was last read
+        self._since: list[np.ndarray] = []  # process loopback's packets since then
         self.switched = False
+        self.switches = 0
 
     @property
     def hears_self(self) -> bool:
-        return self.switched or getattr(self.main, "hears_self", False)
+        if not self.switched:
+            return getattr(self.main, "hears_self", False)
+        device = getattr(self.whole, "device_id", "")
+        return not (_voice_device and device) or _voice_device == device
 
     def read(self) -> list[np.ndarray]:
+        now, packets = self._clock(), self.main.read()  # read always: its buffer mustn't overflow
+        if not self.switched and now - self._whole_at < WHOLE_EVERY:  # the mix less often while it's only compared
+            if packets:
+                self._since.extend(packets)
+            return packets
+        self._whole_at, extra = now, self.whole.read()
+        heard, self._since = self._since + packets, []
+        a = np.concatenate(heard) if heard else np.zeros(0, np.float32)
+        b = self._resample(np.concatenate(extra)) if extra else np.zeros(0, np.float32)
+        if now >= _voice_until:  # the voice is in the mix only: it says nothing about what process loopback misses
+            self._count(now, a, b)
         if self.switched:
-            packets = self.whole.read()
-            return [self._resample(np.concatenate(packets))] if packets else []
-        packets = self.main.read()
-        if self.whole is None:
-            return packets
-        extra = self.whole.read()  # read even when not needed: its buffer mustn't overflow
-        if _loud(packets, SOUND):
-            log.info("Live translation: process loopback hears what plays; the whole mix isn't needed")
-            self._close(self.whole)
-            self.whole = None
-            return packets
-        if extra and _loud(extra, WHOLE_SOUND) and self._clock() >= _voice_until:
-            self._whole_sound += sum(len(p) for p in extra) / self.whole.rate
-            if self._whole_sound >= WHOLE_AFTER:
-                log.info("Live translation: process loopback hears nothing while the output plays (a call on Bluetooth "
-                         "earbuds?): it hears the output's whole mix instead, Rflow's own voice too")
-                self.switched, self.note = True, "the whole mix: process loopback heard nothing"
-                self._close(self.main)
-                return [self._resample(np.concatenate(extra))]
+            if self._decide(now, back=True):
+                self._switch(False, "process loopback hears what plays again: back to it, without Rflow's own sound")
+                return packets
+            return [b] if len(b) else []
+        if len(b):
+            self._keep(a, b if now >= _voice_until else np.zeros_like(b))  # never Rflow's voice: it'd be sent later
+        if self._decide(now, back=False):
+            kept = list(self._kept)  # this read's mix is the last of it
+            self._switch(True, "process loopback misses what the output plays (a call on Bluetooth earbuds?): it hears "
+                               f"the output's whole mix instead, Rflow's own voice too (the last "
+                               f"{sum(map(len, kept)) / self.rate:.1f} s of it sent first)")
+            return [np.concatenate(kept)] if kept else []
         return packets
+
+    def _count(self, now: float, a: np.ndarray, b: np.ndarray) -> None:
+        key = int(now // CHECK_BIN)
+        cell = self._bins.get(key)
+        if cell is None:
+            cell = self._bins[key] = [0.0, 0.0, 0.0, 0.0]
+            for old in [k for k in self._bins if k <= key - CHECK_WINDOW / CHECK_BIN]:
+                del self._bins[old]
+        cell[0] += _energy(a)
+        cell[1] += _energy(b)
+        cell[2] += len(a) / self.rate if _peak(a) > WHOLE_SOUND else 0.0
+        cell[3] += len(b) / self.rate if _peak(b) > WHOLE_SOUND else 0.0
+
+    def _decide(self, now: float, back: bool) -> bool:
+        first = int(now // CHECK_BIN) - CHECK_WINDOW / CHECK_BIN
+        main = whole = main_sound = whole_sound = 0.0
+        for key, (e_main, e_whole, s_main, s_whole) in self._bins.items():
+            if key > first:
+                main, whole, main_sound, whole_sound = main + e_main, whole + e_whole, main_sound + s_main, whole_sound + s_whole
+        if back:
+            return main_sound >= BACK_AFTER and main >= CARRIES * whole
+        return whole_sound >= WHOLE_AFTER and main <= MISSING * whole
+
+    def _keep(self, a: np.ndarray, b: np.ndarray) -> None:
+        """The mix of this read kept for a switch, unless process loopback carried it (then what's kept is dropped:
+        it was sent through process loopback)."""
+        if _peak(a) > WHOLE_SOUND and _energy(a) >= CARRIES * _energy(b):
+            self._kept.clear()
+            self._kept_len = 0
+            return
+        self._kept.append(b)
+        self._kept_len += len(b)
+        while self._kept_len - len(self._kept[0]) >= BUFFERED * self.rate:
+            self._kept_len -= len(self._kept.popleft())
+
+    def _switch(self, whole: bool, why: str) -> None:
+        log.info("Live translation: %s", why)
+        self.switched, self.switches = whole, self.switches + 1
+        self.note = "the whole mix: process loopback missed what plays" if whole else getattr(self.main, "note", "")
+        self._bins.clear()  # a fresh window: the next change needs as much evidence as the first
+        self._kept.clear()
+        self._kept_len = 0
 
     def _active(self):
         return self.whole if self.switched else self.main
@@ -802,11 +876,8 @@ class _Checked:
             log.debug("Live translation: closing a capture failed: %s", e)
 
     def close(self) -> None:
-        if not self.switched:
-            self._close(self.main)
-        if self.whole is not None:
-            self._close(self.whole)
-            self.whole = None
+        self._close(self.main)
+        self._close(self.whole)
 
 
 class _Meters:
@@ -1225,6 +1296,7 @@ class Player:
         self._close()
 
     def _open(self, rate: int):
+        global _voice_device
         now = self._clock()
         if self._stream is not None and (rate != self._rate or (
                 now - self._checked >= CHECK_DEVICE_EVERY and self._stream.default_changed())):
@@ -1235,6 +1307,7 @@ class Player:
         if self._stream is None:
             self._stream, self._rate = self._opener(rate), rate
             self.private = self._stream.private
+            _voice_device = getattr(self._stream, "device_id", "")  # the whole mix of this output hears the voice
             log.info("The voice plays through the default output (%s)", "headphones" if self.private else "speakers")
         return self._stream
 
