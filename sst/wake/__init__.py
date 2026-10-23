@@ -13,13 +13,14 @@ command. Only the user's voice starts it (the voice check, on by default). Ctrl+
 The measurements behind the numbers are the spike's (issue #162). Nothing here imports Qt or the app; sherpa-onnx is
 loaded only when a model is.
 """
-from sst.wake.enrol import PASS, TRIES, Enrollment, WakeSetup
+from sst.wake.enrol import MISSES, PASS, QUIET_DB, TRIES, Enrollment, Hearing, WakeSetup, check_hearing, level_db
 from sst.wake.listener import SAFETY_SILENCE, WakeListener
 from sst.wake.models import KWS, VOICE, install, installed
-from sst.wake.spotter import THRESHOLD, Spotter
+from sst.wake.spotter import THRESHOLD, Spotter, Transcriber
 from sst.wake.voiceprint import VOICE_THRESHOLD, VoicePrint
-from sst.wake.words import END_PHRASES, check_keyword, prompts, spellings, strip_end, strip_keyword
+from sst.wake.words import END_PHRASES, check_keyword, prompts, same_sound, sounds_like, spellings, strip_end, strip_keyword
 
-__all__ = ["END_PHRASES", "KWS", "PASS", "SAFETY_SILENCE", "THRESHOLD", "TRIES", "VOICE", "VOICE_THRESHOLD", "Enrollment",
-           "Spotter", "VoicePrint", "WakeListener", "WakeSetup", "check_keyword", "install", "installed", "prompts",
+__all__ = ["END_PHRASES", "KWS", "MISSES", "PASS", "QUIET_DB", "SAFETY_SILENCE", "THRESHOLD", "TRIES", "VOICE",
+           "VOICE_THRESHOLD", "Enrollment", "Hearing", "Spotter", "Transcriber", "VoicePrint", "WakeListener", "WakeSetup",
+           "check_hearing", "check_keyword", "install", "installed", "level_db", "prompts", "same_sound", "sounds_like",
            "spellings", "strip_end", "strip_keyword"]

@@ -66,7 +66,7 @@ def wake(monkeypatch):
             super().end()
 
     class Enrollment(api.Enrollment):
-        def __init__(self, keyword):
+        def __init__(self, keyword, transcribe=None):  # the app's transcriber is a real model: not here
             super().__init__(keyword, spotter_factory=Spotter, voice_factory=lambda takes: api.VoicePrint([0.1, 0.2, 0.3]))
 
     monkeypatch.setattr(api, "WakeListener", WakeListener)

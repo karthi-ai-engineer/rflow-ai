@@ -5392,6 +5392,13 @@ class WakeCard:
         details.addWidget(setting_row("Only my voice", "It starts only for the voice it learned in the setup, not for a "
                                       "colleague or a video.", self.voice)[0])
         details.addWidget(divider())
+        self.bluetooth = Toggle("Listen on my Bluetooth headset")
+        self.bluetooth.setChecked(s.wake_bluetooth)
+        self.bluetooth.toggled.connect(self._bluetooth_toggled)
+        details.addWidget(setting_row("Listen on my Bluetooth headset", "When your headset is the microphone, listen on it "
+                                      "even when you aren't dictating. The headset plays in call quality meanwhile.",
+                                      self.bluetooth)[0])
+        details.addWidget(divider())
         privacy = caption("Private: Rflow listens for the keyword on this laptop, and nothing is kept or sent before it "
                           "hears it. The microphone stays on meanwhile (Windows shows its icon), which costs a little "
                           "battery: about 2% of one core.", "3")
@@ -5405,9 +5412,10 @@ class WakeCard:
         self.toggle.blockSignals(True)
         self.toggle.setChecked(s.wake_enabled)
         self.toggle.blockSignals(False)
-        self.voice.blockSignals(True)
-        self.voice.setChecked(s.wake_voice_check)
-        self.voice.blockSignals(False)
+        for toggle, on in ((self.voice, s.wake_voice_check), (self.bluetooth, s.wake_bluetooth)):
+            toggle.blockSignals(True)
+            toggle.setChecked(on)
+            toggle.blockSignals(False)
         self.details.setVisible(s.wake_enabled)
         if not self.phrases.hasFocus():
             self.phrases.setText(", ".join(s.wake_end_phrases))
@@ -5434,7 +5442,7 @@ class WakeCard:
         self.download.setVisible(not downloading)
         self.download.setText(f"Download{size}")
         if state.keyword:
-            self.keyword.setText(f"“{state.keyword}”  ·  heard {state.heard} of {state.tries} in the setup")
+            self.keyword.setText(f"“{state.keyword}”  ·  heard {state.heard} of {state.said or state.tries} in the setup")
         else:
             self.keyword.setText(f"Not set up yet: say it {state.tries} times, and Rflow learns it and your voice.")
         self.setup.setText("Set up again" if state.keyword else "Set up")
@@ -5454,6 +5462,8 @@ class WakeCard:
         elif state.listening:
             words, lamp = (f"Listening for “{state.keyword}” on {state.listening}. Say it, speak, then say "
                            f"“{self.app.settings.wake_end_phrases[0]}”."), "ok"
+            if state.instead:  # dictation's headset isn't kept open: say so, and how to listen there
+                words += (f" Not on {state.instead}: turn on “Listen on my Bluetooth headset” to use it.")
         else:
             words, lamp = "Not listening yet.", "off"
         self.status.setText(words)
@@ -5465,6 +5475,9 @@ class WakeCard:
 
     def _voice_toggled(self, on: bool) -> None:
         self.app.apply_settings(dataclasses.replace(self.app.settings, wake_voice_check=on))
+
+    def _bluetooth_toggled(self, on: bool) -> None:
+        self.app.apply_settings(dataclasses.replace(self.app.settings, wake_bluetooth=on))
 
     def _save_phrases(self) -> None:
         phrases = parse_end_phrases(self.phrases.text())

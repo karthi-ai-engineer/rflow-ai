@@ -145,6 +145,21 @@ def test_a_bluetooth_microphone_is_never_kept_open(monkeypatch):
     assert not r.warm  # it would keep the headset playing in call quality
 
 
+def test_a_bluetooth_microphone_is_kept_open_when_the_user_asked_for_it(monkeypatch):
+    r = _recorder(monkeypatch, call_quality=True, warm_seconds=float("inf"))
+    r.keep_call_quality = True  # the wake word listening on the headset, as the user chose
+    r.keep_open()
+    assert r.warm
+    r.start()
+    _feed(r, 0.5)
+    r.stop()
+    r.tick(time.monotonic() + 3600)
+    assert r.warm
+    r.keep_call_quality = False  # listening stopped: it closes at the next look, as before
+    r.tick(time.monotonic())
+    assert not r.warm
+
+
 def test_choosing_another_microphone_or_mode_reopens(monkeypatch):
     r = _recorder(monkeypatch, warm_seconds=300)
     r.start()

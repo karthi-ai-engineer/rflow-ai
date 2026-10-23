@@ -1161,6 +1161,58 @@ def test_with_a_bluetooth_headset_chosen_the_built_in_microphone_listens_and_rec
     assert not app.wake.listening and own.closed and app.wake_state().note == BLUETOOTH
 
 
+def test_it_listens_on_the_bluetooth_headset_when_the_user_lets_it(wake_app, monkeypatch):
+    from sst import audio
+    app, mic = wake_app.app, wake_app.mic
+    monkeypatch.setattr(audio, "call_quality", lambda device: device in ("Headset (Buds)", None))
+    monkeypatch.setattr(audio, "input_device_names", lambda refresh=True: ["Headset (Buds)", "Mic A"])
+    app.apply_settings(dataclasses.replace(app.settings, microphone="Headset (Buds)", wake_bluetooth=True))
+    assert app.wake.listening and app.wake.shared and mic.tap == app.wake.feeder.put
+    assert mic.keep_call_quality and mic.warm_seconds == float("inf")  # kept open on the headset, as the user chose
+    state = app.wake_state()
+    assert state.listening == "Headset (Buds)" and state.instead == ""
+    app.apply_settings(dataclasses.replace(app.settings, wake_bluetooth=False))
+    assert app.wake.listening and not app.wake.shared and wake_app.own[-1].name == "Mic A"
+    assert not mic.keep_call_quality and mic.tap is None  # dictation's headset opens only to dictate again
+    state = app.wake_state()
+    assert state.listening == "Mic A" and state.instead == "Headset (Buds)"
+
+
+def test_the_setup_records_where_the_wake_word_listens_and_learns_from_the_tries(wake_app, monkeypatch):
+    from sst import audio
+    from sst.live import voice
+    app, wake = wake_app.app, wake_app.wake
+    monkeypatch.setattr(audio, "call_quality", lambda device: device in ("Headset (Buds)", None))
+    monkeypatch.setattr(audio, "input_device_names", lambda refresh=True: ["Headset (Buds)", "Mic A"])
+    monkeypatch.setattr(voice.Voice, "ready", lambda self, root=None: False)  # no synthetic voice: no check
+    recorders, shown = [], []
+    monkeypatch.setattr(sst_app, "Recorder", lambda device: recorders.append(SimpleNamespace(device=device)) or recorders[-1])
+
+    class Dialog:
+        def __init__(self, parent, **options):
+            self.options = options
+            shown.append(self)
+
+        def exec(self):
+            self.setting_up = app.wake.setting_up
+            return 0
+    monkeypatch.setattr(sst_app, "WakeSetupDialog", Dialog)
+    app.apply_settings(dataclasses.replace(app.settings, microphone="Headset (Buds)", wake_bluetooth=True))
+    app.open_wake_setup()
+    options = shown[0].options
+    assert options["microphone"] == "Headset (Buds)" and options["problem"] == ""  # where it listens: said, and used
+    recorder = options["new_recorder"]()
+    assert recorder.device == "Headset (Buds)" and recorder.keep_call_quality
+    assert (options["tries"], options["passes"], options["misses"], options["quiet_db"]) == (
+        wake.TRIES, wake.PASS, wake.MISSES, wake.QUIET_DB)
+    assert options["hearing"]("karthi") is None  # skipped without the voice
+    assert isinstance(options["enroll"]("karthi"), wake.Enrollment)
+    assert shown[0].setting_up and not app.wake.setting_up  # the tries never start a dictation
+    app.apply_settings(dataclasses.replace(app.settings, wake_bluetooth=False))
+    app.open_wake_setup()
+    assert shown[1].options["microphone"] == "Mic A" and shown[1].options["new_recorder"]().device == "Mic A"
+
+
 def test_a_saved_setup_belongs_to_its_profile_and_goes_with_it(wake_app):
     app, wake = wake_app.app, wake_app.wake
     setup = wake.WakeSetup("computer", "computer", wake.VoicePrint([0.3, 0.4]), 10)

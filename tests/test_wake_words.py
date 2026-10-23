@@ -2,7 +2,7 @@
 and the end phrase out of the dictated text."""
 import pytest
 
-from sst.wake import END_PHRASES, check_keyword, prompts, spellings, strip_end, strip_keyword
+from sst.wake import END_PHRASES, check_keyword, prompts, same_sound, sounds_like, spellings, strip_end, strip_keyword
 
 # ---- which keywords can be used
 
@@ -58,6 +58,39 @@ def test_spellings_are_plain_words():
     assert spellings("Hey-Rflow") == ["hey our flow", "hey are flow"]
     assert spellings("I") == ["i"] and spellings("a computer") == ["a computer"]  # "a" and "I" are words
     assert all(1 <= len(spellings(k)) <= 4 for k in ("Rflow", "RTCflow", "a b c d"))
+
+
+@pytest.mark.parametrize("typed, expected", [
+    ("Karthi", ["karthi", "karthy", "carthi", "kathi", "carthy", "kathy"]),  # the fewest changes first, at most 6
+    ("hey Karthi", ["hey karthi", "hey karthy", "hey carthi", "hey kathi", "hey carthy", "hey kathy"]),
+    ("okay Karthi start", ["okay karthi start", "okay karthy start", "okay carthi start", "okay kathi start",
+                           "okay carthy start", "okay kathy start"]),  # "start" stays: only a word ending in "i" changes
+    ("Ravi", ["ravi", "ravy"]),
+    ("Rflow", ["our flow"]),
+    ("computer", ["computer"]), ("Karen", ["karen"]), ("Jarvis", ["jarvis"]), ("okay type", ["okay type"]),
+])
+def test_names_are_also_spelled_as_they_sound(typed, expected):
+    assert sounds_like(typed) == expected
+
+
+@pytest.mark.parametrize("heard, keyword", [
+    ("carthy", "karthi"), ("CARDI", "karthi"), ("kathy", "karthi"), ("carcity", "karthi"), ("pay carthy", "hey karthi"),
+    ("carth is start", "karthi start"), ("okay carth a type", "okay karthi type"), ("carth had please", "hey karthi please"),
+    ("our flow", "Rflow"), ("okay tie", "okay type"), ("computer", "computer"),
+])
+def test_what_the_model_heard_can_stand_for_the_keyword(heard, keyword):
+    assert same_sound(heard, keyword)
+
+
+@pytest.mark.parametrize("heard, keyword", [
+    ("party", "karthi"),  # another first sound: said in dictation, it would start one
+    ("the", "karthi"), ("", "karthi"), ("cottie", "karthi"),
+    ("ok start", "okay karthi start"), ("okay guy staple", "okay karthi type"),  # the name isn't in it
+    ("hikka see", "hi karthi"), ("he caused please", "hey karthi please"),
+    ("done", "karthi"),  # a keyword that couldn't be chosen
+])
+def test_what_cant_stand_for_the_keyword(heard, keyword):
+    assert not same_sound(heard, keyword)
 
 
 def test_ten_prompts_with_the_keyword_in_each():

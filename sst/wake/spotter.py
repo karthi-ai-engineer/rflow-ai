@@ -60,6 +60,27 @@ def unload() -> None:
         _loaded.clear()
 
 
+class Transcriber:
+    """The spotter's own model as a small speech recogniser: the words it hears in a try ("CARTHY" for "karthi"), so the
+    setup can listen for what this voice sounds like to it. Made for a setup (its own copy of the model, ~1 s), not kept."""
+
+    def __init__(self, model_dir: Path | None = None):
+        folder = models.check(models.KWS, Path(model_dir or models.KWS.path()))
+        import sherpa_onnx
+
+        self._asr = sherpa_onnx.OnlineRecognizer.from_transducer(
+            tokens=str(folder / models.TOKENS), encoder=str(folder / models.ENCODER), decoder=str(folder / models.DECODER),
+            joiner=str(folder / models.JOINER), num_threads=1, decoding_method="greedy_search")
+
+    def __call__(self, audio: np.ndarray) -> str:
+        stream = self._asr.create_stream()
+        stream.accept_waveform(RATE, np.asarray(audio, dtype=np.float32).reshape(-1))
+        stream.input_finished()
+        while self._asr.is_ready(stream):
+            self._asr.decode_stream(stream)
+        return str(self._asr.get_result(stream)).strip()
+
+
 class Spotter:
     """Listens for `phrases` (name -> spelling, as spellings() writes it): feed() returns the name of a phrase heard."""
 
