@@ -225,6 +225,15 @@ def test_the_backup_at_another_provider_answers_when_the_chosen_one_refuses(fake
     assert len(fake.requests) == 5
 
 
+def test_gemini_has_no_backup_at_another_provider_while_it_is_the_only_one_offered(fake):
+    from sst.setups import backup_for
+    assert gateway.OFFERED == ("gemini", "ollama", "vllm")  # OpenAI, Anthropic and Groq kept, not offered
+    others = {"groq": (fake.url, "groq-key"), "openai": (fake.url, "sk-key"), "anthropic": (fake.url, "ant-key")}
+    assert backup_for(GatewayConfig(fake.url, "gemini-key", "gemini", others)) is None
+    p = Polisher(GatewayConfig(fake.url, "gemini-key", "gemini", others), "no-credit")
+    assert p.polish(HEARD) == HEARD and [r["model"] for r in fake.requests] == ["no-credit"]  # nothing else asked
+
+
 @pytest.mark.parametrize("model", ["long"])
 def test_an_implausible_answer_is_not_used(fake, model):
     p = fake.polisher(model=model)
@@ -349,6 +358,15 @@ def test_anthropic_gets_its_messages_api(fake):
     assert sent["x-api-key"] == "test-key" and sent["anthropic-version"] == gateway.ANTHROPIC_VERSION
     assert "PRs" in sent["system"] and [m["role"] for m in sent["messages"]] == ["user"]
     assert 0 < sent["max_tokens"] < gateway.THINKING_ROOM and sent["temperature"] == 0  # Haiku 4.5 takes it
+
+
+def test_claude_haiku_5_5_is_told_not_to_think(fake):
+    fake.polisher(model="claude-haiku-5-5", provider="anthropic").polish(HEARD)
+    sent = _last_post(fake)
+    assert sent["thinking"] == {"type": "disabled"} and "temperature" not in sent  # 4.7 and later refuse it
+    assert 0 < sent["max_tokens"] < gateway.THINKING_ROOM  # no room for thinking it won't do
+    fake.polisher(model="claude-sonnet-5-5", provider="anthropic").polish(HEARD)
+    assert "thinking" not in _last_post(fake)
 
 
 @pytest.mark.parametrize("model", ["claude-sonnet-5-5", "claude-opus-4-7", "a-name-of-its-own"])

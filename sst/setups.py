@@ -1,23 +1,27 @@
 """Ready-made setups: a speech model and an AI model that go together, each the cheapest that does the job well.
 
 Most people don't know which models to use (the owner, 2026-10-06). A setup chooses both parts at once: Recommended,
-Fastest, Multilingual, Local, or Custom (the user's own choice of each part). The ids and the estimates come from the
-research notes "Rflow model costs and setups" (2026-10-06); sst.costs holds the prices.
+Multilingual, Local, or Custom (the user's own choice of each part). The ids and the estimates come from the research
+notes "Rflow model costs and setups" (2026-10-06); sst.costs holds the prices.
 
   Recommended   Parakeet on this PC                 + Gemini gemini-3.5-flash-lite   a Gemini key   ~$1 a month
-  Fastest       Groq whisper-large-v3-turbo          + Groq openai/gpt-oss-20b        a Groq key     ~$0.70
   Multilingual  Gemini gemini-3.5-transcribe         + Gemini gemini-3.5-flash-lite   a Gemini key   ~$3.60
   Local         Parakeet or Whisper on this PC       + AI cleanup off (a model on this PC comes later)   free
+  (Fastest      Groq whisper-large-v3-turbo          + Groq openai/gpt-oss-20b        a Groq key     ~$0.70)
+
+Rflow offers Gemini only for now (the owner, 2026-10-23: sst.gateway.OFFERED): a setup that would use a provider not
+offered (Fastest, Groq's) isn't shown, nor chosen by language, until that provider is offered again.
 
 Those are for English, the language Rflow assumes until the user chooses theirs (How Rflow hears you). Recommended
-and Fastest choose by the languages spoken (resolve(); phase 44, measured 2026-10-22: Parakeet ~0.8 s after the key
+(and Fastest) choose by the languages spoken (resolve(); phase 44, measured 2026-10-22: Parakeet ~0.8 s after the key
 is released on a plugged-in laptop, Gemini ~2.2 s, Groq's Whisper ~0.5 s, as accurate on the owner's English):
 
   English only  Recommended: as above. Fastest: Parakeet + Groq's AI where the last Check this PC found Parakeet
                 quick here (it's slow on battery and weak processors), else Groq for both.
-  Other         Parakeet hears English only, so the cloud: the fastest model that hears every language well
-                (Groq's Whisper, weak at Tamil; else Gemini), with that provider's AI. Recommended takes the fastest
-                one whose key the user has (else asks for the fastest's); Fastest always the fastest.
+  Other         Parakeet hears English only, so the cloud: the fastest offered model that hears every language well
+                (Gemini; Groq's Whisper first while Groq is offered, but not for Tamil), with that provider's AI.
+                Recommended takes the fastest one whose key the user has (else asks for the fastest's); Fastest always
+                the fastest.
 
 Multilingual, Local and Custom don't change with the language. A setup in use is never changed by this: the choice
 is made when a setup is applied, and every model a setup may choose counts as that setup (in_use()).
@@ -29,10 +33,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
 from sst import costs
-from sst.engines import SPEECH_MODELS
+from sst.engines import DEFAULT_MODEL, SPEECH_MODELS
 from sst.engines.cloud import CLOUD
 from sst.engines.whisper import LANGUAGES
-from sst.gateway import PROVIDERS, GatewayConfig
+from sst.gateway import PROVIDERS, GatewayConfig, offered
 
 
 @dataclass(frozen=True)
@@ -48,7 +52,12 @@ class Setup:
     free_key: str = ""  # what a free key means, said plainly
 
 
-SETUPS = {s.key: s for s in [
+def _offered(setup: Setup) -> bool:
+    """Whether the window may offer a setup: its speech model and its AI's provider are both offered."""
+    return offered(setup.speech) and offered(setup.provider)
+
+
+_ALL = {s.key: s for s in [
     Setup("recommended", "Recommended", "Private speech on this PC, polished by a fast, cheap AI.",
           "parakeet", "", "gemini", "gemini-3.5-flash-lite", "gemini",
           "A free Gemini key costs nothing, but Google may use the text to improve its products and people may read "
@@ -63,6 +72,7 @@ SETUPS = {s.key: s for s in [
     Setup("local", "Local", "Everything on this PC: nothing leaves it, no key, no cost.", "parakeet"),
     Setup("custom", "Custom", "Choose the speech model and the AI yourself."),
 ]}
+SETUPS = {key: setup for key, setup in _ALL.items() if _offered(setup)}  # the ones offered: no Fastest while Groq isn't
 ORDER = list(SETUPS)  # Recommended first
 LOCAL_MODELS = ("parakeet", "whisper-turbo")  # Local's speech: Parakeet (English) or Whisper (99 languages)
 # Gemini Transcribe has no Tamil: Multilingual hears Tamil with Gemini 3.5 Flash-Lite (audio in a prompt), same key.
@@ -92,7 +102,7 @@ def speech_model_for(setup: Setup, language: str | Iterable[str] = "") -> str:
 # ---- choosing by the languages spoken
 
 # What Recommended and Fastest may use, besides their own (SETUPS). Free-key words: what each provider does with them.
-_GROQ_FREE = SETUPS["fastest"].free_key
+_GROQ_FREE = _ALL["fastest"].free_key
 _GEMINI_VOICE_FREE = SETUPS["multilingual"].free_key
 PARAKEET_GROQ = Setup("", "", "", "parakeet", "", "groq", "openai/gpt-oss-20b", "groq", _GROQ_FREE)
 GROQ = Setup("", "", "", "groq", "whisper-large-v3-turbo", "groq", "openai/gpt-oss-20b", "groq", _GROQ_FREE)
@@ -100,8 +110,8 @@ GEMINI = Setup("", "", "", "gemini", "gemini-3.5-transcribe", "gemini", "gemini-
                _GEMINI_VOICE_FREE)
 # The cloud's speech, fastest first (measured after the key is released): Groq's Whisper ~0.5 s, Gemini ~2.2 s. The
 # languages each hears badly: Whisper's Tamil was weak on the owner's clips. (GEMINI_LIVE, a streaming Gemini engine,
-# can go first here once its speed and languages are measured.)
-CLOUD_SPEED = (GROQ, GEMINI)
+# can go first here once its speed and languages are measured.) Only the offered ones: Gemini alone for now.
+CLOUD_SPEED = tuple(option for option in (GROQ, GEMINI) if _offered(option))
 WEAK = {"groq": {"ta"}, "gemini": set()}
 SECONDS = {"parakeet": "under a second", "groq": "about half a second", "gemini": "about 2 seconds"}
 PARAKEET_QUICK = 1.0  # Fastest uses Parakeet where Check this PC found a sentence takes at most this (s): Groq's pace
@@ -159,7 +169,8 @@ def resolve(key: str, languages: str | Iterable[str] = "", gateway: GatewayConfi
     else:
         speed = SECONDS[chosen.speech]
         why = "Parakeet hears English only, so " if key == "recommended" else ""
-        weak = " (Groq's Whisper is weak at Tamil)" if chosen.speech != "groq" and "ta" in langs else ""
+        groq = any(option.speech == "groq" for option in CLOUD_SPEED)  # said only while Groq is offered
+        weak = " (Groq's Whisper is weak at Tamil)" if groq and chosen.speech != "groq" and "ta" in langs else ""
         blurb = (f"{_names(langs)}: {why}{CLOUD[chosen.speech].name.removeprefix('Google ')} hears it in {speed}"
                  f"{weak}, and its AI polishes it.")
     return replace(chosen, key=key, name=base.name, blurb=blurb)
@@ -200,9 +211,17 @@ def cost(setup: Setup, language: str = "", local: str = "parakeet") -> costs.Est
     return costs.total(speech_cost(setup, language, local), cleanup_cost(setup))
 
 
+def chosen_speech(settings, gateway: GatewayConfig) -> str:
+    """The speech model chosen, as the window shows it: one of a provider no longer offered shows as the one used in its
+    place (sst.engines.usable: Gemini when its key is saved, else Parakeet)."""
+    if offered(settings.speech_model):
+        return settings.speech_model
+    return "gemini" if gateway.key_for("gemini") else DEFAULT_MODEL
+
+
 def in_use_cost(settings, gateway: GatewayConfig) -> tuple[costs.Estimate, costs.Estimate]:
     """What the speech model and the AI model chosen now cost (Custom shows it): (speech, AI)."""
-    speech = settings.speech_model
+    speech = chosen_speech(settings, gateway)
     model = settings.speech_cloud_models.get(speech) or (CLOUD[speech].models[0] if speech in CLOUD else "")
     ai = costs.cleanup_cost(gateway.chosen, settings.cleanup_model) if settings.cleanup and settings.cleanup_model \
         else costs.Estimate(0.0, costs.FREE)
@@ -214,7 +233,7 @@ def in_use(settings, gateway: GatewayConfig, pending: str = "") -> list[str]:
     Tamil, Recommended chooses what Multilingual uses). A setup matches with any model it may choose for the language
     (choices()), so adding a key or checking this PC never takes it out of use. `pending`: a speech model being
     downloaded to be used (a setup chosen with Parakeet or Whisper not here yet counts as chosen)."""
-    speech = pending or settings.speech_model
+    speech = pending or chosen_speech(settings, gateway)
     cloud_model = settings.speech_cloud_models.get(speech) or (CLOUD[speech].models[0] if speech in CLOUD else "")
     cleanup = (gateway.chosen, settings.cleanup_model) if settings.cleanup and settings.cleanup_model else None
     language = settings.speech_language
@@ -234,8 +253,9 @@ def current(settings, gateway: GatewayConfig, pending: str = "") -> str:
 
 
 def backup_for(gateway: GatewayConfig) -> tuple[GatewayConfig, str] | None:
-    """AI cleanup's backup at another provider (sst.gateway.Polisher.routes): the first setup's AI whose provider isn't
-    the chosen one and whose key the user has, as (that provider's config, its model). None without such a key."""
+    """AI cleanup's backup at another provider (sst.gateway.Polisher.routes): the first offered setup's AI whose provider
+    isn't the chosen one and whose key the user has, as (that provider's config, its model). None without such a key:
+    with Gemini the only cloud provider offered, there is none for Gemini (only for a provider no longer offered)."""
     for setup in SETUPS.values():
         if setup.provider and setup.provider != gateway.service.key and (key := gateway.key_for(setup.provider)):
             return GatewayConfig(gateway.entries().get(setup.provider, ("", ""))[0], key, setup.provider), setup.model

@@ -213,7 +213,7 @@ def test_gemini_gets_the_audio_inline_with_an_instruction(fake):
 @pytest.mark.parametrize("model, config", [
     ("gemini-3.5-flash-lite", {"thinkingConfig": {"thinkingLevel": "minimal"}}),
     ("gemini-3.8-flash", {"thinkingConfig": {"thinkingLevel": "low"}}),  # "minimal" is an error on 3.7 and 3.8
-    ("gemini-flash-latest", {"thinkingConfig": {"thinkingLevel": "low"}}),  # Gemini 3.5 Flash, by Google's docs
+    ("gemini-flash-latest", {"thinkingConfig": {"thinkingLevel": "minimal"}}),  # answered by 3.6 Flash (2026-10-23)
     ("gemini-flash-lite-latest", {}),  # its model isn't documented: its own settings, which always work
     ("gemini-2.5-flash-lite", {"temperature": 0}),  # before Gemini 3: as always
 ])
@@ -383,9 +383,9 @@ def test_the_signature_follows_what_the_text_depends_on():
 
 
 def test_the_catalog_uses_a_cloud_model_only_with_its_key():
-    assert usable("openai") == "parakeet" and usable("groq", GatewayConfig()) == "parakeet"
-    keys = GatewayConfig(provider="anthropic", api_key="ant", others={"groq": ("", "gsk")})
-    assert usable("groq", keys) == "groq" and usable("openai", keys) == "parakeet"
+    assert usable("openai") == "parakeet" and usable("gemini", GatewayConfig()) == "parakeet"
+    keys = GatewayConfig(provider="anthropic", api_key="ant", others={"gemini": ("", "AIza")})
+    assert usable("gemini", keys) == "gemini" and usable("openai", keys) == "gemini"  # OpenAI isn't offered: Gemini
     engine = load_engine("gemini", "ja", api_key="g-key")
     assert isinstance(engine, CloudEngine) and engine.model == "gemini-3.5-transcribe" and engine.language == "ja"
 
