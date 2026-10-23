@@ -70,7 +70,11 @@ def test_parakeet_is_found_next_to_an_older_rflow_or_downloaded(no_parakeet, mon
 def test_with_no_speech_model_yet_nothing_is_loaded(no_parakeet):
     from sst.gateway import GatewayConfig
     assert engines.usable("parakeet") == "" and engines.usable("whisper-turbo") == ""
-    assert engines.usable("groq", GatewayConfig().with_key("groq", "gsk")) == "groq"  # a cloud model needs no download
+    assert engines.usable("gemini", GatewayConfig().with_key("gemini", "AIza")) == "gemini"  # a cloud model: no download
+    # Groq is no longer offered: Gemini stands in with its key, else Parakeet (not here: none yet)
+    assert engines.usable("groq", GatewayConfig().with_key("groq", "gsk").with_key("gemini", "AIza")) == "gemini"
+    assert engines.usable("groq", GatewayConfig().with_key("groq", "gsk")) == ""
+    assert engines.usable("openai", GatewayConfig().with_key("openai", "sk")) == ""
 
 
 def test_parakeet_without_its_model_says_how_to_get_it(no_parakeet):

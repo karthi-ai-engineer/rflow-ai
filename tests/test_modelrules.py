@@ -5,7 +5,7 @@ from sst import modelrules
 
 
 @pytest.mark.parametrize("model, reasoning, effort", [
-    ("gpt-6-luna", True, "none"), ("gpt-6-sol", True, "none"), ("gpt-6.1-sol", True, "none"),
+    ("gpt-6-luna", True, "none"), ("gpt-6-sol", True, "none"), ("gpt-6.1-sol", True, "low"),
     ("gpt-6-astra", True, "low"), ("gpt-5.6-luna", True, "none"), ("gpt-5-nano", True, "minimal"),
     ("gpt-5-mini-2025-08-07", True, "minimal"), ("gpt-5", True, "minimal"), ("gpt-5.4-mini", True, ""),
     ("o4-mini", True, ""), ("gpt-4.1-mini", False, ""), ("gpt-4o-mini", False, ""),
@@ -19,7 +19,8 @@ def test_openai_reasoning_models_and_the_least_thinking_they_allow(model, reason
     ("gemini-3.5-flash-lite", "minimal", False), ("models/gemini-3.5-flash-lite", "minimal", False),
     ("gemini-3.1-flash-lite", "minimal", False), ("gemini-3.6-flash", "minimal", False),
     ("gemini-3.7-flash", "low", False), ("gemini-3.8-flash", "low", False),  # "minimal" is an error on these
-    ("gemini-3.5-flash", "low", False), ("gemini-flash-latest", "low", False),  # the alias is 3.5 Flash
+    ("gemini-3.5-flash", "minimal", False), ("gemini-flash-latest", "minimal", False),  # both answered by 3.6 Flash
+    ("gemini-3.7-flash", "low", False),  # answered by 3.8 Flash, which refuses "minimal"
     ("gemini-3-flash-preview", "low", False), ("gemini-3.1-pro-preview", "low", False),
     ("gemini-flash-lite-latest", "", False),  # its model isn't documented: its own thinking and temperature
     ("gemini-2.5-flash-lite", "", True), ("gemini-2.5-flash", "", True), ("gemma-3-27b-it", "", True),

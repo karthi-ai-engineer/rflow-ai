@@ -10,9 +10,11 @@ import re
 
 # ---- Google Gemini
 
-# Aliases whose model Google documents. Another alias (gemini-flash-lite-latest: its model isn't documented) keeps the
-# model's own thinking and temperature, which always work.
-GEMINI_ALIASES = {"gemini-flash-latest": "gemini-3.5-flash"}
+# Aliases whose model Google documents, and ids it now answers with a newer model (seen 2026-10-23: gemini-3.5-flash
+# and gemini-flash-latest are routed to 3.6 Flash, gemini-3.7-flash to 3.8 Flash). Another alias
+# (gemini-flash-lite-latest: its model isn't documented) keeps the model's own thinking and temperature, which always work.
+GEMINI_ALIASES = {"gemini-flash-latest": "gemini-3.6-flash", "gemini-3.5-flash": "gemini-3.6-flash",
+                  "gemini-3.7-flash": "gemini-3.8-flash"}
 
 
 def _gemini(model: str) -> tuple[tuple[int, int], str] | None:
@@ -47,12 +49,14 @@ def gemini_takes_temperature(model: str) -> bool:
 # Models that think before answering: o1, o3..., gpt-5 and later. They take only the default temperature (gpt-6's take
 # one only at effort "none"), and their thinking counts against the token limit.
 OPENAI_REASONING = re.compile(r"^(o\d|gpt-([5-9]|\d{2}))", re.IGNORECASE)
-# The least thinking each allows, where it is known. gpt-6-luna, -sol, 6.1-sol and gpt-5.6-luna think at "medium" unless
-# told, and allow "none"; gpt-6-astra goes no lower than "low", the first gpt-5 models no lower than "minimal". Others keep
-# their default (gpt-5.4-mini and -nano think at "none" anyway; o3 and o4-mini aren't documented here).
+# The least thinking each allows, where it is known. gpt-6-luna, gpt-6-sol and gpt-5.6-luna think at "medium" unless
+# told, and allow "none"; gpt-6.1-sol and gpt-6-astra go no lower than "low" (seen 2026-10-23), the first gpt-5 models
+# no lower than "minimal". Others keep their default (gpt-5.4-mini and -nano think at "none" anyway; o3 and o4-mini
+# aren't documented here; a newer gpt-6 keeps its own rather than be asked for an effort it may refuse).
 _OPENAI_LEAST = [(re.compile(pattern, re.IGNORECASE), effort) for pattern, effort in [
     (r"^gpt-6(\.\d+)?-astra", "low"),
-    (r"^gpt-6", "none"),
+    (r"^gpt-6\.1-sol", "low"),
+    (r"^gpt-6-(luna|sol)", "none"),
     (r"^gpt-5\.6-luna", "none"),
     (r"^gpt-5(-mini|-nano)?(-\d{4}-\d{2}-\d{2})?$", "minimal"),
 ]]
@@ -87,6 +91,15 @@ def claude_version(model: str) -> tuple[int, int] | None:
     """A Claude model's version from its id ((4, 5) for claude-haiku-4-5), or None for an id these rules can't read."""
     m = _CLAUDE.fullmatch(model.strip())
     return (int(m.group(1)), int(m.group(2) or 0)) if m else None
+
+
+# Claude models that answer at once when told to (thinking {"type": "disabled"}): Haiku 5.5 (seen 2026-10-23)
+_CLAUDE_THINKING_OFF = re.compile(r"claude-haiku-5-5(?:-\d{8}|-latest)?", re.IGNORECASE)
+
+
+def claude_thinking_off(model: str) -> bool:
+    """Whether a Claude model can be told not to think: then it is, and its answer needs no room for thinking."""
+    return bool(_CLAUDE_THINKING_OFF.fullmatch(model.strip()))
 
 
 def claude_takes_temperature(model: str) -> bool:

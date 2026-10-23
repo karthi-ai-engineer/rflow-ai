@@ -14,18 +14,15 @@ S = setups.SETUPS
 
 
 def test_the_setups_use_the_models_of_the_research_notes():
-    assert setups.ORDER == ["recommended", "fastest", "multilingual", "local", "custom"]  # Recommended first
+    assert setups.ORDER == ["recommended", "multilingual", "local", "custom"]  # Recommended first; no Fastest (Groq)
     assert (S["recommended"].speech, S["recommended"].provider, S["recommended"].model) == \
         ("parakeet", "gemini", "gemini-3.5-flash-lite")
-    assert (S["fastest"].speech, S["fastest"].speech_model, S["fastest"].model) == \
-        ("groq", "whisper-large-v3-turbo", "openai/gpt-oss-20b")
     assert (S["multilingual"].speech_model, S["multilingual"].model) == ("gemini-3.5-transcribe", "gemini-3.5-flash-lite")
     assert S["local"].provider == "" and S["local"].needs == ""  # AI cleanup off until a model on this PC comes
-    assert {S[k].needs for k in ("recommended", "multilingual")} == {"gemini"} and S["fastest"].needs == "groq"
+    assert {S[k].needs for k in ("recommended", "multilingual")} == {"gemini"}
 
 
-@pytest.mark.parametrize("key, amount, tier", [("recommended", 1.05, costs.LOW), ("fastest", 0.70, costs.LOW),
-                                               ("multilingual", 3.57, costs.AMBER)])
+@pytest.mark.parametrize("key, amount, tier", [("recommended", 1.05, costs.LOW), ("multilingual", 3.57, costs.AMBER)])
 def test_each_setup_costs_about_what_the_notes_say(key, amount, tier):
     estimate = setups.cost(S[key])
     assert abs(estimate.monthly - amount) < 0.03 and estimate.tier == tier
@@ -47,8 +44,8 @@ def test_the_setup_in_use_is_found_from_the_settings():
                           gemini) == "custom"
     assert setups.current(Settings(speech_model="gemini", speech_language="ta",
                                    speech_cloud_models={"gemini": "gemini-3.5-flash-lite"}, **on), gemini) == "multilingual"
-    groq = GatewayConfig(provider="groq", api_key="gsk")
-    assert setups.current(Settings(speech_model="groq", cleanup=True, cleanup_model="openai/gpt-oss-20b"), groq) == "fastest"
+    groq = GatewayConfig(provider="groq", api_key="gsk")  # the old Fastest: Groq isn't offered, so no setup matches
+    assert setups.current(Settings(speech_model="groq", cleanup=True, cleanup_model="openai/gpt-oss-20b"), groq) == "custom"
     assert setups.current(Settings(), GatewayConfig()) == "local"  # on this PC, no AI cleanup
     assert setups.current(Settings(speech_model="whisper-turbo", cleanup_model="gpt-4o-mini"), gemini) == "local"  # off
     assert setups.current(Settings(cleanup=True, cleanup_model="gpt-4o-mini"), GatewayConfig(provider="openai")) == "custom"
@@ -66,11 +63,7 @@ def test_using_a_setup_sets_both_parts_and_keeps_the_other_keys():
     assert app.settings.cleanup_fallback == ""  # OpenAI's backup model can't be Gemini's
     assert app.gateway.key_for("openai") == "sk-openai" and app.gateway.key_for("gemini") == "AIza-key"
     assert setups.current(app.settings, app.gateway) == "recommended"
-    setups.apply(app, "fastest")
-    assert ("use_cloud_speech", "groq", "whisper-large-v3-turbo") in app.calls
-    assert (app.settings.speech_model, app.gateway.chosen, app.settings.cleanup_model) == ("groq", "groq",
-                                                                                           "openai/gpt-oss-20b")
-    assert setups.current(app.settings, app.gateway) == "fastest" and app.gateway.key_for("openai") == "sk-openai"
+    assert app.gateway.key_for("groq") == "gsk-key"  # the keys of providers no longer offered stay saved
     app.settings.speech_language = "ta"
     setups.apply(app, "multilingual")
     assert app.settings.speech_cloud_models["gemini"] == "gemini-3.5-flash-lite"  # Tamil
