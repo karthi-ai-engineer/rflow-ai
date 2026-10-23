@@ -1221,7 +1221,10 @@ class TrayApp:
             recorder.raw = self.settings.raw_audio
             recorder.keep_call_quality = True  # a headset's only when the wake word listens there: open for the tries
             return recorder
-        tools = WakeTools(api, lambda: PiperVoice(DANNY) if DANNY.ready() else None)  # English, as the spotter
+        def english_voice() -> PiperVoice | None:  # the laptop's voice (Ryan, or Danny until it's here): English, as the spotter
+            voice = local_voice()
+            return PiperVoice(voice) if voice.ready() else None
+        tools = WakeTools(api, english_voice)
         dialog = WakeSetupDialog(parent, microphone=name, problem=problem, check=api.check_keyword,
                                  enroll=lambda keyword: api.Enrollment(keyword, transcribe=tools.transcribe),
                                  hearing=tools.hearing, new_recorder=new_recorder, save=self.save_wake_setup,
