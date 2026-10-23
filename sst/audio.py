@@ -173,8 +173,8 @@ class Recorder:
     warm_seconds > 0 keeps the microphone open that long after a recording (tick() closes it), so the next one starts at
     once, with `preroll_seconds` from before start(); math.inf keeps it open while the app runs (keep_open() opens it
     at start-up), the voice pipeline's always-on microphone. The moment before start() lives only in RAM. A
-    call-quality (Bluetooth) microphone is never kept open. `tail` seconds are recorded after stop_later(). raw asks
-    Windows for the microphone without its voice effects."""
+    call-quality (Bluetooth) microphone isn't kept open (unless keep_call_quality). `tail` seconds are recorded after
+    stop_later(). raw asks Windows for the microphone without its voice effects."""
 
     def __init__(self, device: int | str | None = None, *, warm_seconds: float = 0.0, tail: float = 0.0,
                  raw: bool = False):
@@ -200,6 +200,9 @@ class Recorder:
         # Called with every block the open microphone delivers, (samples, rate), recording or not: the wake word
         # listens on the always-on microphone (sst.wakeui). On the audio thread: it must only hand the block on.
         self.tap: Callable[[np.ndarray, int], None] | None = None
+        # Keep a call-quality microphone open too: only when the user asked for it (the wake word listening on their
+        # Bluetooth headset, which then plays in call quality while it listens)
+        self.keep_call_quality = False
 
     @property
     def level(self) -> float:
@@ -330,7 +333,7 @@ class Recorder:
             stream.close()
 
     def _keep_warm(self) -> bool:
-        return self.warm_seconds > 0 and not self.info.get("call_quality")
+        return self.warm_seconds > 0 and (self.keep_call_quality or not self.info.get("call_quality"))
 
     def _open(self, force_refresh: bool = False) -> None:
         refresh_devices(force=force_refresh)  # PortAudio's list caught up with Windows' first: the headset is in it
