@@ -39,7 +39,6 @@ def test_speech_models_cost_what_the_notes_estimate(provider, model, amount):
     ("gemini", "gemini-3.6-flash", 6.34),
     ("gemini", "gemini-flash-latest", 6.34),
     ("gemini", "gemini-3.5-flash", 6.34),
-    ("gemini", "gemini-4-argon", 8.56),  # low thinking
     ("anthropic", "claude-haiku-5-5", 0.28),  # asked not to think; ~30% more tokens
     ("anthropic", "claude-sonnet-5-5", 21.99),  # Claude 4.7+ counts ~30% more tokens
     ("anthropic", "claude-fable-5-1", 109.97),

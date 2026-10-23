@@ -78,7 +78,7 @@ CLOUD = {p.key: p for p in [
                   "https://platform.openai.com/api-keys"),
     CloudProvider("groq", "Groq", "https://api.groq.com/openai/v1", "openai",
                   ("whisper-large-v3-turbo", "whisper-large-v3"), "https://console.groq.com/keys"),
-    # Explicit ids, not the -latest aliases: gemini-flash-latest moved to 3.5 Flash, the dearest Flash, and
+    # Explicit ids, not the -latest aliases: gemini-flash-latest has moved before (to 3.5 Flash, now 3.6), and
     # gemini-flash-lite-latest's model isn't documented. A name typed in still works.
     CloudProvider("gemini", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta", "gemini",
                   ("gemini-3.5-transcribe", "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.5-transcribe-live"),
