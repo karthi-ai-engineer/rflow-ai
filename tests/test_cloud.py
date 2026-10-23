@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import numpy as np
 import pytest
 
-from sst import netconnect
+from sst import netconnect, usage
 from sst.engines import cloud, load_engine, usable
 from sst.engines.cloud import CloudEngine, CloudError
 from sst.gateway import SPEECH_SERVER, GatewayConfig
@@ -213,7 +213,7 @@ def test_gemini_gets_the_audio_inline_with_an_instruction(fake):
 @pytest.mark.parametrize("model, config", [
     ("gemini-3.5-flash-lite", {"thinkingConfig": {"thinkingLevel": "minimal"}}),
     ("gemini-3.8-flash", {"thinkingConfig": {"thinkingLevel": "low"}}),  # "minimal" is an error on 3.7 and 3.8
-    ("gemini-flash-latest", {"thinkingConfig": {"thinkingLevel": "low"}}),  # Gemini 3.5 Flash, by Google's docs
+    ("gemini-flash-latest", {"thinkingConfig": {"thinkingLevel": "minimal"}}),  # answered by 3.6 Flash (2026-10-23)
     ("gemini-flash-lite-latest", {}),  # its model isn't documented: its own settings, which always work
     ("gemini-2.5-flash-lite", {"temperature": 0}),  # before Gemini 3: as always
 ])
@@ -383,9 +383,9 @@ def test_the_signature_follows_what_the_text_depends_on():
 
 
 def test_the_catalog_uses_a_cloud_model_only_with_its_key():
-    assert usable("openai") == "parakeet" and usable("groq", GatewayConfig()) == "parakeet"
-    keys = GatewayConfig(provider="anthropic", api_key="ant", others={"groq": ("", "gsk")})
-    assert usable("groq", keys) == "groq" and usable("openai", keys) == "parakeet"
+    assert usable("openai") == "parakeet" and usable("gemini", GatewayConfig()) == "parakeet"
+    keys = GatewayConfig(provider="anthropic", api_key="ant", others={"gemini": ("", "AIza")})
+    assert usable("gemini", keys) == "gemini" and usable("openai", keys) == "gemini"  # OpenAI isn't offered: Gemini
     engine = load_engine("gemini", "ja", api_key="g-key")
     assert isinstance(engine, CloudEngine) and engine.model == "gemini-3.5-transcribe" and engine.language == "ja"
 
@@ -718,3 +718,51 @@ def test_taking_out_a_copied_run_tidies_the_punctuation():
     from sst.engines.cloud import without
     text = "Could you tell me the problem, version installer commit tray. Thanks."
     assert without(text, (text.index("version"), text.index("tray") + 4)) == "Could you tell me the problem. Thanks."
+
+
+# ---- the cost tracker (sst.usage): each Gemini call counted once, for the feature its caller names
+
+@pytest.fixture
+def ledger():
+    counted = usage.Ledger(None)
+    usage.use(counted)  # the conftest puts back none after the test
+    return counted
+
+
+def _entries(ledger) -> dict:
+    (day,) = ledger.days.values()
+    return day
+
+
+def test_a_gemini_transcribe_call_is_counted_with_its_usage(fake, ledger):
+    fake.answer = {**TRANSCRIBED, "usageMetadata": {
+        "promptTokenCount": 60, "candidatesTokenCount": 12, "thoughtsTokenCount": 0, "totalTokenCount": 72,
+        "promptTokensDetails": [{"modality": "AUDIO", "tokenCount": 50}, {"modality": "TEXT", "tokenCount": 10}]}}
+    fake.engine("gemini", path="/v1beta").transcribe_chunk(AUDIO, RATE)
+    assert _entries(ledger) == {"dictation|gemini-3.5-transcribe": {
+        "audio_in": 50, "text_in": 10, "out": 12, "thoughts": 0, "audio_out": 0, "seconds": 2.0, "calls": 1}}
+
+
+def test_a_flash_answer_without_usage_is_counted_by_the_audio_length(fake, ledger):
+    fake.engine("gemini", model="gemini-3.5-flash-lite", path="/v1beta").transcribe(AUDIO, RATE)
+    entry = _entries(ledger)["dictation|gemini-3.5-flash-lite"]
+    assert entry["audio_in"] == 64 and entry["calls"] == 1  # 2 s at a Flash model's 32 tokens a second
+
+
+def test_the_hint_echo_check_is_a_second_call_and_the_test_button_a_test(fake, ledger):
+    fake.reply = lambda request: ("What is the problem. GitHub, Rflow, Parakeet, Vercel." if "GitHub" in _prompt(request)
+                                  else "What is the problem.")
+    engine = fake.engine("gemini", model="gemini-3.5-flash-lite", path="/v1beta")
+    engine.words = OWNER_WORDS
+    engine.transcribe_chunk(AUDIO, RATE)
+    engine.check(AUDIO, RATE)
+    entries = _entries(ledger)
+    assert entries["dictation|gemini-3.5-flash-lite"]["calls"] == 2 and entries["tests|gemini-3.5-flash-lite"]["calls"] == 2
+
+
+def test_a_refused_call_and_other_providers_are_not_counted(fake, ledger):
+    fake.statuses = [401]
+    with pytest.raises(CloudError):
+        fake.engine("gemini", path="/v1beta").transcribe_chunk(AUDIO, RATE)
+    fake.engine("groq").transcribe(AUDIO, RATE)
+    assert ledger.days == {}

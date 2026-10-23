@@ -6,3 +6,4 @@
 *.onnx binary
 *.bmp binary
 *.vocab -text
+*.model binary

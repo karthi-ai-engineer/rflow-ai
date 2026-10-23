@@ -23,7 +23,7 @@ def test_the_typical_user_sends_what_the_notes_assume():
     ("gemini", "gemini-3.5-transcribe", 2.52),
     ("gemini", "gemini-3.5-flash-lite", 0.85),  # its minimal thinking included
     ("gemini", "gemini-3.6-flash", 5.67),  # medium thinking, as Gemini thinks by default
-    ("gemini", "gemini-flash-latest", 13.19),
+    ("gemini", "gemini-flash-latest", 5.67),  # answered by 3.6 Flash, at its price, since 2026-10
 ])
 def test_speech_models_cost_what_the_notes_estimate(provider, model, amount):
     assert _about(costs.speech_cost(provider, model), amount, 0.05)
@@ -37,7 +37,9 @@ def test_speech_models_cost_what_the_notes_estimate(provider, model, amount):
     ("anthropic", "claude-haiku-4-5", 2.19),
     ("openai", "gpt-5-mini", 3.20),
     ("gemini", "gemini-3.6-flash", 6.34),
-    ("gemini", "gemini-flash-latest", 14.85),
+    ("gemini", "gemini-flash-latest", 6.34),
+    ("gemini", "gemini-3.5-flash", 6.34),
+    ("anthropic", "claude-haiku-5-5", 0.28),  # asked not to think; ~30% more tokens
     ("anthropic", "claude-sonnet-5-5", 21.99),  # Claude 4.7+ counts ~30% more tokens
     ("anthropic", "claude-fable-5-1", 109.97),
     ("gemini", "gemini-3.1-pro-preview", 44.88),  # high thinking
@@ -62,15 +64,22 @@ def test_the_tiers_low_amber_and_red():
     assert costs.cleanup_cost("anthropic", "claude-haiku-4-5").tier == costs.AMBER  # $2-5, under 10 times
     assert costs.speech_cost("gemini", "gemini-3.5-transcribe").tier == costs.AMBER
     assert costs.speech_cost("gemini", "gemini-3.6-flash").tier == costs.RED  # over $5
-    assert costs.cleanup_cost("openai", "gpt-5-mini").tier == costs.RED  # $3.20: over 10 times gpt-oss-20b's $0.28
+    assert costs.cleanup_cost("openai", "gpt-5-mini").tier == costs.AMBER  # $3.20: 3 times Gemini 3.5 Flash-Lite's
     assert costs.cleanup_cost("openai", "gpt-6-astra").tier == costs.RED
+    assert costs.cleanup_cost("openai", "gpt-4.1-nano").tier == costs.UNKNOWN  # shut down on 2026-10-23
+
+
+def test_the_cheapest_option_is_one_offered():
+    assert costs.cheapest_good() == {"speech": ("gemini", "gemini-3.5-flash-lite"),
+                                     "cleanup": ("gemini", "gemini-3.5-flash-lite")}  # Groq's while it was offered
+    assert costs.tier(11.0, 1.0).times == 11.0 and costs.tier(3.0, 0.25).tier == costs.RED  # the 10 times rule stays
 
 
 def test_the_warning_says_why():
-    red = costs.cleanup_cost("gemini", "gemini-flash-latest")
-    assert red.warning == "About $15 a month for typical use: more than 10 times the cheapest option."
+    red = costs.cleanup_cost("gemini", "gemini-3.1-pro-preview")
+    assert red.warning == "About $45 a month for typical use: more than 10 times the cheapest option."
     assert costs.speech_cost("gemini", "gemini-3.6-flash").warning == \
-        "About $5.67 a month for typical use: more than 10 times the cheapest option."
+        "About $5.67 a month for typical use: an expensive model, over $5.00 a month."
     assert costs.tier(6.0, 1.0).warning == "About $6.00 a month for typical use: an expensive model, over $5.00 a month."
     assert costs.cleanup_cost("anthropic", "claude-haiku-4-5").warning == \
         "About $2.19 a month for typical use: a mid-priced model."

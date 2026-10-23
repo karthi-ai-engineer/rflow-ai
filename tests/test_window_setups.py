@@ -49,63 +49,69 @@ def test_ai_and_models_opens_with_the_setups_and_marks_the_one_in_use():
     window, _ = _window(**_recommended())
     window.show_page("models")
     card = window.pages["models"].setup_card
-    assert list(card.tiles) == ["recommended", "fastest", "multilingual", "local", "custom"]
+    assert list(card.tiles) == ["recommended", "multilingual", "local", "custom"]  # no Fastest: Groq isn't offered
     tiles = card.tiles
-    assert tiles["recommended"].state.text() == "In use" and tiles["fastest"].state_row.isHidden()
+    assert tiles["recommended"].state.text() == "In use" and tiles["multilingual"].state_row.isHidden()
     assert tiles["recommended"].speech.text() == "Parakeet, on this PC"
     assert tiles["recommended"].ai.text() == "Gemini 3.5 Flash-Lite, on Gemini"
     assert tiles["recommended"].cost.text() == "About $1.05 a month" and tiles["recommended"].needs.text() == \
         "Gemini key: saved"
-    assert tiles["fastest"].needs.text() == "Groq key, free to start" and tiles["fastest"].cost.text() == \
-        "About $0.70 a month"
+    assert tiles["multilingual"].needs.text() == "Gemini key: saved" and tiles["multilingual"].cost.text() == \
+        "About $3.58 a month"
     assert tiles["multilingual"].cost.property("tone") == "warn" and not tiles["multilingual"].cost_lamp.isHidden()
     assert tiles["local"].cost.text() == "Free" and tiles["custom"].cost.text() == "Its cost shows as you choose"
     assert card.panel.isHidden() and not card.hint.isHidden()  # a tile first
 
 
 def test_the_setups_go_two_by_two_on_a_narrow_window():
-    window, _ = _window(**_recommended())
+    window, _ = _window(settings=Settings(welcomed=True))
     window.show_page("models")
     page = window.pages["models"]
     window.resize(1000, 700)
     window.grab()
-    assert page.setup_card.columns == 3
+    card = page.setup_card
+    assert card.columns == 3
+    places = {key: card.grid.getItemPosition(card.grid.indexOf(tile)) for key, tile in card.tiles.items()}
+    assert places == {"recommended": (0, 0, 1, 1), "multilingual": (0, 1, 1, 1), "local": (0, 2, 1, 1),
+                      "custom": (1, 0, 1, 3)}  # Custom across, under the three
     window.resize(780, 540)
-    page.setup_card.select("fastest")  # its details open, with the key to paste: never wider than the window
+    page.setup_card.select("multilingual")  # its details open, with the key to paste: never wider than the window
     window.grab()
     page.widget().layout().activate()
     assert page.setup_card.columns == 2 and page.widget().width() <= page.viewport().width()
+    assert not card.key_area.isHidden() and card.grid.getItemPosition(card.grid.indexOf(card.tiles["custom"])) == \
+        (1, 1, 1, 1)  # two by two
     assert page.widget().minimumSizeHint().width() <= page.viewport().width()
 
 
-def test_choosing_fastest_asks_for_the_groq_key_then_the_voice_then_uses_both_parts():
-    gateway = GatewayConfig("", "AIza-key-0000-9f3c", "gemini").with_key("openai", "sk-openai-0000")
-    window, app = _window(gateway=gateway, settings=Settings(welcomed=True, cleanup=True,
-                                                             cleanup_model="gemini-3.5-flash-lite"))
+def test_choosing_multilingual_asks_for_the_gemini_key_then_the_voice_then_uses_both_parts():
+    gateway = GatewayConfig("http://gw.example/v1", "gw-key", "vllm").with_key("openai", "sk-openai-0000")
+    window, app = _window(gateway=gateway, settings=Settings(welcomed=True, cleanup=True, cleanup_model="qwen3"))
     window.show_page("models")
     page = window.pages["models"]
     card = page.setup_card
-    card.tiles["fastest"].clicked.emit()
-    assert card.tiles["fastest"].chosen and not card.panel.isHidden() and not card.key_area.isHidden()
-    assert "Groq" in card.speech_words.text() and "Your voice goes to Groq" in card.speech_words.text()
-    assert "speech $0.42, AI $0.28" in card.cost_words.text() and "doesn't train" in card.free_note.text()
+    card.tiles["multilingual"].clicked.emit()
+    assert card.tiles["multilingual"].chosen and not card.panel.isHidden() and not card.key_area.isHidden()
+    assert "Your voice goes to Google Gemini" in card.speech_words.text()
+    assert "speech $2.52, AI $1.05" in card.cost_words.text() and "Google may use" in card.free_note.text()
     card.use.click()
-    assert "Paste your Groq key first" in card.result.text() and not app.calls  # nothing without the key
-    card.key.setText("gsk-test-key-1111")
+    assert "Paste your Google Gemini key first" in card.result.text() and not app.calls  # nothing without the key
+    card.key.setText("AIza-test-key-1111")
     assert page.unsaved()  # a key typed and not used yet
     questions = []
     page.confirm = lambda question: questions.append(question) or False
     card.use.click()
-    assert "sent to Groq" in questions[0] and not app.calls  # said no: not even the key is saved
+    assert "sent to Google Gemini" in questions[0] and not app.calls  # said no: not even the key is saved
     page.confirm = lambda question: True
     card.use.click()
     names = [call[0] for call in app.calls]
     assert names[:3] == ["save_key", "use_cloud_speech", "save_cleanup"]  # the key first, alone
-    assert ("use_cloud_speech", "groq", "whisper-large-v3-turbo") in app.calls
-    assert (app.gateway.chosen, app.settings.cleanup_model, app.settings.speech_model) == ("groq", "openai/gpt-oss-20b",
-                                                                                           "groq")
-    assert app.gateway.key_for("gemini") == "AIza-key-0000-9f3c" and app.gateway.key_for("openai") == "sk-openai-0000"
-    assert card.tiles["fastest"].state.text() == "In use" and card.use.isHidden() and card.key_area.isHidden()
+    assert ("use_cloud_speech", "gemini", "gemini-3.5-transcribe") in app.calls
+    assert (app.gateway.chosen, app.settings.cleanup_model, app.settings.speech_model) == ("gemini", "gemini-3.5-flash-lite",
+                                                                                           "gemini")
+    assert app.gateway.key_for("vllm") == "gw-key" and app.gateway.key_for("openai") == "sk-openai-0000"
+    assert app.gateway.entries()["vllm"][0] == "http://gw.example/v1"  # your own server stays, for going back
+    assert card.tiles["multilingual"].state.text() == "In use" and card.use.isHidden() and card.key_area.isHidden()
     assert "in use from the next dictation" in card.result.text() and not page.unsaved()
 
 
@@ -115,7 +121,7 @@ def test_recommended_downloads_parakeet_first_when_it_isnt_here(no_parakeet):
                                                              cleanup_model="openai/gpt-oss-20b"))
     window.show_page("models")
     card = window.pages["models"].setup_card
-    assert card.tiles["fastest"].state.text() == "In use"
+    assert card.tiles["custom"].state.text() == "In use"  # Groq's AI: no setup offered uses it
     card.select("recommended")
     assert card.key_area.isHidden()  # the Gemini key is saved already
     card.use.click()
@@ -155,8 +161,8 @@ def test_custom_shows_what_the_choice_costs_and_why_it_is_red():
     assert card.tiles["custom"].state.text() == "In use" and card.tiles["custom"].cost.property("tone") == "err"
     card.select("custom")
     assert card.use.isHidden() and not card.links.isHidden()
-    assert "speech $5.67, AI $15" in card.cost_words.text()
-    assert "Speech: About $5.67 a month for typical use: more than 10 times the cheapest option." in card.warnings.text()
+    assert "speech $5.67, AI $6.34" in card.cost_words.text()
+    assert "Speech: About $5.67 a month for typical use: an expensive model, over $5.00 a month." in card.warnings.text()
     card.links.findChildren(w.QPushButton)[1].click()
     assert window.current_page() == "cleanup"
 
@@ -171,10 +177,10 @@ def test_the_ai_connection_shows_each_model_s_cost_and_asks_once_for_an_expensiv
     assert page.cost.lamp.isHidden()
     delegate = page.model.itemDelegate()
     page.model.addItems(["gemini-flash-latest", "gemini-9-unknown"])
-    assert delegate._words(page.model.model().index(1, 0)) == ("≈ $15/mo", "err")
+    assert delegate._words(page.model.model().index(1, 0)) == ("≈ $6.34/mo", "err")
     assert delegate._words(page.model.model().index(2, 0)) == ("price unknown", "text3")
     page.model.setCurrentText("gemini-flash-latest")
-    assert "more than 10 times the cheapest option" in page.cost.words.text() and not page.cost.lamp.isHidden()
+    assert "an expensive model, over $5.00" in page.cost.words.text() and not page.cost.lamp.isHidden()
     assert page.cost.words.property("tone") == "err"
     questions = []
     page.confirm = lambda question: questions.append(question) or False
@@ -215,7 +221,7 @@ def test_the_first_run_starts_by_choosing_a_setup_recommended_first(no_parakeet)
     window, app = _window(settings=Settings())
     welcome = window.pages["welcome"]
     assert welcome.step == 0 and welcome.setup == "recommended" and welcome.options["recommended"].chosen
-    assert list(welcome.options) == ["recommended", "fastest", "multilingual", "local", "custom"]
+    assert list(welcome.options) == ["recommended", "multilingual", "local", "custom"]  # no Fastest: Groq isn't offered
     assert [n.text() for n in welcome.stepper.names] == ["Setup", "Key", "Try it"]
     assert welcome.option_costs["recommended"].text() == "About $1.05 a month"
     assert welcome.option_costs["multilingual"].property("tone") == "warn"
@@ -236,19 +242,19 @@ def test_the_first_run_starts_by_choosing_a_setup_recommended_first(no_parakeet)
     assert app.settings.welcomed and window.current_page() == "home"
 
 
-def test_the_first_run_with_fastest_uses_groq_for_both_parts():
+def test_the_first_run_with_multilingual_uses_gemini_for_both_parts():
     window, app = _window(settings=Settings())
     welcome = window.pages["welcome"]
-    welcome.options["fastest"].clicked.emit()
-    assert welcome.setup == "fastest" and welcome.primary.text() == "Continue"
+    welcome.options["multilingual"].clicked.emit()
+    assert welcome.setup == "multilingual" and welcome.primary.text() == "Continue"
     welcome.primary.click()
-    assert welcome.current() == "key" and "Your voice is sent to Groq" in welcome.key_voice.text()
-    assert "both at Groq" in welcome.key_about.text()
-    welcome.setup_key.setText("gsk-test")
+    assert welcome.current() == "key" and "Your voice is sent to Google Gemini" in welcome.key_voice.text()
+    assert "both at Google Gemini" in welcome.key_about.text() and welcome.key_title.text() == "Google Gemini API key"
+    welcome.setup_key.setText("AIza-test")
     welcome.primary.click()
     assert _wait_until(lambda: welcome.current() == "try")
-    assert ("check_ai", "groq", "openai/gpt-oss-20b") in app.calls
-    assert app.settings.speech_model == "groq" and app.gateway.key_for("groq") == "gsk-test"
+    assert ("check_ai", "gemini", "gemini-3.5-flash-lite") in app.calls
+    assert app.settings.speech_model == "gemini" and app.gateway.key_for("gemini") == "AIza-test"
 
 
 def test_a_key_the_provider_refuses_is_said_and_nothing_is_saved():

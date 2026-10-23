@@ -39,7 +39,7 @@ from urllib.parse import urlsplit
 
 import numpy as np
 
-from sst import netconnect
+from sst import netconnect, usage
 from sst.audio import TARGET_RATE, condition, resample
 from sst.engines.whisper import LANGUAGES
 from sst.modelrules import gemini_takes_temperature, gemini_thinking
@@ -78,7 +78,7 @@ CLOUD = {p.key: p for p in [
                   "https://platform.openai.com/api-keys"),
     CloudProvider("groq", "Groq", "https://api.groq.com/openai/v1", "openai",
                   ("whisper-large-v3-turbo", "whisper-large-v3"), "https://console.groq.com/keys"),
-    # Explicit ids, not the -latest aliases: gemini-flash-latest moved to 3.5 Flash, the dearest Flash, and
+    # Explicit ids, not the -latest aliases: gemini-flash-latest has moved before (to 3.5 Flash, now 3.6), and
     # gemini-flash-lite-latest's model isn't documented. A name typed in still works.
     CloudProvider("gemini", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta", "gemini",
                   ("gemini-3.5-transcribe", "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.5-transcribe-live"),
@@ -282,7 +282,8 @@ class CloudEngine:
         audio16 = resample(condition(audio), sample_rate, TARGET_RATE)
         t0 = time.perf_counter()
         try:
-            text = self.ask(wav_bytes(audio16, TARGET_RATE), len(audio16) / TARGET_RATE)
+            with usage.feature("tests"):
+                text = self.ask(wav_bytes(audio16, TARGET_RATE), len(audio16) / TARGET_RATE)
         except TimeoutError:
             raise CloudError("no answer in time") from None
         except (OSError, http.client.HTTPException) as e:
@@ -367,6 +368,7 @@ class CloudEngine:
             {"text": instruction}]}], "generationConfig": self._flash_config()}).encode("utf-8")
         status, data, reply = self._request(f"/models/{self.model}:generateContent", body, self._google(), timeout)
         answer = _json(status, data, reply)
+        self._count(answer, wav, transcribe=False)
         parts = ((answer.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
         return RawTranscript("".join(p.get("text", "") for p in parts if isinstance(p, dict) and not p.get("thought")))
 
@@ -395,8 +397,14 @@ class CloudEngine:
                                                mode, hints)
             finally:
                 self.delete_remote_file(str(file.get("name") or ""))
+        self._count(answer, wav, transcribe=True)  # a blocked or empty answer is billed too
         text, words, language = gemini_transcript(answer)
         return RawTranscript(text, words, language, diagnostics={"mode": mode, "transport": transport})
+
+    def _count(self, answer: dict, wav: bytes, transcribe: bool) -> None:
+        """A Gemini answer into the cost tracker (sst.usage): dictation, unless the caller said what it is for."""
+        seconds = max(0, len(wav) - 44) / (2 * TARGET_RATE)  # 16-bit mono at 16 kHz after the WAV header
+        usage.record("dictation", self.model, **usage.gemini_counts(answer, seconds, transcribe))
 
     def transcribe_audio(self, audio: dict, timeout: float, mode: str | None = None, hints: list[str] | None = None) -> dict:
         """Gemini Transcribe's answer for one recording, given inline ({"inlineData": ...}) or uploaded

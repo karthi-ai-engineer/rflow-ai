@@ -408,6 +408,59 @@ def test_the_pipeline_says_which_microphone_gave_no_sound():
     assert states[-1][0] == "error" and "(Headset (Buds))" in states[-1][1]
 
 
+# ---- the wake word: its keyword and end phrase are trimmed from the words heard, before everything else
+
+def _wake_trim(text: str) -> str:
+    return text.removeprefix("Okay type, ").removesuffix(" Stop it.")
+
+
+def test_a_wake_word_turn_types_neither_the_keyword_nor_the_end_phrase():
+    llm = FakeLLM(lambda text: text[0].upper() + text[1:])
+    typed, results = [], []
+    recorder = LiveRecorder(np.concatenate([silence(0.2), speech(0.6, seed=7)]))  # the keyword, before the start
+    d = Dictation(None, recorder, paste=typed.append, sounds=False, save=False)
+    d.pipeline = pipeline(ScriptedBackend(["Okay type, send the report. Stop it."]), Stages(llm=llm, guard=Guard()))
+    d.on_result = lambda heard, text, seconds: results.append((heard, text))
+    d.trim = _wake_trim
+    d.handle("handsfree", 10.0)
+    d.trim = None
+    recorder.current_take.chunks += [speech(1.5, seed=5), silence(0.4)]
+    d.end(keep=True)
+    d.wait()
+    assert llm.seen[0][0] == "send the report." and typed == ["Send the report. "]
+    assert results == [("send the report.", "Send the report.")]  # the history's "heard" has no keyword either
+
+
+def test_a_command_after_the_keyword_reaches_the_app_and_a_retry_trims_too(monkeypatch):
+    from sst import dictate
+    monkeypatch.setattr(dictate, "save_recording", lambda audio, rate, text: "x")
+    commands, typed = [], []
+    recorder = LiveRecorder(silence(0.2))
+    backend = ScriptedBackend(["Okay type, make it concise."])
+    d = Dictation(None, recorder, paste=typed.append, sounds=False, save=True)
+    d.pipeline = pipeline(backend, Stages(command=lambda text: "concise" if text == "make it concise." else None))
+    d.on_command = commands.append
+    d.trim = _wake_trim
+    d.handle("handsfree", 10.0)
+    d.trim = None
+    recorder.current_take.chunks += [speech(1.5, seed=5), silence(0.4)]
+    d.end(keep=True)
+    d.wait()
+    assert commands == ["concise"] and typed == []
+    backend.texts, backend.fail = ["Okay type, hello. Stop it."], {1}  # the next one fails, then is retried
+    d.trim = _wake_trim
+    d.handle("handsfree", 15.0)
+    d.trim = None
+    recorder.current_take.chunks += [speech(1.5, seed=5), silence(0.4)]
+    d.end(keep=True)
+    d.wait()
+    assert d.last_failed is not None and typed == []
+    backend.fail.clear()
+    assert d.retry_last()
+    d.wait()
+    assert typed == ["hello. "]
+
+
 # ---- phase 44: faster dictation
 
 class TimelineBackend:

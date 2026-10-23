@@ -1,16 +1,20 @@
-"""The voice that speaks live translations aloud: Piper's "Danny" (English), run on the CPU by sherpa-onnx, which Rflow
-already has for Parakeet (no Piper program needed).
+"""The voice on the laptop that speaks live translations aloud when Gemini's own voice isn't there: Piper's "Ryan"
+(English, medium quality, 22 kHz), run on the CPU by sherpa-onnx, which Rflow already has for Parakeet (no Piper
+program needed). It replaced "Danny" (low quality, 16 kHz, flat); an older Rflow's Danny is still used until Ryan is
+downloaded (local()), so nobody is left without a voice meanwhile.
 
 Downloaded when the user turns speaking on (sst.downloads: pinned, checked, Hugging Face only):
-    rhasspy/piper-voices  en_US-danny-low.onnx (63 MB, MIT) and .onnx.json (its settings and phoneme ids)
+    rhasspy/piper-voices  en_US-ryan-medium.onnx (63 MB) and .onnx.json (its settings and phoneme ids); the voice's
+                          dataset is CC BY-NC-SA 4.0 (packaging/NOTICES.txt)
     espeak-ng-data        the 6 files of it English needs (795 KB of 17 MB, measured: the same speech), from the
-                          sherpa-onnx author's copy of this voice: the phonemes Piper speaks from
+                          sherpa-onnx author's copy of Danny (the same files for every English voice): the phonemes
+                          Piper speaks from
 
 Then prepared, once: sherpa-onnx reads a Piper voice's settings from the model's metadata, which rhasspy's files keep
 in the .onnx.json. An ONNX model is a protobuf ModelProto, and protobuf merges repeated fields that come later in the
 bytes, so the metadata (field 14) is appended to a copy of the model: no ONNX library needed. tokens.txt comes from the
 json's phoneme ids; the original model is removed afterwards (63 MB not kept twice). Measured on the owner's laptop:
-loaded in 1.1 s, a sentence in ~0.2 s (about 20 times faster than it takes to say).
+Danny loaded in 1.1 s, a sentence in ~0.2 s (about 20 times faster than it takes to say); Ryan: see RYAN.
 """
 import json
 import logging
@@ -53,6 +57,14 @@ class Voice:
             and self.data.installed(root)
 
 
+ESPEAK_EN = Download("espeak-ng-data-en", ESPEAK, (
+    ModelFile("phontab", 55796, "886f3fa402cb0ba73d483aa8ad000af47a6b7cc06293c75a97913fba68a530f6"),
+    ModelFile("phonindex", 39074, "3ca7b8fa3b42624e4b0f152707e7a39245fce569aa99ea47c055d9e622fcf0c4"),
+    ModelFile("phondata", 550424, "4e0288957874029a8c3c9f41a8f517ad4bf18127046decbdd4b9d1d6807ce3a3"),
+    ModelFile("intonations", 2040, "3f8af65fd3eda9759a10f021d61361c120871f463515229c925995c7f90918cc"),
+    ModelFile("en_dict", 166944, "71bd330ba8a2e3e8076e631508208ef49449d6147c17b7bd2b4b1e1468292e35"),
+    ModelFile("lang/gmw/en-US", 257, "41534c2a22df5dd4f1052ff9e1a33a3ea7bff5a26b5c02bdad5ba8ddb7524704"),
+))
 DANNY = Voice(
     "en_US-danny-low", "Danny", "en",
     Download("piper-en_US-danny-low", PIPER + "en/en_US/danny/low/", (
@@ -61,16 +73,28 @@ DANNY = Voice(
         ModelFile("MODEL_CARD", 275, "28a96e3a87f774b964f9b8ce21d9a504dc2fd1c685ab7992ba2487a8a883f5f7"),  # its licence
     )),
     "en_US-danny-low.onnx",
-    Download("espeak-ng-data-en", ESPEAK, (
-        ModelFile("phontab", 55796, "886f3fa402cb0ba73d483aa8ad000af47a6b7cc06293c75a97913fba68a530f6"),
-        ModelFile("phonindex", 39074, "3ca7b8fa3b42624e4b0f152707e7a39245fce569aa99ea47c055d9e622fcf0c4"),
-        ModelFile("phondata", 550424, "4e0288957874029a8c3c9f41a8f517ad4bf18127046decbdd4b9d1d6807ce3a3"),
-        ModelFile("intonations", 2040, "3f8af65fd3eda9759a10f021d61361c120871f463515229c925995c7f90918cc"),
-        ModelFile("en_dict", 166944, "71bd330ba8a2e3e8076e631508208ef49449d6147c17b7bd2b4b1e1468292e35"),
-        ModelFile("lang/gmw/en-US", 257, "41534c2a22df5dd4f1052ff9e1a33a3ea7bff5a26b5c02bdad5ba8ddb7524704"),
-    )),
+    ESPEAK_EN,
 )
-VOICES = {DANNY.key: DANNY}
+# Clearer than Danny at the same size and speed. Measured on the dev laptop (sherpa-onnx, 2 threads): loaded in 1.0 s;
+# 5, 18 and 40 words in 70, 264 and 566 ms (1.2, 5.0 and 10.6 s of speech: ~19 times faster than it takes to say)
+RYAN = Voice(
+    "en_US-ryan-medium", "Ryan", "en",
+    Download("piper-en_US-ryan-medium", PIPER + "en/en_US/ryan/medium/", (
+        ModelFile("en_US-ryan-medium.onnx", 63201294, "abf4c274862564ed647ba0d2c47f8ee7c9b717d27bdad9219100eb310db4047a"),
+        ModelFile("en_US-ryan-medium.onnx.json", 4883, "44034c056cb15681b2ad494307c7f3f2e4499d1253c700c711fa0a4607ffe78d"),
+        ModelFile("MODEL_CARD", 306, "3a24ae5f7aa856199f338ad9af784cda796734f397f7e1b4a1bd3c07d06945b1"),  # its licence
+    )),
+    "en_US-ryan-medium.onnx",
+    ESPEAK_EN,
+)
+LOCAL = RYAN  # the voice downloaded for the laptop now
+VOICES = {RYAN.key: RYAN, DANNY.key: DANNY}
+
+
+def local(root: Path | None = None) -> Voice:
+    """The voice on this laptop to speak with: Ryan once he's downloaded; until then Danny where an older Rflow
+    downloaded him (never left without a voice while Ryan comes); else Ryan, to be downloaded."""
+    return DANNY if not LOCAL.ready(root) and DANNY.ready(root) else LOCAL
 
 
 def install(voice: Voice, progress=lambda done, total: None, cancelled=lambda: False, root: Path | None = None) -> Path:

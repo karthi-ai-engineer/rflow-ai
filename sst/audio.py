@@ -16,6 +16,7 @@ import time
 import wave
 import weakref
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -172,8 +173,8 @@ class Recorder:
     warm_seconds > 0 keeps the microphone open that long after a recording (tick() closes it), so the next one starts at
     once, with `preroll_seconds` from before start(); math.inf keeps it open while the app runs (keep_open() opens it
     at start-up), the voice pipeline's always-on microphone. The moment before start() lives only in RAM. A
-    call-quality (Bluetooth) microphone is never kept open. `tail` seconds are recorded after stop_later(). raw asks
-    Windows for the microphone without its voice effects."""
+    call-quality (Bluetooth) microphone isn't kept open (unless keep_call_quality). `tail` seconds are recorded after
+    stop_later(). raw asks Windows for the microphone without its voice effects."""
 
     def __init__(self, device: int | str | None = None, *, warm_seconds: float = 0.0, tail: float = 0.0,
                  raw: bool = False):
@@ -196,6 +197,12 @@ class Recorder:
         self._paused = False  # closed by refresh_devices(), to be opened again
         self._using = ""  # the microphone actually opened last
         self.notice = ""  # a change the user should hear of (the chosen microphone missing); Dictation takes it
+        # Called with every block the open microphone delivers, (samples, rate), recording or not: the wake word
+        # listens on the always-on microphone (sst.wakeui). On the audio thread: it must only hand the block on.
+        self.tap: Callable[[np.ndarray, int], None] | None = None
+        # Keep a call-quality microphone open too: only when the user asked for it (the wake word listening on their
+        # Bluetooth headset, which then plays in call quality while it listens)
+        self.keep_call_quality = False
 
     @property
     def level(self) -> float:
@@ -326,7 +333,7 @@ class Recorder:
             stream.close()
 
     def _keep_warm(self) -> bool:
-        return self.warm_seconds > 0 and not self.info.get("call_quality")
+        return self.warm_seconds > 0 and (self.keep_call_quality or not self.info.get("call_quality"))
 
     def _open(self, force_refresh: bool = False) -> None:
         refresh_devices(force=force_refresh)  # PortAudio's list caught up with Windows' first: the headset is in it
@@ -405,6 +412,12 @@ class Recorder:
         self._last_audio = time.monotonic()
         block = indata[:, 0].copy()
         self._latest = block  # `level` reads it when something shows it
+        tap = self.tap
+        if tap is not None:
+            try:
+                tap(block, self.rate)
+            except Exception:  # never let a listener break the recording
+                pass
         with self._lock:
             used = 0  # the start of the block that is a take's tail
             for take in self._closing:
@@ -564,6 +577,39 @@ def resample(audio: np.ndarray, rate: int, target: int = TARGET_RATE) -> np.ndar
     out = np.fft.irfft(spectrum, n) * (n / len(padded))
     cut = round(pad * target / rate)
     return out[cut:cut + round(len(audio) * target / rate)].astype(np.float32)
+
+
+class StreamResampler:
+    """A stream of blocks at `rate` as `target`, block by block with no seams (the wake word hears the always-on
+    microphone at its own rate): an average over about the rates' ratio against aliasing, then linear interpolation;
+    the state is kept across blocks. Plenty for spotting a keyword; a whole recording uses resample()."""
+
+    def __init__(self, rate: int, target: int = TARGET_RATE):
+        self.rate, self.target = rate, target
+        self.step = rate / target
+        self.width = max(1, round(self.step))
+        self._tail = np.zeros(self.width - 1, dtype=np.float32)  # the input the average still needs
+        self._buf = np.zeros(0, dtype=np.float32)  # averaged input not used yet
+        self._pos = 0.0  # where the next output sample falls in _buf
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=np.float32)
+        if self.rate == self.target:
+            return x
+        if self.width > 1:
+            joined = np.concatenate([self._tail, x])
+            sums = np.cumsum(np.concatenate([[0.0], joined.astype(np.float64)]))
+            x = ((sums[self.width:] - sums[:-self.width]) / self.width).astype(np.float32)
+            self._tail = joined[len(joined) - (self.width - 1):]
+        buf = np.concatenate([self._buf, x])
+        n = max(0, int(np.ceil((len(buf) - 1 - self._pos) / self.step)))  # every output point before the last input
+        at = self._pos + self.step * np.arange(n)
+        i = at.astype(np.int64)
+        out = (buf[i] * (1 - (at - i)) + buf[i + 1] * (at - i)).astype(np.float32)
+        end = self._pos + self.step * n
+        used = int(end)
+        self._buf, self._pos = buf[used:], end - used
+        return out
 
 
 def save_wav(path: Path, audio: np.ndarray, rate: int) -> None:

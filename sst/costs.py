@@ -5,8 +5,11 @@ for typical use" next to every speech and AI model it knows, marks the mid-price
 and the ready-made setups (sst.setups) add their two parts up.
 
 Prices: USD, paid tier, standard (not batch) pricing, as seen on each provider's official page on 2026-10-06 (the
-research notes "Rflow model costs and setups"). They change: Gemini 3.6 Flash doubles on 2027-01-01, and OpenAI's
-gpt-5.6-sol price is a promotion. A model not in the table has no estimate ("price unknown"), never a red mark.
+research notes "Rflow model costs and setups"), corrected on 2026-10-23 (gpt-4.1-nano shut down, Claude Haiku 5.5,
+gemini-3.5-flash and gemini-flash-latest now answered by 3.6 Flash, Gemini 4 Argon). They change: Gemini 3.6 and 3.8
+Flash double on 2027-01-01, Gemini 4 Argon on 2026-12-01, and OpenAI's gpt-5.6-sol price is a promotion. A model not in
+the table has no estimate ("price unknown"), never a red mark. Rflow offers Gemini only for now (sst.gateway.OFFERED);
+the other providers' prices stay for when they come back.
 
   Google Gemini  https://ai.google.dev/gemini-api/docs/pricing (models, thinking: .../docs/models, .../docs/thinking)
   OpenAI         https://developers.openai.com/api/docs/pricing (deprecations: .../api/docs/deprecations)
@@ -17,7 +20,7 @@ gpt-5.6-sol price is a promotion. A model not in the table has no estimate ("pri
 import re
 from dataclasses import dataclass
 
-SEEN = "2026-10-06"  # the day every price below was read on the provider's own page
+SEEN = "2026-10-23"  # the day the prices below were last checked on the providers' own pages
 
 # ---------------------------------------------------------------- the typical user
 
@@ -85,6 +88,7 @@ class SpeechPrice:
     output: float = 0.0  # per 1M tokens out, thinking included
     transcribe: bool = False  # Gemini Transcribe (no instruction, Google's token rates) rather than a Flash model
     thinking: str = ""
+    audio_out: float = 0.0  # per 1M audio tokens out: Live Translate speaks its translation
 
 
 _CLAUDE_NEW = 1.3  # Claude 4.7 and later: the same text is ~30% more tokens
@@ -99,16 +103,15 @@ TEXT: dict[tuple[str, str], TextPrice] = {
     ("gemini", "gemini-2.5-flash"): TextPrice(0.30, 2.50, "low"),  # dynamic thinking: assumed low
     ("gemini", "gemini-3-flash-preview"): TextPrice(0.50, 3.00, "high"),
     ("gemini", "gemini-3.6-flash"): TextPrice(0.75, 3.75, "medium"),  # $1.50 / $7.50 from 2027-01-01
-    ("gemini", "gemini-3.7-flash"): TextPrice(0.75, 3.75, "medium"),
-    ("gemini", "gemini-3.8-flash"): TextPrice(0.75, 3.75, "medium"),
-    ("gemini", "gemini-3.5-flash"): TextPrice(1.50, 9.00, "medium"),
-    ("gemini", "gemini-flash-latest"): TextPrice(1.50, 9.00, "medium"),  # an alias: 3.5 Flash today
+    ("gemini", "gemini-3.7-flash"): TextPrice(0.75, 3.75, "medium"),  # answered by 3.8 Flash since 2026-10
+    ("gemini", "gemini-3.8-flash"): TextPrice(0.75, 3.75, "medium"),  # $1.50 / $7.50 from 2027-01-01
+    ("gemini", "gemini-3.5-flash"): TextPrice(0.75, 3.75, "medium"),  # answered by 3.6 Flash, at its price
+    ("gemini", "gemini-flash-latest"): TextPrice(0.75, 3.75, "medium"),  # an alias: 3.6 Flash today
     ("gemini", "gemini-2.5-pro"): TextPrice(1.25, 10.00, "medium"),  # thinking can't be turned off
     ("gemini", "gemini-3.1-pro-preview"): TextPrice(2.00, 12.00, "high"),  # paid only
     # OpenAI (reasoning tokens billed as output)
     ("openai", "gpt-5-nano"): TextPrice(0.05, 0.40, "medium"),
     ("openai", "gpt-6-luna"): TextPrice(0.10, 0.50, "medium"),
-    ("openai", "gpt-4.1-nano"): TextPrice(0.10, 0.40),  # shuts down 2026-10-23
     ("openai", "gpt-4o-mini"): TextPrice(0.15, 0.60),
     ("openai", "gpt-5.6-luna"): TextPrice(0.20, 1.20, "medium"),
     ("openai", "gpt-5.4-nano"): TextPrice(0.20, 1.25),
@@ -133,6 +136,7 @@ TEXT: dict[tuple[str, str], TextPrice] = {
     ("groq", "openai/gpt-oss-120b"): TextPrice(0.15, 0.60, "low"),
     ("groq", "qwen/qwen3.8-27b"): TextPrice(0.80, 4.00),  # Preview
     # Anthropic
+    ("anthropic", "claude-haiku-5-5"): TextPrice(0.10, 0.50, "", _CLAUDE_NEW),  # asked not to think (sst.modelrules)
     ("anthropic", "claude-haiku-4-5"): TextPrice(1.00, 5.00),
     ("anthropic", "claude-sonnet-4-5"): TextPrice(3.00, 15.00),  # deprecated, retires 2026-11-30
     ("anthropic", "claude-sonnet-4-6"): TextPrice(3.00, 15.00),
@@ -162,22 +166,47 @@ SPEECH: dict[tuple[str, str], SpeechPrice] = {
     # Google Gemini, by the token
     ("gemini", "gemini-3.5-transcribe"): SpeechPrice(audio=2.00, output=12.00, transcribe=True),
     ("gemini", "gemini-3.5-transcribe-live"): SpeechPrice(audio=3.50, output=21.00, transcribe=True),  # the Live API
+    # Live translation (sst.live), on the Live API too: 25 tokens a second of audio each way, "approximately $0.0368 per
+    # minute" (Google's footnote); free on the free tier. Not a dictation model: no speech list shows it.
+    ("gemini", "gemini-3.5-live-translate-preview"): SpeechPrice(audio=3.50, audio_out=21.00),
     ("gemini", "gemini-2.5-flash-lite"): SpeechPrice(audio=0.30, text=0.10, output=0.40),
     ("gemini", "gemini-3.1-flash-lite"): SpeechPrice(audio=0.50, text=0.25, output=1.50, thinking="minimal"),
     ("gemini", "gemini-3.5-flash-lite"): SpeechPrice(audio=0.30, text=0.30, output=2.50, thinking="minimal"),
     ("gemini", "gemini-3.6-flash"): SpeechPrice(audio=0.75, text=0.75, output=3.75, thinking="medium"),
-    ("gemini", "gemini-3.7-flash"): SpeechPrice(audio=0.75, text=0.75, output=3.75, thinking="medium"),
+    ("gemini", "gemini-3.7-flash"): SpeechPrice(audio=0.75, text=0.75, output=3.75, thinking="medium"),  # 3.8 Flash
     ("gemini", "gemini-3.8-flash"): SpeechPrice(audio=0.75, text=0.75, output=3.75, thinking="medium"),
-    ("gemini", "gemini-3.5-flash"): SpeechPrice(audio=1.50, text=1.50, output=9.00, thinking="medium"),
-    ("gemini", "gemini-flash-latest"): SpeechPrice(audio=1.50, text=1.50, output=9.00, thinking="medium"),
+    ("gemini", "gemini-3.5-flash"): SpeechPrice(audio=0.75, text=0.75, output=3.75, thinking="medium"),  # 3.6 Flash
+    ("gemini", "gemini-flash-latest"): SpeechPrice(audio=0.75, text=0.75, output=3.75, thinking="medium"),
     # gemini-flash-lite-latest: Google documents no target for it any more, so no price
+}
+
+LIVE_AUDIO = 25  # tokens per second of audio on the Live API, in and out (Transcribe Live, Live Translate)
+
+# Prices that change on a known day: (provider, model) -> [(the first day, the price from then on)], latest last. The
+# tables above are today's; a day's use is priced as it was that day (text_price_on, speech_price_on), which is why the
+# cost tracker (sst.usage) keeps tokens, not dollars. 3.6 Flash doubles (Google's pricing page) and 3.8 Flash, priced
+# the same, with it (the notes' table); their audio price is assumed to double as well.
+TEXT_FROM: dict[tuple[str, str], list[tuple[str, TextPrice]]] = {
+    ("gemini", "gemini-3.6-flash"): [("2027-01-01", TextPrice(1.50, 7.50, "medium"))],
+    ("gemini", "gemini-3.8-flash"): [("2027-01-01", TextPrice(1.50, 7.50, "medium"))],
+}
+SPEECH_FROM: dict[tuple[str, str], list[tuple[str, SpeechPrice]]] = {
+    ("gemini", "gemini-3.6-flash"): [("2027-01-01", SpeechPrice(audio=1.50, text=1.50, output=7.50, thinking="medium"))],
+    ("gemini", "gemini-3.8-flash"): [("2027-01-01", SpeechPrice(audio=1.50, text=1.50, output=7.50, thinking="medium"))],
 }
 
 LOCAL_SPEECH = ("parakeet", "whisper-turbo")  # on this PC: free
 LOCAL_AI = ("ollama",)  # an AI model on this PC: free
-# The cheapest models that do the job well, for each role: the Fastest setup's two (Groq). A model costing more than
-# 10 times as much is marked red, whatever it costs.
-CHEAPEST_GOOD = {"speech": ("groq", "whisper-large-v3-turbo"), "cleanup": ("groq", "openai/gpt-oss-20b")}
+# The cheapest models that do the job well, for each role, from the first provider offered (sst.gateway.OFFERED): Groq's
+# two (the Fastest setup's), else Gemini 3.5 Flash-Lite (Recommended's). A model costing more than 10 times as much is
+# marked red, whatever it costs.
+CHEAPEST_GOOD_AT = {"groq": {"speech": ("groq", "whisper-large-v3-turbo"), "cleanup": ("groq", "openai/gpt-oss-20b")},
+                    "gemini": {"speech": ("gemini", "gemini-3.5-flash-lite"), "cleanup": ("gemini", "gemini-3.5-flash-lite")}}
+
+
+def cheapest_good() -> dict[str, tuple[str, str]]:
+    from sst.gateway import OFFERED  # sst.gateway is Windows-only (DPAPI); the table above isn't
+    return next(CHEAPEST_GOOD_AT[p] for p in ("groq", "gemini") if p in OFFERED)
 
 # ---------------------------------------------------------------- the estimate
 
@@ -252,6 +281,23 @@ def _find(table: dict, provider: str, model: str):
     return table.get((provider, name)) or table.get((provider, _SNAPSHOT.sub("", name)))
 
 
+def _on(table: dict, changes: dict, provider: str, model: str, day: str):
+    """The price on a day (an ISO date, "2026-10-23"): the table's, or a scheduled change's from its first day on."""
+    price = _find(table, provider, model)
+    for first, later in _find(changes, provider, model) or ():
+        if day >= first:
+            price = later
+    return price
+
+
+def text_price_on(provider: str, model: str, day: str) -> TextPrice | None:
+    return _on(TEXT, TEXT_FROM, provider, model, day)
+
+
+def speech_price_on(provider: str, model: str, day: str) -> SpeechPrice | None:
+    return _on(SPEECH, SPEECH_FROM, provider, model, day)
+
+
 def text_monthly(price: TextPrice, usage: Usage = TYPICAL) -> float:
     extra = THINKING.get(price.thinking, 0)
     tokens_in = usage.dictations * CLEANUP_TOKENS[0] + usage.tool_uses * TOOL_TOKENS[0]
@@ -271,7 +317,7 @@ def speech_monthly(price: SpeechPrice, usage: Usage = TYPICAL) -> float:
 
 
 def _cheapest(role: str) -> float:
-    provider, model = CHEAPEST_GOOD[role]
+    provider, model = cheapest_good()[role]
     if role == "speech":
         return speech_monthly(SPEECH[(provider, model)])
     return text_monthly(TEXT[(provider, model)])

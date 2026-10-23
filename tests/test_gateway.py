@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from sst import gateway, netconnect
+from sst import gateway, netconnect, usage
 from sst.gateway import GatewayConfig, GatewayError, Polisher, plausible
 
 HEARD = "so we merge the five pr's today"
@@ -73,7 +73,8 @@ class FakeGateway:
                 if anthropic:
                     return self._reply(200, {"type": "message", "role": "assistant",
                                              "content": [{"type": "text", "text": answer}]})
-                self._reply(200, {"choices": [{"message": {"role": "assistant", "content": answer}}]})
+                self._reply(200, {"choices": [{"message": {"role": "assistant", "content": answer}}],
+                                  "usage": {"prompt_tokens": 120, "completion_tokens": 9, "total_tokens": 189}})
 
             def do_GET(self):
                 fake.requests.append({"auth": self.headers.get("Authorization"), "x-api-key": self.headers.get("x-api-key"),
@@ -225,6 +226,15 @@ def test_the_backup_at_another_provider_answers_when_the_chosen_one_refuses(fake
     assert len(fake.requests) == 5
 
 
+def test_gemini_has_no_backup_at_another_provider_while_it_is_the_only_one_offered(fake):
+    from sst.setups import backup_for
+    assert gateway.OFFERED == ("gemini", "ollama", "vllm")  # OpenAI, Anthropic and Groq kept, not offered
+    others = {"groq": (fake.url, "groq-key"), "openai": (fake.url, "sk-key"), "anthropic": (fake.url, "ant-key")}
+    assert backup_for(GatewayConfig(fake.url, "gemini-key", "gemini", others)) is None
+    p = Polisher(GatewayConfig(fake.url, "gemini-key", "gemini", others), "no-credit")
+    assert p.polish(HEARD) == HEARD and [r["model"] for r in fake.requests] == ["no-credit"]  # nothing else asked
+
+
 @pytest.mark.parametrize("model", ["long"])
 def test_an_implausible_answer_is_not_used(fake, model):
     p = fake.polisher(model=model)
@@ -349,6 +359,15 @@ def test_anthropic_gets_its_messages_api(fake):
     assert sent["x-api-key"] == "test-key" and sent["anthropic-version"] == gateway.ANTHROPIC_VERSION
     assert "PRs" in sent["system"] and [m["role"] for m in sent["messages"]] == ["user"]
     assert 0 < sent["max_tokens"] < gateway.THINKING_ROOM and sent["temperature"] == 0  # Haiku 4.5 takes it
+
+
+def test_claude_haiku_5_5_is_told_not_to_think(fake):
+    fake.polisher(model="claude-haiku-5-5", provider="anthropic").polish(HEARD)
+    sent = _last_post(fake)
+    assert sent["thinking"] == {"type": "disabled"} and "temperature" not in sent  # 4.7 and later refuse it
+    assert 0 < sent["max_tokens"] < gateway.THINKING_ROOM  # no room for thinking it won't do
+    fake.polisher(model="claude-sonnet-5-5", provider="anthropic").polish(HEARD)
+    assert "thinking" not in _last_post(fake)
 
 
 @pytest.mark.parametrize("model", ["claude-sonnet-5-5", "claude-opus-4-7", "a-name-of-its-own"])
@@ -485,3 +504,47 @@ def test_the_speech_server_keeps_its_own_address_and_key(tmp_path):
     assert loaded.speech_server() == ("http://localhost:8000/v1", "speech-key") and loaded.service.key == "vllm"
     assert loaded.with_entry(SPEECH_SERVER, "", "").speech_server() == ("", "")
     assert GatewayConfig().speech_server() == ("", "")
+
+
+# ---- the cost tracker (sst.usage): a Gemini answer counted once, for the feature its caller names
+
+@pytest.fixture
+def ledger():
+    counted = usage.Ledger(None)
+    usage.use(counted)  # the conftest puts back none after the test
+    return counted
+
+
+def _calls(ledger) -> dict:
+    (day,) = ledger.days.values()
+    return {key: entry["calls"] for key, entry in day.items()}
+
+
+def test_a_gemini_cleanup_is_counted_with_the_thinking_as_output(fake, ledger):
+    assert fake.polisher(provider="gemini").polish(HEARD) == CLEAN
+    # total - prompt is billed as output: 9 written and 60 of thinking, which Gemini leaves out of completion_tokens
+    assert ledger.days[next(iter(ledger.days))] == {"cleanup|good": {
+        "audio_in": 0, "text_in": 120, "out": 9, "thoughts": 60, "audio_out": 0, "seconds": 0, "calls": 1}}
+
+
+def test_a_backup_model_is_a_call_of_its_own_and_a_failed_one_none(fake, ledger):
+    fake.polisher("cut", fallback="good", provider="gemini").polish(HEARD)  # cut short: billed, never used
+    assert _calls(ledger) == {"cleanup|cut": 1, "cleanup|good": 1}
+    fake.polisher("error", fallback="good", provider="gemini").polish(HEARD)
+    assert _calls(ledger) == {"cleanup|cut": 1, "cleanup|good": 2}
+
+
+def test_the_caller_names_the_feature_and_the_test_button_is_a_test(fake, ledger):
+    polisher = fake.polisher(provider="gemini")
+    with usage.feature("transform"):
+        polisher.complete(HEARD)
+    with usage.feature("tests"), usage.feature("translate"):  # the outermost caller says what it is for
+        polisher.complete(HEARD)
+    polisher.check()
+    assert _calls(ledger) == {"transform|good": 1, "tests|good": 2}
+
+
+def test_only_gemini_is_counted(fake, ledger):
+    fake.polisher().polish(HEARD)
+    fake.polisher(provider="openai").polish(HEARD)
+    assert ledger.days == {}

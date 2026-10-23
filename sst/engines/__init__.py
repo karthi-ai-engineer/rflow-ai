@@ -10,6 +10,7 @@ and a `signature` (what its text depends on: sst.evaluate caches by it). Engines
 Cloud models (sst.engines.cloud) need the user's key for the provider, shared with AI cleanup (sst.gateway). A model on
 the user's own server needs its address (GatewayConfig.speech_server).
 """
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
@@ -19,6 +20,9 @@ import numpy as np
 from sst.downloads import Download
 from sst.engines import parakeet, whisper
 from sst.engines.cloud import REMOTE, CloudEngine
+from sst.gateway import offered
+
+log = logging.getLogger(__name__)
 
 
 class Engine(Protocol):
@@ -88,7 +92,11 @@ def usable(key: str, keys=None) -> str:
     """The model to load for a setting: the chosen one if this version can use it, it is downloaded, a cloud model has
     its key and an own server its address (`keys`: the sst.gateway.GatewayConfig holding them); else Parakeet if it is
     on this computer, so a removed download or a lost key never stops dictation; else "" (no speech model yet: the
-    window asks for one)."""
+    window asks for one). A cloud model of a provider Rflow no longer offers (sst.gateway.OFFERED) gives way to Gemini
+    when its key is saved, else to Parakeet."""
+    if key in SPEECH_MODELS and not offered(key):
+        log.info("Speech model %s is no longer offered: using Gemini or Parakeet instead", key)
+        return usable("gemini", keys) if keys and keys.key_for("gemini") else usable(DEFAULT_MODEL, keys)
     model = SPEECH_MODELS.get(key)
     ready = bool(model and model.ready and model.installed())
     if ready and model.where == "cloud":

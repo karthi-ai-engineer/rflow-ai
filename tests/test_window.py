@@ -22,6 +22,7 @@ from sst.settings import Settings, Stats  # noqa: E402
 from sst.snippets import load  # noqa: E402
 from sst.transform import TRANSFORMS, TransformGuard  # noqa: E402
 from sst.ui import KeyCap  # noqa: E402
+from sst.wakeui import BLUETOOTH  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -289,6 +290,74 @@ def test_settings_apply_at_once_and_keep_the_rest():
     assert (s.vocabulary, s.cleanup, s.cleanup_model, s.welcomed) == (["Tamil"], True, "m", True)  # untouched
 
 
+def test_starting_with_the_voice_is_off_until_switched_on_next_to_the_dictation_key():
+    window, app = _window()
+    card = window.pages["settings"].wake
+    assert not card.toggle.isChecked() and card.details.isHidden()
+    card.toggle.setChecked(True)
+    assert ("set_wake_enabled", True) in app.calls and app.settings.wake_enabled and not card.details.isHidden()
+    assert not card.models.isHidden() and card.download.text() == "Download (58 MB)"  # the models come first
+    assert not card.setup.isEnabled() and card.setup.text() == "Set up" and "Not set up yet" in card.keyword.text()
+    card.download.click()
+    assert ("download_wake_models",) in app.calls
+    app._wake = w.WakeState(models="downloading", percent=40, size=57_900_000)
+    card.refresh()
+    assert card.download.isHidden() and not card.cancel.isHidden() and "40%" in card.models_caption.text()
+    assert card.lamp.state == "warn" and "40%" in card.status.text()
+
+
+def test_the_wake_card_says_where_it_listens_and_sets_the_keyword_up_again():
+    window, app = _window(settings=Settings(welcomed=True, wake_enabled=True))
+    app._wake = w.WakeState(keyword="okay type", heard=9, models="ready", listening="Microphone (Realtek)")
+    card = window.pages["settings"].wake
+    card.refresh()
+    assert card.models.isHidden() and card.lamp.state == "ok"
+    assert card.status.text().startswith("Listening for “okay type” on Microphone (Realtek)")
+    assert card.keyword.text() == "“okay type”  ·  heard 9 of 10 in the setup" and card.setup.text() == "Set up again"
+    card.setup.click()
+    assert ("open_wake_setup",) in app.calls
+    app._wake = w.WakeState(keyword="okay type", heard=9, models="ready", note=BLUETOOTH)
+    card.refresh()
+    assert card.lamp.state == "warn" and card.status.text() == BLUETOOTH  # why it doesn't listen
+
+
+def test_the_wake_card_says_which_microphone_and_lets_it_listen_on_the_headset():
+    window, app = _window(settings=Settings(welcomed=True, wake_enabled=True))
+    headset = "Headset (OnePlus Nord Buds 3r)"
+    app._wake = w.WakeState(keyword="karthi", heard=10, said=13, models="ready", listening="Microphone (Realtek)",
+                            instead=headset)
+    card = window.pages["settings"].wake
+    card.refresh()
+    assert card.keyword.text() == "“karthi”  ·  heard 10 of 13 in the setup"  # the takes said again count too
+    assert card.status.text().startswith("Listening for “karthi” on Microphone (Realtek).")
+    assert f"Not on {headset}: turn on “Listen on my Bluetooth headset”" in card.status.text()
+    assert not card.bluetooth.isChecked()
+    card.bluetooth.setChecked(True)
+    assert app.settings.wake_bluetooth
+    app._wake = w.WakeState(keyword="karthi", heard=10, said=13, models="ready", listening=headset)
+    card.refresh()
+    assert card.status.text().startswith(f"Listening for “karthi” on {headset}.") and "Not on" not in card.status.text()
+    assert card.bluetooth.isChecked()
+
+
+def test_end_phrases_are_saved_as_typed_and_done_is_warned_against():
+    window, app = _window(settings=Settings(welcomed=True, wake_enabled=True))
+    card = window.pages["settings"].wake
+    assert card.phrases.text() == "stop it" and "Not “done”" in card.phrases_caption.text()
+    card.phrases.setText(" stop it ,End it, stop it,")
+    card.phrases.editingFinished.emit()
+    assert app.settings.wake_end_phrases == ["stop it", "End it"] and card.phrases.text() == "stop it, End it"
+    card.phrases.setText("stop it, Done.")
+    card.phrases.editingFinished.emit()
+    assert app.settings.wake_end_phrases == ["stop it", "Done."]
+    assert card.phrases_caption.text().startswith("“Done.” ends a dictation whenever you say the word")
+    card.phrases.setText("")
+    card.phrases.editingFinished.emit()
+    assert app.settings.wake_end_phrases == ["stop it"]  # there's always one
+    card.voice.setChecked(False)
+    assert not app.settings.wake_voice_check
+
+
 def test_the_microphone_is_chosen_on_ai_and_models():
     window, app = _window(microphones=["Mic A", "Mic B"])
     page = window.pages["models"]
@@ -320,7 +389,7 @@ def test_the_cleanup_page_saves_what_was_typed():
 
 def test_a_new_install_has_no_endpoint_or_model_and_cleanup_off():
     window, _ = _window()
-    assert window.pages["cleanup"].result() == (False, "", "", GatewayConfig("", "", "openai"))  # the first provider
+    assert window.pages["cleanup"].result() == (False, "", "", GatewayConfig("", "", "gemini"))  # the first provider
 
 
 def test_the_update_banner_leads_to_the_update():
@@ -550,29 +619,70 @@ def test_each_provider_asks_for_what_it_needs():
 def test_switching_providers_keeps_each_one_s_key_and_address():
     window, app = _window()
     page = window.pages["cleanup"]
-    page.provider.setCurrentIndex(page.provider.findData("groq"))
-    page.api_key.setText("groq-key")
-    page.model.setCurrentText("openai/gpt-oss-20b")
+    page.provider.setCurrentIndex(page.provider.findData("gemini"))
+    page.api_key.setText("gemini-key")
+    page.model.setCurrentText("gemini-3.5-flash-lite")
     page.provider.setCurrentIndex(page.provider.findData("vllm"))
     assert page.api_key.text() == "" and page.model.currentText() == ""  # a fresh start for the other provider
     page.gateway_url.setText("http://my-server:8000/v1")
-    page.provider.setCurrentIndex(page.provider.findData("groq"))
-    assert page.api_key.text() == "groq-key" and page.model.currentText() == "openai/gpt-oss-20b"
+    page.provider.setCurrentIndex(page.provider.findData("gemini"))
+    assert page.api_key.text() == "gemini-key" and page.model.currentText() == "gemini-3.5-flash-lite"
     page.cleanup_on.setChecked(True)
     _button(page, "Save").click()
     on, model, _, gateway = app.calls[-1][1:]
-    assert (on, model) == (True, "openai/gpt-oss-20b")
-    assert gateway == GatewayConfig("", "groq-key", "groq", {"vllm": ("http://my-server:8000/v1", "")})
-    assert gateway.address == "https://api.groq.com/openai/v1"
+    assert (on, model) == (True, "gemini-3.5-flash-lite")
+    assert gateway == GatewayConfig("", "gemini-key", "gemini", {"vllm": ("http://my-server:8000/v1", "")})
+    assert gateway.address == "https://generativelanguage.googleapis.com/v1beta/openai"
 
 
 def test_a_saved_provider_opens_with_its_other_keys(qt):
-    gateway = GatewayConfig("", "anthropic-key", "anthropic", {"openai": ("", "openai-key")})
+    gateway = GatewayConfig("http://gw.example/v1", "gw-key", "vllm", {"gemini": ("", "gemini-key")})
     window, _ = _window(gateway=gateway)
     page = window.pages["cleanup"]
-    assert page.provider.currentData() == "anthropic" and page.api_key.text() == "anthropic-key"
-    page.provider.setCurrentIndex(page.provider.findData("openai"))
-    assert page.api_key.text() == "openai-key"
+    assert page.provider.currentData() == "vllm" and page.api_key.text() == "gw-key"
+    assert page.gateway_url.text() == "http://gw.example/v1"  # your own server (a company gateway) as saved
+    page.provider.setCurrentIndex(page.provider.findData("gemini"))
+    assert page.api_key.text() == "gemini-key"
+
+
+def test_the_cleanup_offers_only_gemini_ollama_and_your_own_server(qt):
+    page = _window()[0].pages["cleanup"]
+    assert [page.provider.itemData(i) for i in range(page.provider.count())] == ["gemini", "ollama", "vllm"]
+    # A profile still on a provider no longer offered: shown as Gemini, nothing saved changes, nothing crashes
+    gateway = GatewayConfig("", "gsk-key", "groq", {"anthropic": ("", "ant-key")})
+    window, app = _window(gateway=gateway, settings=Settings(welcomed=True, cleanup=True,
+                                                             cleanup_model="openai/gpt-oss-20b"))
+    page = window.pages["cleanup"]
+    assert page.provider.currentData() == "gemini" and page.model.currentText() == "" and not page.unsaved()
+    page.refresh()
+    assert page.provider.currentData() == "gemini" and not page.unsaved()
+    assert (app.gateway.chosen, app.settings.cleanup_model) == ("groq", "openai/gpt-oss-20b")
+    _, _, _, saved = page.result()
+    assert saved.key_for("groq") == "gsk-key" and saved.key_for("anthropic") == "ant-key"  # their keys stay saved
+
+
+def test_openai_groq_and_anthropic_are_offered_nowhere(qt):
+    import re
+
+    from PySide6.QtWidgets import QComboBox
+    # Their keys saved, and Groq the speech model chosen before they were hidden: still named nowhere (OpenAI's Whisper
+    # on this PC and servers with OpenAI's API are other things)
+    named = re.compile(r"\b(Groq|Anthropic|OpenAI)\b(?![- ](compatible|Whisper)|'s transcription API)")
+    gateway = GatewayConfig("", "AIza-key", "gemini", {"groq": ("", "gsk"), "openai": ("", "sk"), "anthropic": ("", "a")})
+    for settings in (Settings(welcomed=True, speech_model="groq"), Settings()):
+        window, _ = _window(gateway=gateway, settings=settings)
+        for name in ("models", "speech", "cleanup", "welcome"):
+            page = window.pages[name]
+            if name == "welcome":
+                for key in ("custom", "recommended"):
+                    page.show_step(0)
+                    page.choose_setup(key)
+                    for step in range(len(page.flow)):
+                        page.show_step(step)
+            texts = [label.text() for label in page.findChildren(QLabel)]
+            texts += [b.text() for b in page.findChildren(QPushButton)]
+            texts += [box.itemText(i) for box in page.findChildren(QComboBox) for i in range(box.count())]
+            assert not [text for text in texts if named.search(text)], name
 
 
 def test_load_models_needs_an_address_for_your_own_server():
@@ -658,7 +768,7 @@ def test_the_fast_model_on_groq_is_gpt_oss_and_never_a_speech_model():
     assert w.fast_model("groq", [m for m in groq if m != "openai/gpt-oss-20b"]) == "openai/gpt-oss-120b"  # priced
     assert w.fast_model("groq", ["canopylabs/orpheus-v1-english", "whisper-large-v3-turbo", "playai-tts"]) == ""
     assert w.fast_model("gemini", ["gemini-3.8-flash", "gemini-3.6-flash"]) == "gemini-3.6-flash"  # the cheapest priced
-    assert [key for key, _, _ in w.PROVIDER_TILES][:2] == ["gemini", "groq"]  # the two with a free key first
+    assert [key for key, _, _ in w.PROVIDER_TILES] == ["gemini", "ollama"]  # the providers offered, Gemini first
 
 
 # ---- capture settings
@@ -718,18 +828,18 @@ def test_the_speech_page_shows_the_model_in_use_and_what_comes_next():
     assert "In use: NVIDIA Parakeet" in page.in_use.title.text() and "hears English" in page.in_use.note.text()
     assert list(page.where) == ["local", "cloud"]  # two groups: on this PC, and the cloud
     page.where["cloud"].click()
-    assert list(page.tiles) == ["openai", "groq", "gemini", "server"]
+    assert list(page.tiles) == ["gemini", "server"]  # OpenAI and Groq aren't offered
 
     def shown() -> list[str]:
         return [key for key in page.tiles if not page.models[key].frame.isHidden()]
     assert page.groups.currentIndex() == 1 and shown() == [] and not page.pick.isHidden()  # a tile first
-    assert [page.tiles[key].state.text() for key in page.tiles] == ["Needs a key"] * 3 + ["Needs an address"]
+    assert [page.tiles[key].state.text() for key in page.tiles] == ["Needs a key", "Needs an address"]
     assert all(tile.logo.width() == 28 for tile in page.tiles.values())  # room for each provider's logo
-    page.tiles["openai"].clicked.emit()
-    assert page.tiles["openai"].chosen and shown() == ["openai"] and page.pick.isHidden()
-    assert "Your voice is sent to OpenAI" in _labels(page)
+    page.tiles["gemini"].clicked.emit()
+    assert page.tiles["gemini"].chosen and shown() == ["gemini"] and page.pick.isHidden()
+    assert "Your voice is sent to Google Gemini" in _labels(page)
     page.tiles["server"].clicked.emit()
-    assert shown() == ["server"] and not page.tiles["openai"].chosen
+    assert shown() == ["server"] and not page.tiles["gemini"].chosen
     page.where["local"].click()
     assert page.groups.currentIndex() == 0 and page.where["local"].isChecked()
 
@@ -738,74 +848,83 @@ def test_a_cloud_model_asks_first_then_keeps_its_key_and_model():
     window, app = _window()
     page = window.pages["speech"]
     page.show_where("cloud")
-    groq = page.models["groq"]
-    assert groq.choose.text() == "Use this model" and not groq.choose.isHidden() and groq.status.text() == ""
-    groq.choose.click()
-    assert "Enter your Groq API key" in groq.result.text() and not app.calls  # no key: nothing happens
-    groq.key.setText("gsk-test")
-    groq.model_box.setCurrentText("whisper-large-v3")
+    gemini = page.models["gemini"]
+    assert gemini.choose.text() == "Use this model" and not gemini.choose.isHidden() and gemini.status.text() == ""
+    gemini.choose.click()
+    assert "Enter your Google Gemini API key" in gemini.result.text() and not app.calls  # no key: nothing happens
+    gemini.key.setText("AIza-test")
+    gemini.model_box.setCurrentText("gemini-3.6-flash")
     questions = []
     page.confirm = lambda question: questions.append(question) or False
-    groq.choose.click()
-    assert "sent to Groq" in questions[0] and not app.calls  # the user said no
+    gemini.choose.click()
+    assert "sent to Google Gemini" in questions[0] and not app.calls  # the user said no
     page.confirm = lambda question: True
-    groq.choose.click()
-    assert ("use_cloud_speech", "groq", "whisper-large-v3") in app.calls
-    assert app.gateway.key_for("groq") == "gsk-test" and app.settings.speech_model == "groq"
+    gemini.choose.click()
+    assert ("use_cloud_speech", "gemini", "gemini-3.6-flash") in app.calls
+    assert app.gateway.key_for("gemini") == "AIza-test" and app.settings.speech_model == "gemini"
     page.refresh()
-    assert "In use" in groq.status.text() and not groq.choose.isEnabled()  # nothing to save
-    assert "In use: Groq" in page.in_use.title.text() and "whisper-large-v3" in page.in_use.detail.text()
-    groq.model_box.setCurrentText("whisper-large-v3-turbo")
-    assert groq.choose.text() == "Save" and groq.choose.isEnabled() and "Unsaved changes" in groq.bar.state.text()
+    assert "In use" in gemini.status.text() and not gemini.choose.isEnabled()  # nothing to save
+    assert "In use: Google Gemini" in page.in_use.title.text() and "gemini-3.6-flash" in page.in_use.detail.text()
+    gemini.model_box.setCurrentText("gemini-3.5-flash-lite")
+    assert gemini.choose.text() == "Save" and gemini.choose.isEnabled() and "Unsaved changes" in gemini.bar.state.text()
     questions.clear()
     page.confirm = lambda question: questions.append(question) or True
-    groq.choose.click()
-    assert not questions and app.settings.speech_cloud_models["groq"] == "whisper-large-v3-turbo"  # asked once only
+    gemini.choose.click()
+    assert not questions and app.settings.speech_cloud_models["gemini"] == "gemini-3.5-flash-lite"  # asked once only
+
+
+def test_a_speech_model_no_longer_offered_shows_as_gemini_or_parakeet():
+    groq = Settings(welcomed=True, speech_model="groq")
+    page = _window(settings=groq, gateway=GatewayConfig().with_key("groq", "gsk"))[0].pages["speech"]
+    assert page.where["local"].isChecked() and "groq" not in page.tiles  # no Gemini key: Parakeet, on this PC
+    page = _window(settings=groq, gateway=GatewayConfig().with_key("groq", "gsk").with_key("gemini", "AIza"))[0]
+    page = page.pages["speech"]
+    assert page.where["cloud"].isChecked() and page.tiles["gemini"].chosen
 
 
 def test_testing_a_cloud_model_shows_its_answer():
     window, app = _window()
     page = window.pages["speech"]
-    openai = page.models["openai"]
-    openai._test()
-    assert "Enter your OpenAI API key" in openai.result.text()
-    openai.key.setText("sk-test")
-    openai._test()
+    gemini = page.models["gemini"]
+    gemini._test()
+    assert "Enter your Google Gemini API key" in gemini.result.text()
+    gemini.key.setText("AIza-test")
+    gemini._test()
     for _ in range(200):
         QApplication.processEvents()
-        if openai.result.text().startswith("OK"):
+        if gemini.result.text().startswith("OK"):
             break
         time.sleep(0.01)
-    assert openai.result.text().startswith("OK: gpt-transcribe answered")
-    assert ("test_cloud_speech", "openai", "gpt-transcribe") in app.calls
+    assert gemini.result.text().startswith("OK: gemini-3.5-transcribe answered")
+    assert ("test_cloud_speech", "gemini", "gemini-3.5-transcribe") in app.calls
 
 
 def test_a_key_saved_on_one_page_shows_on_the_other():
-    window, app = _window(gateway=GatewayConfig(provider="openai", api_key="sk-old"))
+    window, app = _window(gateway=GatewayConfig(provider="gemini", api_key="sk-old"))
     speech, cleanup = window.pages["speech"], window.pages["cleanup"]
-    openai = speech.models["openai"]
-    assert openai.key.text() == "sk-old" and cleanup.api_key.text() == "sk-old"
+    gemini = speech.models["gemini"]
+    assert gemini.key.text() == "sk-old" and cleanup.api_key.text() == "sk-old"
     speech.confirm = lambda question: True
-    openai.key.setText("sk-new")
-    openai.choose.click()
+    gemini.key.setText("sk-new")
+    gemini.choose.click()
     window.show_page("cleanup")
     assert cleanup.api_key.text() == "sk-new"
     _, _, _, gateway = cleanup.result()
-    assert gateway.key_for("openai") == "sk-new"
+    assert gateway.key_for("gemini") == "sk-new"
     cleanup.api_key.setText("sk-typed")  # being typed: a refresh leaves it alone
-    app.gateway = app.gateway.with_key("openai", "sk-other")
+    app.gateway = app.gateway.with_key("gemini", "sk-other")
     cleanup.refresh()
     assert cleanup.api_key.text() == "sk-typed"
 
 
 def test_saving_the_cleanup_keeps_a_key_saved_for_speech():
-    window, app = _window(gateway=GatewayConfig(provider="openai", api_key="sk-cleanup"))
+    window, app = _window(gateway=GatewayConfig("http://gw.example/v1", "gw-cleanup", "vllm"))
     cleanup = window.pages["cleanup"]
-    app.gateway = app.gateway.with_key("groq", "gsk-speech")  # saved on the speech page after this page was built
+    app.gateway = app.gateway.with_key("gemini", "AIza-speech")  # saved on the speech page after this page was built
     _, _, _, gateway = cleanup.result()
-    assert gateway.key_for("groq") == "gsk-speech" and gateway.key_for("openai") == "sk-cleanup"
-    cleanup.provider.setCurrentIndex(cleanup.provider.findData("groq"))
-    assert cleanup.api_key.text() == "gsk-speech"  # the same key, ready for cleanup with Groq
+    assert gateway.key_for("gemini") == "AIza-speech" and gateway.key_for("vllm") == "gw-cleanup"
+    cleanup.provider.setCurrentIndex(cleanup.provider.findData("gemini"))
+    assert cleanup.api_key.text() == "AIza-speech"  # the same key, ready for cleanup with Gemini
 
 
 def test_choosing_a_downloaded_speech_model_and_its_language(whisper_downloaded):
@@ -964,7 +1083,7 @@ def test_without_parakeet_the_pages_offer_it_and_promise_no_fallback(no_parakeet
     parakeet = page.models["parakeet"]
     assert parakeet.download.text() == "Download and use (663 MB)" and not parakeet.download.isHidden()
     assert parakeet.choose.isHidden() and parakeet.remove.isHidden() and "In use" not in parakeet.status.text()
-    assert "Download Parakeet too" in page.models["openai"].privacy.text()
+    assert "Download Parakeet too" in page.models["gemini"].privacy.text()
     assert "Download Parakeet too" in page.models["server"].note.text()
 
 
@@ -1003,10 +1122,10 @@ def test_a_long_list_has_a_search_box():
 
 def test_a_model_list_filters_by_what_is_typed():
     window, _ = _window()
-    completer = window.pages["speech"].models["openai"].model_box.completer()
-    completer.setCompletionPrefix("mini")  # in the middle of the name, any case
+    completer = window.pages["speech"].models["gemini"].model_box.completer()
+    completer.setCompletionPrefix("LITE")  # in the middle of the name, any case
     found = [completer.completionModel().index(i, 0).data() for i in range(completer.completionCount())]
-    assert found == ["gpt-4o-mini-transcribe"]
+    assert found == ["gemini-3.5-flash-lite"]
 
 
 def test_an_api_key_shows_masked_with_a_pen_to_change_it(monkeypatch):
@@ -1028,15 +1147,15 @@ def test_an_api_key_shows_masked_with_a_pen_to_change_it(monkeypatch):
 
 def test_the_cleanup_page_shows_what_isnt_saved_and_cancel_undoes_it():
     window, app = _window(settings=Settings(welcomed=True, cleanup_model="model-a"),
-                          gateway=GatewayConfig("", "sk-saved-key-0000", "openai"))
+                          gateway=GatewayConfig("", "sk-saved-key-0000", "gemini"))
     page = window.pages["cleanup"]
     assert not page.unsaved() and not page.bar.save.isEnabled() and page.bar.cancel.isHidden()
     page.cleanup_on.setChecked(True)
     assert page.unsaved() and page.bar.save.isEnabled() and "Unsaved changes" in page.bar.state.text()
     page.bar.cancel.click()
     assert not page.cleanup_on.isChecked() and not page.unsaved() and page.bar.state.text() == ""
-    page.provider.setCurrentIndex(page.provider.findData("groq"))
-    page.provider.setCurrentIndex(page.provider.findData("openai"))
+    page.provider.setCurrentIndex(page.provider.findData("ollama"))
+    page.provider.setCurrentIndex(page.provider.findData("gemini"))
     assert not page.unsaved()  # there and back again is no change
     page.model.setCurrentText("model-b")
     page.bar.save.click()
@@ -1045,14 +1164,14 @@ def test_the_cleanup_page_shows_what_isnt_saved_and_cancel_undoes_it():
 
 
 def test_a_cloud_card_cancel_brings_back_what_is_saved():
-    window, _ = _window(gateway=GatewayConfig(provider="openai", api_key="sk-openai-0000"))
-    openai = window.pages["speech"].models["openai"]
-    openai.key.setText("sk-typo")
-    openai.model_box.setCurrentText("whisper-1")
-    assert openai.edited() and not openai.bar.cancel.isHidden()
-    openai.bar.cancel.click()
-    assert not openai.edited() and openai.key.text() == "sk-openai-0000"
-    assert openai.model_box.currentText() == "gpt-transcribe"
+    window, _ = _window(gateway=GatewayConfig(provider="gemini", api_key="AIza-gemini-0000"))
+    gemini = window.pages["speech"].models["gemini"]
+    gemini.key.setText("AIza-typo")
+    gemini.model_box.setCurrentText("gemini-3.6-flash")
+    assert gemini.edited() and not gemini.bar.cancel.isHidden()
+    gemini.bar.cancel.click()
+    assert not gemini.edited() and gemini.key.text() == "AIza-gemini-0000"
+    assert gemini.model_box.currentText() == "gemini-3.5-transcribe"
 
 
 def test_leaving_a_page_with_unsaved_changes_asks_first():
@@ -1355,37 +1474,79 @@ def test_ai_and_models_shows_both_halves_and_switches_the_cleanup():
     assert ("check_ai", "gemini", "gemini-3.5-flash-lite") in app.calls
 
 
+def test_the_cost_card_shows_today_this_month_and_each_feature():
+    window, app = _window(gateway=GatewayConfig(provider="gemini", api_key="AIza-key-0000-9f3c"))
+    today = date.today()
+    app.usage.record("dictation", "gemini-3.5-transcribe", audio_in=500_000, seconds=1500)  # $1.00, 25 minutes
+    app.usage.record("cleanup", "gemini-3.5-flash-lite", text_in=100_000, out=20_000)  # $0.03 + $0.05
+    if today.day > 1:  # earlier this month: in the month, not today
+        app.usage.days[today.replace(day=1).isoformat()] = {"translate|gemini-3.5-flash-lite": dict(
+            dict.fromkeys(("audio_in", "text_in", "out", "thoughts", "audio_out", "seconds"), 0.0), calls=3.0,
+            text_in=1_000_000.0)}
+    window.show_page("models")
+    card = window.pages["models"].costs
+    assert card.frame.isVisibleTo(window.pages["models"]) and card.today.text() == "$1.08"
+    assert card.month.text() == ("$1.38" if today.day > 1 else "$1.08")
+    shown = _shown(card.frame)
+    assert "What Gemini costs (estimate)" in shown and "Dictation | 25 min | $1.00" in shown
+    assert "AI cleanup | 1 call | $0.08" in shown and f"as of {w.nice_day(w.costs.SEEN)}" in shown
+    assert ("Translate | 3 calls | $0.30" in shown) == (today.day > 1)
+    assert _button(card.frame, "Billing in AI Studio")
+    # A call counted while the page is shown: the card follows
+    app.usage.record("live_translation", "gemini-3.5-live-translate-preview", audio_in=1500, audio_out=1500, seconds=60,
+                     calls=0)
+    window.usage_changed()
+    assert "Live translation | 1 min | $0.04" in _shown(card.frame)
+
+
+def test_the_cost_card_waits_for_a_gemini_key_and_says_a_free_key_is_billed_nothing():
+    window, app = _window()
+    window.show_page("models")
+    card = window.pages["models"].costs
+    assert not card.frame.isVisibleTo(window.pages["models"])  # no Gemini key, nothing counted
+    app.gateway = GatewayConfig(provider="gemini", api_key="AIza-key")
+    window.refresh()
+    assert card.frame.isVisibleTo(window.pages["models"]) and card.today.text() == "$0.00"
+    assert "Nothing counted this month yet" in _shown(card.frame)
+    app.usage.record("dictation", "gemini-3.5-transcribe", audio_in=500_000, seconds=60)
+    app.settings.gemini_free_tier = True
+    window.refresh()
+    assert card.month.text() == "$0.00" and "$0 billed: a free key (would cost $1.00 this month)." in _shown(card.frame)
+    assert w.dollars(0.004) == "<$0.01" and w.dollars(0) == "$0.00" and w.dollars(12.4) == "$12"
+
+
 def test_a_key_added_on_ai_and_models_changes_nothing_else():
     # The user testing's M-04: a Gemini key added for live translation switched AI cleanup to Gemini, with no model.
-    window, app = _window(gateway=GatewayConfig("", "sk-openai-key-0000", "openai"),
-                          settings=Settings(welcomed=True, cleanup=True, cleanup_model="gpt-4o-mini"))
+    window, app = _window(gateway=GatewayConfig("http://gw.example/v1", "gw-key-0000", "vllm"),
+                          settings=Settings(welcomed=True, cleanup=True, cleanup_model="qwen3"))
     window.show_page("models")
     page = window.pages["models"]
     keys = page.keys
-    openai, gemini = keys.rows["openai"], keys.rows["gemini"]
-    assert not openai.isHidden() and openai.value.text().endswith("0000") and "sk-openai" not in openai.value.text()
-    assert openai.uses.text() == "Used for AI cleanup" and keys.add_buttons["openai"].isHidden()
+    server, gemini = keys.rows["vllm"], keys.rows["gemini"]
+    assert list(keys.rows) == ["gemini", "vllm", w.SPEECH_SERVER]  # OpenAI, Anthropic and Groq aren't offered
+    assert set(keys.add_buttons) == {"gemini", "vllm"}
+    assert not server.isHidden() and "gw-key" not in server.value.text()
+    assert server.uses.text() == "Used for AI cleanup" and keys.add_buttons["vllm"].isHidden()
     assert gemini.isHidden() and not keys.add_buttons["gemini"].isHidden() and app.live_problem()
     keys.add_buttons["gemini"].click()
     assert gemini.editing and not gemini.isHidden() and not gemini.bar.save.isEnabled()  # nothing typed yet
-    assert "AI cleanup keeps OpenAI" in gemini.note.text() and gemini.remove.isHidden()
+    assert "AI cleanup keeps vLLM" in gemini.note.text() and gemini.remove.isHidden()
     gemini.key.setText("AIza-test-key-41ab")
     assert gemini.bar.save.isEnabled() and page.unsaved()
     gemini.bar.save.click()
     assert ("save_key", "gemini") in app.calls and app.gateway.key_for("gemini") == "AIza-test-key-41ab"
-    assert (app.gateway.chosen, app.gateway.api_key, app.settings.cleanup_model) == ("openai", "sk-openai-key-0000",
-                                                                                     "gpt-4o-mini")
+    assert (app.gateway.chosen, app.gateway.api_key, app.settings.cleanup_model) == ("vllm", "gw-key-0000", "qwen3")
     assert not gemini.editing and gemini.value.text().endswith("41ab") and keys.add_buttons["gemini"].isHidden()
-    assert gemini.uses.text() == "Used for live translation" and "AI cleanup keeps OpenAI" in keys.state.text()
+    assert gemini.uses.text() == "Used for live translation" and "AI cleanup keeps vLLM" in keys.state.text()
     assert not app.live_problem() and not page.unsaved()
 
 
 def test_a_key_is_changed_or_removed_in_your_api_keys():
-    window, app = _window(gateway=GatewayConfig("", "sk-openai-key-0000", "openai"),
-                          settings=Settings(welcomed=True, cleanup=True, cleanup_model="gpt-4o-mini"))
+    window, app = _window(gateway=GatewayConfig("", "sk-openai-key-0000", "gemini"),
+                          settings=Settings(welcomed=True, cleanup=True, cleanup_model="gemini-3.5-flash-lite"))
     window.show_page("models")
     page = window.pages["models"]
-    openai = page.keys.rows["openai"]
+    openai = page.keys.rows["gemini"]
     openai.edit.click()
     assert openai.editing and openai.key.editing and not openai.remove.isHidden() and not openai.bar.save.isEnabled()
     openai.key.setText("sk-typo")
@@ -1403,11 +1564,11 @@ def test_a_key_is_changed_or_removed_in_your_api_keys():
     page.confirm = lambda question: questions.append(question) or True
     openai.edit.click()
     openai.remove.click()
-    assert "AI cleanup stops" in questions[0] and app.gateway.key_for("openai") == ""
-    assert app.gateway.chosen == "openai" and openai.isHidden() and not page.keys.add_buttons["openai"].isHidden()
+    assert "AI cleanup stops" in questions[0] and app.gateway.key_for("gemini") == ""
+    assert app.gateway.chosen == "gemini" and openai.isHidden() and not page.keys.add_buttons["gemini"].isHidden()
     assert not page.keys.empty.isHidden()  # no keys at all now
-    page.add_key("anthropic")  # e.g. from live translation's "Add a Gemini key"
-    assert page.keys.rows["anthropic"].editing and not page.keys.rows["anthropic"].isHidden()
+    page.add_key("gemini")  # e.g. from live translation's "Add a Gemini key"
+    assert page.keys.rows["gemini"].editing and not page.keys.rows["gemini"].isHidden()
 
 
 def test_your_own_server_is_one_line_for_ai_cleanup_and_speech():
@@ -1432,27 +1593,27 @@ def test_your_own_server_is_one_line_for_ai_cleanup_and_speech():
 def test_a_cloud_tile_takes_its_key_from_your_api_keys():
     window, app = _window()
     keys, speech = window.pages["models"].keys, window.pages["speech"]
-    keys.add_buttons["groq"].click()
-    keys.rows["groq"].key.setText("gsk-test-key-0000")
-    keys.rows["groq"].bar.save.click()
+    keys.add_buttons["gemini"].click()
+    keys.rows["gemini"].key.setText("AIza-test-key-0000")
+    keys.rows["gemini"].bar.save.click()
     assert app.gateway.chosen == "" and app.settings.speech_model == "parakeet"  # nothing chosen by saving a key
     window.show_page("speech")
-    speech.show_where("groq")
-    groq = speech.models["groq"]
-    assert speech.tiles["groq"].chosen and speech.tiles["groq"].state.text() == "Key saved"
-    assert groq.key.text() == "gsk-test-key-0000" and "From Your API keys" in groq.key_note.text()
+    speech.show_where("gemini")
+    gemini = speech.models["gemini"]
+    assert speech.tiles["gemini"].chosen and speech.tiles["gemini"].state.text() == "Key saved"
+    assert gemini.key.text() == "AIza-test-key-0000" and "From Your API keys" in gemini.key_note.text()
 
 
 def test_switching_the_cleanup_s_provider_needs_a_model_first():
     # M-04 on the AI connection page: choosing Gemini there only to save its key must not leave the cleanup without a model.
-    window, app = _window(gateway=GatewayConfig("", "sk-openai", "openai"),
-                          settings=Settings(welcomed=True, cleanup=True, cleanup_model="gpt-4o-mini"))
+    window, app = _window(gateway=GatewayConfig("http://gw.example/v1", "gw", "vllm"),
+                          settings=Settings(welcomed=True, cleanup=True, cleanup_model="qwen3"))
     page = window.pages["cleanup"]
     page.provider.setCurrentIndex(page.provider.findData("gemini"))
     page.api_key.setText("AIza-live")
     page.bar.save.click()
     assert not any(call[0] == "save_cleanup" for call in app.calls) and "Your API keys" in page.test_result.text()
-    assert (app.gateway.chosen, app.settings.cleanup_model) == ("openai", "gpt-4o-mini")
+    assert (app.gateway.chosen, app.settings.cleanup_model) == ("vllm", "qwen3")
     page.model.setCurrentText("gemini-3.5-flash-lite")
     page.bar.save.click()
     assert app.gateway.chosen == "gemini" and app.settings.cleanup_model == "gemini-3.5-flash-lite"
@@ -1876,7 +2037,7 @@ def test_hearing_the_translation_is_switched_on_in_the_section():
     assert app.settings.live_speak_speed == 1.3
     app._voice_state = ("downloading", 37, "")
     page.refresh()
-    assert page.speak_caption.text().startswith("Downloading the voice Danny: 37%")
+    assert page.speak_caption.text().startswith("Downloading Ryan, the voice on this laptop: 37%")
 
 
 def test_how_low_the_other_apps_stay_while_it_runs_is_a_slider_from_0_to_100():
@@ -1905,4 +2066,6 @@ def test_how_low_the_other_apps_stay_while_it_runs_is_a_slider_from_0_to_100():
 def test_the_section_says_when_the_voice_cant_speak_the_language_chosen():
     window, _ = _live_window(live_target="ja")
     window.show_page("live")
-    assert window.pages["live"].speak_caption.text().startswith("Danny speaks English: choose English below")
+    words = window.pages["live"].speak_caption.text()
+    assert words.startswith("Gemini says the translation in its own voice")
+    assert "Ryan, the voice on this laptop, speaks only English" in words

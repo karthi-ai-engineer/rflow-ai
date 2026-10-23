@@ -422,42 +422,115 @@ def read_seconds(stream, seconds):
     return np.concatenate([np.concatenate(stream.read() or [np.zeros(0, np.float32)]) for _ in range(int(seconds * 10))])
 
 
+class Ticks:
+    """A clock that moves 100 ms each time it's read: _Checked reads it once per read, and each fake packet is 100 ms."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        self.now += 0.1
+        return self.now
+
+
+def checked_with(main_packets, whole_packets):
+    main, whole = Loopback(main_packets), Whole(whole_packets)
+    return wasapi._Checked(main, whole, clock=Ticks()), main, whole
+
+
+def read_all(checked, reads):
+    """Each read's output, and when (in reads) it switched each way."""
+    out, switched, turns = [], checked.switched, []
+    for i in range(reads):
+        got = checked.read()
+        out.append(np.concatenate(got) if got else np.zeros(0, np.float32))
+        if checked.switched != switched:
+            switched = checked.switched
+            turns.append((i, switched))
+    return out, turns
+
+
 def test_the_whole_mix_is_used_when_process_loopback_hears_nothing_while_the_output_plays():
-    main, whole = Loopback(), Whole([sine(300, 0.1, 48_000)] * 40)  # 4 s of a call; process loopback: silence
-    checked = wasapi._Checked(main, whole, clock=lambda: 1e9)
+    checked, main, whole = checked_with([], [sine(300, 0.1, 48_000)] * 40)  # 4 s of a call; process loopback: silence
     assert not checked.hears_self
-    audio = read_seconds(checked, 4)
-    assert checked.switched and checked.hears_self and main.closed  # Rflow's voice is in the mix now
-    assert len(audio) >= 30_000 and abs(pitch(audio[-16_000:], 16_000) - 300) < 3  # the call, at 16 kHz
+    out, turns = read_all(checked, 45)
+    assert turns == [(14, True)] and checked.hears_self and not main.closed  # 1.5 s; Rflow's voice is in the mix now
+    audio = np.concatenate(out)
+    assert abs(len(audio) - 4 * 16_000) < 100  # all of the call: its first 1.5 s were kept and sent on the switch
+    assert len(out[14]) >= 1.4 * 16_000 and abs(pitch(audio[-16_000:], 16_000) - 300) < 3  # at 16 kHz
     checked.close()
-    assert whole.closed
+    assert whole.closed and main.closed
 
 
-def test_the_whole_mix_is_closed_once_process_loopback_hears_a_sound():
-    main, whole = Loopback([sine(440, 0.1, 16_000)] * 5), Whole([sine(300, 0.1, 48_000)] * 40)
-    checked = wasapi._Checked(main, whole, clock=lambda: 1e9)
-    read_seconds(checked, 4)
-    assert not checked.switched and whole.closed and checked.whole is None and not checked.hears_self
+def test_an_early_sound_through_process_loopback_no_longer_ends_the_check():
+    ding = [sine(880, 0.1, 16_000) * 0.5] * 3  # a notification, heard by both
+    checked, main, whole = checked_with(ding, [sine(880, 0.1, 48_000) * 0.5] * 3 + [sine(300, 0.1, 48_000)] * 60)
+    out, turns = read_all(checked, 63)
+    assert [on for _, on in turns] == [True] and turns[0][0] <= 3 + 30  # by the time the ding left the 3 s window
+    sent = np.concatenate(out[turns[0][0]:])  # from the switch: the call kept since process loopback last heard
+    assert abs(len(sent) - (63 - 3) * 1600) < 100  # the whole call from its start, once; the ding isn't sent twice
+    assert abs(pitch(sent[:16_000], 16_000) - 300) < 3
+
+
+def test_it_switches_back_when_process_loopback_hears_what_plays_again():
+    call = [sine(300, 0.1, 48_000)] * 80
+    checked, main, whole = checked_with([], call)
+    read_all(checked, 20)
+    assert checked.switched
+    main.packets = [sine(300, 0.1, 16_000)] * 60  # the app plays where process loopback hears it again
+    out, turns = read_all(checked, 30)
+    assert turns and turns[0][1] is False and turns[0][0] <= 12 and not checked.hears_self
+    assert checked.switches == 2 and abs(pitch(np.concatenate(out[turns[0][0]:]), 16_000) - 300) < 3
+
+
+def test_a_partial_share_or_a_short_burst_doesnt_make_it_flap():
+    checked, main, whole = checked_with([sine(300, 0.1, 16_000) * 0.5] * 100, [sine(300, 0.1, 48_000)] * 100)
+    _, turns = read_all(checked, 100)  # process loopback at a quarter of the energy: between MISSING and CARRIES
+    assert turns == [] and not checked.switched
+    checked, main, whole = checked_with([], [sine(300, 0.1, 48_000)] * 200)
+    read_all(checked, 20)
+    for at in range(20, 200, 15):  # bursts of 0.5 s through process loopback, every 1.5 s
+        main.packets = [sine(300, 0.1, 16_000)] * 5
+        _, turns = read_all(checked, 15)
+        assert turns == [], at
+    assert checked.switched and checked.switches == 1
+
+
+def test_the_check_holds_when_the_apps_are_lowered_to_inaudible():
+    from sst.live.ducking import INAUDIBLE
+    low = [sine(300, 0.1, 48_000) * INAUDIBLE] * 40  # Teams lowered to 0% while the voice speaks
+    checked, *_ = checked_with([], low)
+    read_all(checked, 20)
+    assert checked.switched
 
 
 def test_rflows_own_voice_in_the_mix_doesnt_count_as_a_sound_process_loopback_missed(monkeypatch):
-    monkeypatch.setattr(wasapi, "_voice_until", 100.0)  # the voice is playing (process loopback leaves it out)
-    main, whole = Loopback(), Whole([sine(300, 0.1, 48_000)] * 40)
-    checked = wasapi._Checked(main, whole, clock=lambda: 50.0)
+    monkeypatch.setattr(wasapi, "_voice_until", 2000.0)  # the voice is playing (process loopback leaves it out)
+    checked, main, whole = checked_with([], [sine(300, 0.1, 48_000)] * 40)
     read_seconds(checked, 4)
-    assert not checked.switched and not main.closed
+    assert not checked.switched and not any(np.any(kept) for kept in checked._kept)  # nor kept to be sent: silence
+
+
+def test_on_the_mix_the_voice_is_silenced_only_when_it_plays_on_that_output(monkeypatch):
+    checked, main, whole = checked_with([], [sine(300, 0.1, 48_000)] * 40)
+    whole.device_id = "headphones"
+    read_all(checked, 20)
+    monkeypatch.setattr(wasapi, "_voice_device", "headphones")
+    assert checked.hears_self
+    monkeypatch.setattr(wasapi, "_voice_device", "speakers")  # the voice plays elsewhere: the mix can't hear it
+    assert not checked.hears_self
 
 
 def test_with_nothing_playing_nothing_changes():
     main, whole = Loopback(), Whole([np.zeros(4800, np.float32)] * 40)
-    checked = wasapi._Checked(main, whole, clock=lambda: 1e9)
+    checked = wasapi._Checked(main, whole, clock=Ticks())
     read_seconds(checked, 4)
-    assert not checked.switched and checked.whole is whole
+    assert not checked.switched and checked.whole is whole and not whole.closed
 
 
 def test_the_capture_follows_the_switch_for_the_voices_silencing():
     main, whole = Loopback(), Whole([sine(300, 0.1, 48_000)] * 40)
-    checked = wasapi._Checked(main, whole, clock=lambda: 1e9)
+    checked = wasapi._Checked(main, whole, clock=Ticks())
     speakers = wasapi._Speakers(checked, meters=FakeMeters)
     frames, capture = run_capture([speakers], 0, until=lambda: checked.switched)
     time.sleep(0.05)
@@ -472,3 +545,94 @@ def test_without_a_whole_mix_process_loopback_is_used_alone(monkeypatch):
         raise OSError("no output")
     monkeypatch.setattr(wasapi, "_Stream", no_mix)
     assert wasapi._speakers() is main
+
+
+# ---- Both on speakers: the session needs to know whether the computer plays sound one would hear, and where
+
+def test_the_capture_says_whether_the_output_is_private_and_when_it_last_had_sound_one_would_hear():
+    class Speakers(FakeStream):
+        private = False
+    _, capture = run_capture([Speakers([sine(300, 0.1, 48_000) * 0.3] * 5)], 0.2)
+    assert capture.private is False and capture.heard_at > 0 and capture.sounding(1e9)
+    _, capture = run_capture([FakeStream([sine(300, 0.1, 48_000) * 1e-4] * 5)], 0.2)  # a call's hiss at -80 dBFS
+    assert capture.private is None and capture.heard_at < 0 and not capture.sounding(1.0)
+
+
+def test_the_speakers_capture_reads_whether_the_output_is_headphones(monkeypatch):
+    monkeypatch.setattr(wasapi, "_speakers", lambda: Loopback())
+    monkeypatch.setattr(wasapi, "_Meters", FakeMeters)
+    monkeypatch.setattr(wasapi, "_output_private", lambda: True)
+    stream = Capture.speakers()._opener()
+    assert stream.private is True
+
+
+# ---- the apps lowered while the voice speaks, lifted back for the translation (#201)
+
+class At:
+    def __init__(self, now=0.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def lowered_by(factor, clock=None):
+    lowering = wasapi.Lowering(clock or At())
+    lowering.set(factor)
+    lowering._clock.now = 10.0  # long after: the change applies to all that's captured
+    return lowering
+
+
+@pytest.mark.parametrize("factor", [0.1, 0.0003])  # the slider at 10%, and at 0% (INAUDIBLE)
+def test_a_lowered_meeting_reaches_the_translation_at_its_own_level(factor):
+    speech = sine(300, 0.1, 16_000) * 0.3
+    lift = wasapi.Lifter(lowered_by(factor))
+    out = np.concatenate([lift((speech * np.float32(factor)).astype(np.float32)) for _ in range(5)])
+    assert np.allclose(out[-1600:], speech, atol=1e-6)  # float: nothing lost, even 70 dB down
+
+
+def test_what_wasnt_lowered_isnt_blown_up_and_loud_sound_isnt_made_quieter():
+    lift = wasapi.Lifter(lowered_by(0.0003))
+    ding = sine(880, 0.01, 16_000) * 0.5  # a system sound: Windows' own, not lowered
+    out = lift(ding)
+    assert np.max(np.abs(out)) <= wasapi.LIFT_LIMIT + 1e-6 and np.max(np.abs(out)) > 0.85
+    assert np.allclose(wasapi.Lifter(lowered_by(1.0))(ding), ding)  # nothing lowered: as it is
+    assert np.allclose(wasapi.Lifter(lowered_by(0.5))(sine(880, 0.01, 16_000) * 0.95), sine(880, 0.01, 16_000) * 0.95)
+
+
+def test_the_lift_follows_the_ducker_s_ramps_without_overshooting():
+    clock = At()
+    lowering = wasapi.Lowering(clock)
+    lowering.set(0.5)
+    clock.now = 0.02
+    lowering.set(0.1)  # going down: the audio captured now may still be at 1.0 or 0.5
+    assert lowering.factor() == 1.0
+    clock.now = 0.02 + wasapi.LIFT_LAG + 0.01
+    assert lowering.factor() == 0.1
+    lift = wasapi.Lifter(lowering)
+    out = lift(np.full(160, 0.01, np.float32))
+    assert out[0] == pytest.approx(0.01) and out[-1] == pytest.approx(0.1)  # up across the read, no jump
+    lowering.set(1.0)  # back up: at once (audio still lowered is lifted too little for a moment, never too much)
+    assert lowering.factor() == 1.0 and np.allclose(lift(np.full(160, 0.5, np.float32)), 0.5)
+
+
+def test_the_computer_s_capture_lifts_and_the_microphone_doesnt(monkeypatch):
+    monkeypatch.setattr(wasapi, "lowering", lowered_by(0.1))
+    quiet = [sine(300, 0.1, 48_000) * 0.03] * 10  # speech at 0.3 lowered to 10%
+    frames, _ = run_capture([FakeStream(quiet)], 0.3, lift=True)
+    assert level_db(frames[3:8]) == pytest.approx(level_db_of(0.3), abs=0.5)
+    frames, _ = run_capture([FakeStream(quiet)], 0.3)
+    assert level_db(frames[3:8]) == pytest.approx(level_db_of(0.03), abs=0.5)
+    assert Capture.speakers().lift and not Capture.microphone().lift
+
+
+def level_db_of(amplitude):
+    return 20 * np.log10(amplitude / np.sqrt(2))
+
+
+def test_the_check_still_switches_with_the_call_lowered(monkeypatch):
+    monkeypatch.setattr(wasapi, "lowering", lowered_by(0.0003))
+    quiet_call = [sine(300, 0.1, 48_000) * 0.02 * 0.0003] * 40  # a quiet call at 0%: under WHOLE_SOUND as it comes
+    checked, *_ = checked_with([], quiet_call)
+    read_all(checked, 20)
+    assert checked.switched

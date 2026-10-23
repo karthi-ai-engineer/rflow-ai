@@ -7,11 +7,27 @@ Rach_flow or Rach_Darling_Flow:** installed copies up to 2.3.0 (and up to 1.6.0)
 which GitHub redirects only while they stay free (checked after each rename: the old API names answer 301 and
 reach the latest release). Locally: `git remote set-url origin https://github.com/karthi-ai-engineer/rflow-ai.git`.
 
-_Last updated: 2026-10-22_
+_Last updated: 2026-10-23_
 
 ## Start here (a new session, or the owner's other laptop)
 
-**Where things stand (2026-10-22):**
+**Where things stand (2026-10-23):**
+- **Rflow 2.6.1** (2026-10-23, the owner's "release it") = phases 45, 42 and 46:
+  - Phase 45, live translation (#200): `_Checked` keeps comparing process loopback with the whole mix (3 s energy
+    window, the start of the call kept); the meeting stays lowered (the owner's #160 choice) and the capture lifts it
+    back by the Ducker's factor; Both on speakers gates the mic; Gemini refusals said plainly and not retried; no
+    silence streamed; session resumption; per-session numbers logged; Gemini's own spoken translation played, Piper
+    en_US-ryan-medium as the local voice (its data is CC BY-NC-SA: the owner accepted it; revisit before anything paid).
+  - Phase 42, the wake word (#162): `sst/wake/` + `sst/wakeui.py`; the spotter from k2-fsa's GitHub release, the voice
+    print from csukuangfj's repo; a name is learned from the user's own takes (sound-alike spellings); a miss stays on
+    the try; "Listen on my Bluetooth headset" (`wake_bluetooth`); takes under −50 dBFS refused. The owner's "karthi"
+    still missed in their first real tries (loud enough): suggest "hello karthi" or "okay type".
+  - Phase 46 (#210): Gemini only — `gateway.OFFERED = ("gemini", "ollama", "vllm")` hides OpenAI, Groq and Anthropic
+    everywhere (their code stays); a cost tracker (`sst/usage.py`, per-profile `usage.json`, a card on AI & models;
+    an estimate: no API key can read the real spend); model lists corrected (gpt-4.1-nano gone, Haiku 5.5, 3.5 Flash →
+    3.6). Next: the free tier (the `gemini_free_tier` setting is a placeholder), then "one key per provider".
+  - Researched, not built: two-way interpreting through a virtual "Rflow Mic" (needs a driver: VB-CABLE bundled under
+    its donationware terms first).
 - **Rflow 2.6.0 = phase 44, a light, fast Rflow** (#184, the owner's "build all 16"; built in 6 parts by parallel builders, merged on
   `phase-44/speed`). Measured first (2026-10-22, 311 logged dictations, idle profiling, network, models): the window's
   orb, 4 keyboard hooks and 15 ms timers, OpenBLAS's thread buffers and the eager pages made Rflow heavy; Gemini's speech

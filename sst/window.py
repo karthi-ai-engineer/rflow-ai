@@ -73,17 +73,17 @@ from PySide6.QtWidgets import (
     QWidgetItem,
 )
 
-from sst import RECORDINGS_DIR, __version__, bench, costs, setups, theme
+from sst import RECORDINGS_DIR, __version__, bench, costs, setups, theme, usage
 from sst.audio import LevelMeter, Take, call_quality, save_wav
 from sst.commands import DEFAULT_PHRASES, UNDO, normalize, parse_phrases, phrases_for
 from sst.engines import DEFAULT_MODEL, SPEECH_MODELS, usable
 from sst.engines.cloud import CLOUD, SPEECH
 from sst.engines.whisper import LANGUAGES
-from sst.gateway import PROVIDERS, SPEECH_SERVER, GatewayConfig, Polisher
+from sst.gateway import PROVIDERS, SPEECH_SERVER, GatewayConfig, Polisher, offered
 from sst.hotkey import parse_hotkey
 from sst.live.contracts import LANGUAGES as LIVE_LANGUAGES
 from sst.live.contracts import LiveConfig, language_name
-from sst.live.voice import DANNY
+from sst.live.voice import LOCAL as LOCAL_VOICE
 from sst.pipeline.contracts import VoiceConfig
 from sst.pipeline.dictionary import speech_hints
 from sst.pipeline.formatting import Formatter
@@ -135,6 +135,7 @@ from sst.ui import (
     set_tone,
     setting_row,
 )
+from sst.wakeui import WakeState
 
 APP_NAME = "Rflow"
 ICON_FILE = Path(__file__).parent / "static" / "sst.ico"
@@ -2566,10 +2567,11 @@ class _InUseCard:
 
 
 # How Rflow hears you, in two groups; the cloud group's tiles, in this order: a cloud speech model (its SPEECH_MODELS
-# key), its name on the tile, and the icon that stands in for its logo until there is one.
+# key), its name on the tile, and the icon that stands in for its logo until there is one. Only the providers offered
+# (sst.gateway.OFFERED): Gemini and your own server for now.
 SPEECH_GROUPS = [("local", "On this PC"), ("cloud", "Cloud")]
-CLOUD_TILES = [("openai", "OpenAI", "cloud"), ("groq", "Groq", "cloud"), ("gemini", "Gemini", "cloud"),
-               ("server", "Your own server", "models")]
+CLOUD_TILES = [tile for tile in [("openai", "OpenAI", "cloud"), ("groq", "Groq", "cloud"), ("gemini", "Gemini", "cloud"),
+                                 ("server", "Your own server", "models")] if offered(tile[0])]
 
 
 class _CloudTile(Card):
@@ -2638,8 +2640,9 @@ def _show_only(stack: QStackedWidget, index: int) -> None:
 
 class SpeechPage(Page):
     """Which model turns the voice into text, a building block of its own, chosen apart from the AI connection. Two
-    groups: On this PC (Parakeet and Whisper, with their download, size and Scan this PC), and Cloud: four tiles (OpenAI,
-    Groq, Gemini, your own server), each opening its key, its model, a Test and Use."""
+    groups: On this PC (Parakeet and Whisper, with their download, size and Scan this PC), and Cloud: a tile for each
+    provider offered and your own server (CLOUD_TILES: Gemini and your own server for now), each opening its key, its
+    model, a Test and Use."""
 
     def __init__(self, app, go_to=None):
         go_to = go_to or (lambda page: None)
@@ -2661,7 +2664,7 @@ class SpeechPage(Page):
         self.groups.addWidget(self._cloud_group())
         self.add(self.groups)
         self.body.addStretch()
-        chosen = SPEECH_MODELS.get(app.settings.speech_model, SPEECH_MODELS[DEFAULT_MODEL])
+        chosen = SPEECH_MODELS.get(setups.chosen_speech(app.settings, app.gateway), SPEECH_MODELS[DEFAULT_MODEL])
         self.show_where("local" if chosen.where == "local" else chosen.key)
 
     def _group(self, words: str) -> tuple[QWidget, QVBoxLayout]:
@@ -2705,7 +2708,7 @@ class SpeechPage(Page):
         return group
 
     def show_where(self, where: str) -> None:
-        """A group ("local", "cloud"), or a cloud tile by its model ("openai", "groq", "gemini", "server")."""
+        """A group ("local", "cloud"), or a cloud tile by its model ("gemini", "server")."""
         group = "local" if where == "local" else "cloud"
         self.where[group].setChecked(True)
         _show_only(self.groups, [key for key, _ in SPEECH_GROUPS].index(group))
@@ -2780,7 +2783,8 @@ class CleanupPage(Page):
         self.form.setVerticalSpacing(12)
         self.provider = fit_to_width(Choice(), 16)
         for provider in PROVIDERS.values():
-            self.provider.addItem(provider.name, provider.key)
+            if offered(provider.key):  # Gemini, Ollama and your own server for now (sst.gateway.OFFERED)
+                self.provider.addItem(provider.name, provider.key)
         self.form.addRow(caption("Provider", "2", wrap=False), self.provider)
         self.gateway_url = QLineEdit()
         field(self.gateway_url)
@@ -2834,17 +2838,21 @@ class CleanupPage(Page):
         # The (address, key, model, backup model) of each provider left on this page, so switching back loses nothing.
         # The others come from app.gateway, where Your API keys and the speech page may also have saved a key.
         self._memory: dict[str, tuple[str, str, str, str]] = {}
-        # Nothing chosen yet: start with the first provider in the list rather than an empty custom server.
-        self._provider = gateway.chosen or next(iter(PROVIDERS))
+        # Nothing chosen yet: start with the first provider in the list rather than an empty custom server. A provider
+        # no longer offered shows as that one too, with no model: its settings stay as saved until Save.
+        if self._moved():
+            log.info("AI cleanup's provider %s is no longer offered: AI connection shows %s", gateway.chosen,
+                     self.provider.itemData(0))
+        self._provider = gateway.chosen if gateway.chosen and not self._moved() else self.provider.itemData(0)
         self.provider.blockSignals(True)
         self.provider.setCurrentIndex(self.provider.findData(self._provider))
         self.provider.blockSignals(False)
         self.cleanup_on.blockSignals(True)
         self.cleanup_on.setChecked(settings.cleanup)
         self.cleanup_on.blockSignals(False)
-        self.gateway_url.setText(gateway.base_url if gateway.chosen else self._fresh(self._provider)[0])
+        self.gateway_url.setText(gateway.base_url if gateway.chosen == self._provider else self._fresh(self._provider)[0])
         self.api_key.show_saved(gateway.key_for(self._provider))
-        for box, value in ((self.model, settings.cleanup_model), (self.fallback, settings.cleanup_fallback)):
+        for box, value in zip((self.model, self.fallback), self._saved_models(), strict=True):
             box.clear()
             if value:
                 box.addItem(value)
@@ -2853,6 +2861,16 @@ class CleanupPage(Page):
         self._show_provider()
         self._saved = self._fields()
         self._show_state()
+
+    def _moved(self) -> bool:
+        """AI cleanup's provider is one Rflow no longer offers (sst.gateway.OFFERED): this page shows the first offered."""
+        chosen = self.app.gateway.chosen
+        return bool(chosen) and not offered(chosen)
+
+    def _saved_models(self) -> tuple[str, str]:
+        """The model and the backup model as saved, as this page shows them (none for a provider no longer offered)."""
+        s = self.app.settings
+        return ("", "") if self._moved() else (s.cleanup_model, s.cleanup_fallback)
 
     def _fresh(self, key: str) -> tuple[str, str, str, str]:
         """A provider's fields before any change here: its saved address and key."""
@@ -2913,7 +2931,7 @@ class CleanupPage(Page):
     def refresh(self) -> None:
         clean = not self.unsaved()
         if clean and (self.app.settings.cleanup != self.cleanup_on.isChecked()
-                      or self.app.settings.cleanup_model != self.model.currentText().strip()):
+                      or self._saved_models()[0] != self.model.currentText().strip()):
             self.discard_changes()  # changed elsewhere (the switch on AI & models, the welcome): show what's saved
             return
         saved = self.app.gateway.key_for(self._provider)
@@ -3001,7 +3019,8 @@ def provider_name(key: str) -> str:
     return PROVIDERS[key].name.split(" (")[0] if key in PROVIDERS else key
 
 
-KEY_PROVIDERS = [key for key, p in PROVIDERS.items() if p.needs_key]  # a key each: OpenAI, Anthropic, Gemini, Groq
+# A key each, for the providers offered (sst.gateway.OFFERED): Gemini for now. Keys saved for the others stay in the file.
+KEY_PROVIDERS = [key for key, p in PROVIDERS.items() if p.needs_key and offered(key)]
 SERVERS = ("vllm", SPEECH_SERVER)  # your own server: AI cleanup's and the speech model's (mostly the same one)
 
 
@@ -3011,7 +3030,7 @@ def _uses(app, name: str) -> list[str]:
     uses = []
     if name == app.gateway.chosen and s.cleanup_model:  # "vllm": AI cleanup's own server
         uses.append("AI cleanup")
-    if s.speech_model == ("server" if name == SPEECH_SERVER else name):
+    if setups.chosen_speech(s, app.gateway) == ("server" if name == SPEECH_SERVER else name):
         uses.append("speech")
     if name == "gemini":
         uses.append("live translation")  # Gemini Live Translate, whenever it's started
@@ -3173,8 +3192,8 @@ class _KeyRow(QWidget):
 
 
 class _KeysCard:
-    """Your API keys, at the top of AI & models: a line for each provider that has a key (OpenAI, Anthropic, Google
-    Gemini, Groq) and for your own server, masked, each with Edit; "Add a key" for the others. Speech, AI cleanup and
+    """Your API keys, at the top of AI & models: a line for each provider offered that has a key (KEY_PROVIDERS: Google
+    Gemini for now) and for your own server, masked, each with Edit; "Add a key" for the others. Speech, AI cleanup and
     live translation all read their keys from here, and saving one never changes which provider or model they use (the
     user testing's M-04: a Gemini key added for live translation switched the cleanup to Gemini, with no model)."""
 
@@ -3296,11 +3315,12 @@ def setup_uses(app, setup: setups.Setup, local: str = "parakeet") -> tuple[str, 
     """What a setup uses, in two short lines: (speech, AI). Custom: what is chosen now."""
     s = app.settings
     if setup.key == "custom":
-        model = s.speech_cloud_models.get(s.speech_model, "") if s.speech_model in CLOUD else s.speech_server_model
+        speech = setups.chosen_speech(s, app.gateway)
+        model = s.speech_cloud_models.get(speech, "") if speech in CLOUD else s.speech_server_model
         chosen = app.gateway.chosen
         ai = (f"{setups.model_name(s.cleanup_model)}, on {provider_name(chosen).removeprefix('Google ')}"
               if s.cleanup and s.cleanup_model and chosen else "No AI cleanup")
-        return _speech_words(s.speech_model, model), ai
+        return _speech_words(speech, model), ai
     if setup.key == "local":
         return "Parakeet or Whisper, on this PC", "AI on this PC: coming soon"
     return (_speech_words(setup.speech, setups.speech_model_for(setup, s.speech_language)),
@@ -3524,16 +3544,18 @@ class _SetupsCard:
     # -- the tiles
 
     def set_columns(self, columns: int) -> None:
-        """Three tiles a row (Custom two wide under them), or two on a narrow page."""
+        """Three tiles a row (Custom across under them), or two on a narrow page."""
         if columns == self.columns:
             return
         self.columns = columns
         for tile in self.tiles.values():
             self.grid.removeWidget(tile)
-        places = {"recommended": (0, 0, 1), "fastest": (0, 1, 1), "multilingual": (0, 2, 1), "local": (1, 0, 1),
-                  "custom": (1, 1, 2)} if columns == 3 else \
-            {"recommended": (0, 0, 1), "fastest": (0, 1, 1), "multilingual": (1, 0, 1), "local": (1, 1, 1),
-             "custom": (2, 0, 2)}
+        # The setups offered in order (setups.ORDER: no Fastest while Groq isn't offered), and Custom after them: the
+        # rest of the last line, or a line of its own
+        keys = [key for key in setups.ORDER if key != "custom"]
+        places = {key: (i // columns, i % columns, 1) for i, key in enumerate(keys)}
+        line, column = divmod(len(keys), columns)
+        places["custom"] = (line, column, columns - column)
         for key, (line, column, span) in places.items():
             self.grid.addWidget(self.tiles[key], line, column, 1, span)
         for column in range(3):
@@ -3627,7 +3649,7 @@ class _SetupsCard:
     def _speech_fact(self, setup: setups.Setup) -> str:
         s = self.app.settings
         if setup.key == "custom":
-            speech = SPEECH_MODELS.get(s.speech_model)
+            speech = SPEECH_MODELS.get(setups.chosen_speech(s, self.app.gateway))
             if speech is None:
                 return "Speech: no model yet."
             if speech.where == "cloud":
@@ -3770,6 +3792,98 @@ def scan_memory(key: str) -> str:
     return f"{MEMORY_GB.get(key, 1.0) + SYSTEM_GB:.1f} GB"
 
 
+# ---------------------------------------------------------------- What Gemini costs (under Your API keys)
+
+def dollars(amount: float) -> str:
+    """$1.24, $13; a little that isn't nothing: "<$0.01"."""
+    return "$0.00" if amount <= 0 else "<$0.01" if amount < 0.005 else costs.money(amount)
+
+
+def nice_day(day: str) -> str:
+    """"2026-10-06" as "6 Oct 2026"."""
+    try:
+        when = date.fromisoformat(day)
+    except ValueError:
+        return day
+    return f"{when.day} {when:%b %Y}"
+
+
+class _CostsCard:
+    """What Gemini costs, an estimate (sst.usage): today and this month in dollars, the month by feature, a link to
+    AI Studio's Billing page (the real figure) and the day the prices were read. Shown once there is a Gemini key or
+    anything counted; refreshed when the page is shown and when a call is counted (MainWindow.usage_changed)."""
+
+    def __init__(self, app):
+        self.app = app
+        self.frame, layout = card(10, (20, 18, 20, 18))
+        self.billing = button("Billing in AI Studio", lambda _=False: open_link(usage.BILLING), link=True, size="sm",
+                              icon="external", icon_after=True)
+        layout.addLayout(row(label("What Gemini costs (estimate)", "heading", wrap=False), self.billing, stretch_at=1))
+        totals = QHBoxLayout()
+        totals.setSpacing(32)
+        self.today, self.month = label("", "hero", wrap=False), label("", "hero", wrap=False)
+        for title, value in (("Today", self.today), ("This month", self.month)):
+            column = QVBoxLayout()
+            column.setSpacing(2)
+            column.addWidget(label(title.upper(), "caps", wrap=False))
+            column.addWidget(value)
+            totals.addLayout(column)
+        totals.addStretch()
+        layout.addLayout(totals)
+        self.free = caption("", "ok")  # a free key: nothing is billed
+        layout.addWidget(self.free)
+        self.table, self.lines = card(0, (14, 6, 14, 6), kind="well")
+        layout.addWidget(self.table)
+        self.empty = caption("Nothing counted this month yet. Each call to Gemini is: speech, AI cleanup, Text Transform, "
+                             "Translate and live translation.", "3")
+        layout.addWidget(self.empty)
+        self.note = caption("", "3")
+        layout.addWidget(self.note)
+
+    def refresh(self) -> None:
+        ledger, key = getattr(self.app, "usage", None), self.app.gateway.key_for("gemini")
+        summary = ledger.summary() if ledger is not None else usage.Summary()
+        shown = bool(key) or summary.used
+        self.frame.setVisible(shown)
+        if not shown:
+            return
+        # TODO(owner): the key's tier can't be read from the key; Settings.gemini_free_tier waits for a way to set it.
+        free = bool(getattr(self.app.settings, "gemini_free_tier", False))
+        self.today.setText("$0.00" if free else dollars(summary.today))
+        self.month.setText("$0.00" if free else dollars(summary.month))
+        self.free.setVisible(free and summary.used)
+        self.free.setText(f"$0 billed: a free key (would cost {dollars(summary.month)} this month).")
+        clear(self.lines)
+        for i, line in enumerate(summary.lines):
+            if i:
+                self.lines.addWidget(divider())
+            self.lines.addWidget(self._line(line))
+        self.table.setVisible(bool(summary.lines))
+        self.empty.setVisible(not summary.lines)
+        note = (f"Estimated from what Rflow sent and got back, at Google's list prices as of {nice_day(costs.SEEN)}. "
+                "Google's Billing page has the real figure.")
+        if summary.unpriced:
+            note += f" {summary.unpriced} call{'s' if summary.unpriced > 1 else ''} to a model Rflow has no price for " \
+                    "aren't in it."
+        self.note.setText(note)
+
+    @staticmethod
+    def _line(line: "usage.Line") -> QWidget:
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 8, 0, 8)
+        layout.setSpacing(12)
+        layout.addWidget(label(line.title, wrap=False), 1)
+        amount = caption(line.amount, "2", wrap=False)
+        layout.addWidget(amount)
+        cost = label(dollars(line.cost), wrap=False)
+        cost.setFont(font(13, 500, mono=True))
+        cost.setMinimumWidth(72)
+        cost.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(cost)
+        return widget
+
+
 # ---------------------------------------------------------------- AI & models (the overview)
 
 PAIR_WIDTH = 760  # a page narrower than this shows How Rflow hears you above the AI connection, not beside it
@@ -3782,8 +3896,8 @@ class ModelsPage(Page):
     def __init__(self, app, go_to):
         super().__init__("AI & models", "How Rflow hears you, the AI that polishes what you say, and the keys they use.")
         self.app, self.go_to = app, go_to
-        # Setups, first on the page: ready-made pairs of a speech model and an AI (Recommended, Fastest, Multilingual,
-        # Local, Custom), with what they cost
+        # Setups, first on the page: ready-made pairs of a speech model and an AI (Recommended, Multilingual, Local,
+        # Custom), with what they cost
         self.setups = QWidget()
         self.setups_layout = QVBoxLayout(self.setups)
         self.setups_layout.setContentsMargins(0, 0, 0, 0)
@@ -3794,6 +3908,8 @@ class ModelsPage(Page):
 
         self.keys = _KeysCard(self, app)
         self.add(self.keys.frame)
+        self.costs = _CostsCard(app)
+        self.add(self.costs.frame)
 
         self.pair = QBoxLayout(QBoxLayout.Direction.LeftToRight)
         self.pair.setSpacing(24)
@@ -3874,7 +3990,7 @@ class ModelsPage(Page):
         for i, (title, words, page) in enumerate([
                 ("Every speech model", "Parakeet and Whisper on this PC, the cloud models, your own server, Scan this PC",
                  "speech"),
-                ("AI provider and backup model", "OpenAI, Anthropic, Gemini, Groq, Ollama or your own server", "cleanup"),
+                ("AI provider and backup model", "Gemini, Ollama on this PC or your own server", "cleanup"),
                 ("Reading test", "Read 30 sentences: how many words does Rflow get wrong?", "reading")]):
             if i:
                 column.addWidget(divider())
@@ -3946,6 +4062,7 @@ class ModelsPage(Page):
         s = app.settings
         self.setup_card.refresh()
         self.keys.refresh()
+        self.costs.refresh()
         model = SPEECH_MODELS.get(app.speech_in_use())
         loading, downloading = app.loading_speech, app.downloading
         fetching = bool(downloading) and downloading[0] == DEFAULT_MODEL and model is None
@@ -4238,7 +4355,7 @@ class LivePage(Page):
         column.addWidget(self.note)
         self.add(self.start_card)
 
-        # Hear it: the translation spoken aloud by a voice on the laptop (sst.live.voice), a row of its own
+        # Hear it: the translation spoken aloud in Gemini's voice, or the laptop's (sst.live.voice), a row of its own
         self.voice_card, column = card(6, (20, 18, 20, 18))
         self.speak = Toggle("Speak the translation")
         self.speak.toggled.connect(self._speak_toggled)
@@ -4258,7 +4375,8 @@ class LivePage(Page):
         speed.setContentsMargins(0, 10, 0, 0)
         speed.setSpacing(0)
         speed.addWidget(divider())
-        line = setting_row("Speed", "It speeds up by itself when it falls behind.", self.speed)[0]
+        line = setting_row("Speed", "Of the voice on this laptop; it speeds up by itself when it falls behind. Gemini's "
+                                    "own voice keeps its pace.", self.speed)[0]
         line.layout().setContentsMargins(0, 14, 0, 0)
         speed.addWidget(line)
         # How loud the other apps stay while it runs: lowered like under an interpreter, the whole time, back when it stops
@@ -4412,18 +4530,22 @@ class LivePage(Page):
             self.duck.setValue(round(s.live_duck * 100))
             self.duck.blockSignals(False)
             self._show_duck(self.duck.value())
+        # Gemini says the translation in its own voice, in any language; the voice on this laptop stands in for it
+        gemini = "Gemini says the translation in its own voice as it's translated."
         if state == "downloading":
-            words = f"Downloading the voice {voice.name}: {percent}%. It starts speaking when it's here."
+            words = (f"Downloading {LOCAL_VOICE.name}, the voice on this laptop: {percent}%. {gemini} {LOCAL_VOICE.name} "
+                     f"stands in when Gemini's voice doesn't come.")
         elif problem:
-            words = f"The voice couldn't be downloaded ({problem}). Switch it on again to try once more."
+            words = (f"The voice on this laptop couldn't be downloaded ({problem}). {gemini} Switch it on again to try "
+                     f"once more.")
         elif not spoken:
-            words = (f"{voice.name} speaks {speaks}: choose {speaks} below to hear the translation. Until then the "
-                     f"translation is only shown.")
+            words = (f"{gemini} {voice.name}, the voice on this laptop, speaks only {speaks}: it stands in when Gemini's "
+                     f"doesn't come only for what's translated into {speaks}.")
         elif state == "missing":
-            words = (f"{voice.name}, an {speaks} voice that runs on this laptop, reads each sentence out as it's "
-                     f"translated. Downloaded the first time ({round(voice.size / 1e6)} MB).")
+            words = (f"{gemini} {voice.name}, an {speaks} voice that runs on this laptop, stands in when Gemini's "
+                     f"doesn't come. Downloaded the first time ({round(voice.size / 1e6)} MB).")
         else:
-            words = f"{voice.name}, an {speaks} voice on this laptop, reads each sentence out as it's translated."
+            words = f"{gemini} {voice.name}, an {speaks} voice on this laptop, stands in when Gemini's doesn't come."
             if source != "computer":
                 words += " Through speakers the microphone pauses while it speaks; headphones keep it listening."
         self.speak_caption.setText(words)
@@ -4909,7 +5031,7 @@ class TransformPage(Page):
                 self.result.show()
                 self._say(f"{TRANSFORMS[key].name} in {result.seconds:.1f} s" +
                           (f" (checked and fixed once: {result.attempts} answers)" if result.attempts > 1 else ""))
-        run_in_background(self, lambda: self.app.run_transform(sample, key), done)
+        run_in_background(self, lambda: usage.within("tests", self.app.run_transform, sample, key), done)
 
 
 # What Translate shows for some selected text (into English, the default): names, numbers and times stay as written.
@@ -5081,7 +5203,8 @@ class TranslatePage(Page):
             self._say(f"{result.target} in {result.seconds:.1f} s" + (": " + "; ".join(result.warnings)
                                                                         if result.warnings else ""))
         second = self._second()
-        run_in_background(self, lambda: self.app.run_translation(sample, s.translate_to, second), done)
+        run_in_background(self, lambda: usage.within("tests", self.app.run_translation, sample, s.translate_to, second),
+                          done)
 
 
 # ---------------------------------------------------------------- Formatting
@@ -5312,6 +5435,184 @@ class ReportPage(Page):
 MIC_READY = [("While Rflow runs", "always"), ("5 minutes after dictating", "warm"), ("Only while dictating", "off")]
 
 
+def parse_end_phrases(value: str) -> list[str]:
+    """The end phrases as typed, separated by commas: trimmed, each once; none typed is the default, "stop it"."""
+    phrases = []
+    for part in value.split(","):
+        phrase = " ".join(part.split())
+        if phrase and phrase.casefold() not in (p.casefold() for p in phrases):
+            phrases.append(phrase)
+    return phrases or ["stop it"]
+
+
+def risky_end_phrases(phrases: list[str]) -> list[str]:
+    """End phrases said in ordinary dictation, which would end it early: "done" fired on 23 of 24 real ones (spike)."""
+    common = {"done", "im done", "finished", "end", "stop", "thats it", "over", "ok", "okay", "thanks", "thank you"}
+    return [p for p in phrases if " ".join(re.sub(r"[^\w\s]", "", p.casefold()).split()) in common]
+
+
+class WakeCard:
+    """Settings' "Start with your voice" (sst.wakeui): the switch; when on, where it listens, the models it needs, the
+    keyword and its 10-try setup, the end phrases, the voice check, and a word on privacy and battery. Its status line
+    is told when the wake word starts, stops or pauses (MainWindow.show_wake): nothing polls."""
+
+    def __init__(self, app):
+        self.app = app
+        s = app.settings
+        self.frame, layout = card(0, (20, 4, 20, 4))
+        self.toggle = Toggle("Start with your voice")
+        self.toggle.setChecked(s.wake_enabled)
+        self.toggle.toggled.connect(self._switched)
+        layout.addWidget(setting_row("Start with your voice", "Say your keyword in any app, speak, then say your end "
+                                     "phrase: the text is typed where the cursor is. Ctrl+Win keeps working.",
+                                     self.toggle)[0])
+        self.details = QWidget()
+        details = QVBoxLayout(self.details)
+        details.setContentsMargins(0, 0, 0, 0)
+        details.setSpacing(0)
+        status = QWidget()
+        status_layout = QHBoxLayout(status)
+        status_layout.setContentsMargins(0, 0, 0, 14)
+        status_layout.setSpacing(8)
+        self.lamp = Lamp("off")
+        self.status = caption("", "2")
+        status_layout.addWidget(self.lamp, 0, Qt.AlignmentFlag.AlignTop)
+        status_layout.addWidget(self.status, 1)
+        details.addWidget(status)
+
+        self.models = QWidget()
+        models = QVBoxLayout(self.models)
+        models.setContentsMargins(0, 0, 0, 0)
+        models.setSpacing(0)
+        models.addWidget(divider())
+        self.progress = WaveProgress(24)
+        self.download = button("Download", lambda _=False: app.download_wake_models(), primary=True, size="sm",
+                               icon="download")
+        self.cancel = button("Cancel", lambda _=False: app.cancel_wake_download(), kind="quiet", size="sm")
+        models_row, _, self.models_caption = setting_row("Voice models", "", self.progress, self.cancel, self.download)
+        models.addWidget(models_row)
+        details.addWidget(self.models)
+
+        details.addWidget(divider())
+        self.setup = button("Set up", lambda _=False: self._set_up(), size="sm")
+        keyword_row, _, self.keyword = setting_row("Keyword", "", self.setup)
+        details.addWidget(keyword_row)
+        details.addWidget(divider())
+        self.phrases = QLineEdit(", ".join(s.wake_end_phrases))
+        self.phrases.setPlaceholderText("stop it")
+        self.phrases.setMinimumWidth(200)
+        self.phrases.editingFinished.connect(self._save_phrases)
+        field(self.phrases)
+        phrases_row, _, self.phrases_caption = setting_row("End phrases", "", self.phrases)
+        details.addWidget(phrases_row)
+        details.addWidget(divider())
+        self.voice = Toggle("Only my voice")
+        self.voice.setChecked(s.wake_voice_check)
+        self.voice.toggled.connect(self._voice_toggled)
+        for words in (self.models_caption, self.keyword, self.phrases_caption):
+            words.show()  # made empty, so hidden: refresh() fills them
+        details.addWidget(setting_row("Only my voice", "It starts only for the voice it learned in the setup, not for a "
+                                      "colleague or a video.", self.voice)[0])
+        details.addWidget(divider())
+        self.bluetooth = Toggle("Listen on my Bluetooth headset")
+        self.bluetooth.setChecked(s.wake_bluetooth)
+        self.bluetooth.toggled.connect(self._bluetooth_toggled)
+        details.addWidget(setting_row("Listen on my Bluetooth headset", "When your headset is the microphone, listen on it "
+                                      "even when you aren't dictating. The headset plays in call quality meanwhile.",
+                                      self.bluetooth)[0])
+        details.addWidget(divider())
+        privacy = caption("Private: Rflow listens for the keyword on this laptop, and nothing is kept or sent before it "
+                          "hears it. The microphone stays on meanwhile (Windows shows its icon), which costs a little "
+                          "battery: about 2% of one core.", "3")
+        privacy.setContentsMargins(0, 12, 0, 14)
+        details.addWidget(privacy)
+        layout.addWidget(self.details)
+        self.refresh()
+
+    def refresh(self) -> None:
+        s, state = self.app.settings, self.app.wake_state()
+        self.toggle.blockSignals(True)
+        self.toggle.setChecked(s.wake_enabled)
+        self.toggle.blockSignals(False)
+        for toggle, on in ((self.voice, s.wake_voice_check), (self.bluetooth, s.wake_bluetooth)):
+            toggle.blockSignals(True)
+            toggle.setChecked(on)
+            toggle.blockSignals(False)
+        self.details.setVisible(s.wake_enabled)
+        if not self.phrases.hasFocus():
+            self.phrases.setText(", ".join(s.wake_end_phrases))
+        risky = risky_end_phrases(s.wake_end_phrases)
+        self.phrases_caption.setText(
+            f"“{risky[0]}” ends a dictation whenever you say the word: choose words you never dictate, like “stop it”."
+            if risky else "Say one to type the text; Rflow waits for a short pause after it. Separate several with "
+                          "commas. Not “done”: it's said too often.")
+        set_tone(self.phrases_caption, "warn" if risky else "2")
+        size = f" ({_size(state.size)})" if state.size else ""
+        self.models.setVisible(state.models != "ready")
+        if state.models == "downloading":
+            self.models_caption.setText(f"Downloading: {state.percent}%")
+            self.progress.set_value(state.percent / 100)
+        elif state.problem:
+            self.models_caption.setText(f"The download didn't finish ({state.problem}). Try again: it goes on from where "
+                                        "it stopped.")
+        else:
+            self.models_caption.setText("The keyword spotter and the voice check run on this laptop: downloaded once"
+                                        f"{size}.")
+        downloading = state.models == "downloading"
+        self.progress.setVisible(downloading)
+        self.cancel.setVisible(downloading)
+        self.download.setVisible(not downloading)
+        self.download.setText(f"Download{size}")
+        if state.keyword:
+            self.keyword.setText(f"“{state.keyword}”  ·  heard {state.heard} of {state.said or state.tries} in the setup")
+        else:
+            self.keyword.setText(f"Not set up yet: say it {state.tries} times, and Rflow learns it and your voice.")
+        self.setup.setText("Set up again" if state.keyword else "Set up")
+        self.setup.setEnabled(state.models == "ready")
+        self.setup.setToolTip("" if state.models == "ready" else "Download the voice models first.")
+        self._show_status(state)
+
+    def show_status(self) -> None:
+        if self.frame.isVisible():
+            self._show_status(self.app.wake_state())
+
+    def _show_status(self, state) -> None:
+        if state.models == "downloading":
+            words, lamp = f"Downloading the voice models: {state.percent}%.", "warn"
+        elif state.note:
+            words, lamp = state.note, "warn"
+        elif state.listening:
+            words, lamp = (f"Listening for “{state.keyword}” on {state.listening}. Say it, speak, then say "
+                           f"“{self.app.settings.wake_end_phrases[0]}”."), "ok"
+            if state.instead:  # dictation's headset isn't kept open: say so, and how to listen there
+                words += (f" Not on {state.instead}: turn on “Listen on my Bluetooth headset” to use it.")
+        else:
+            words, lamp = "Not listening yet.", "off"
+        self.status.setText(words)
+        self.lamp.set_state(lamp)
+
+    def _switched(self, on: bool) -> None:
+        self.app.set_wake_enabled(on)
+        self.refresh()
+
+    def _voice_toggled(self, on: bool) -> None:
+        self.app.apply_settings(dataclasses.replace(self.app.settings, wake_voice_check=on))
+
+    def _bluetooth_toggled(self, on: bool) -> None:
+        self.app.apply_settings(dataclasses.replace(self.app.settings, wake_bluetooth=on))
+
+    def _save_phrases(self) -> None:
+        phrases = parse_end_phrases(self.phrases.text())
+        self.phrases.setText(", ".join(phrases))
+        if phrases != self.app.settings.wake_end_phrases:
+            self.app.apply_settings(dataclasses.replace(self.app.settings, wake_end_phrases=phrases))
+        self.refresh()
+
+    def _set_up(self) -> None:
+        self.app.open_wake_setup(self.frame.window())
+        self.refresh()
+
+
 class SettingsPage(Page):
     def __init__(self, app, go_to=None):
         go_to = go_to or (lambda page: None)
@@ -5348,6 +5649,8 @@ class SettingsPage(Page):
                                 lambda _=False: go_to("reading"))
         layout.addWidget(self.reading)
         self.add(everyday)
+        self.wake = WakeCard(app)  # starting with the voice, next to starting with the keys
+        self.add(self.wake.frame)
 
         privacy, layout = card(0, (20, 4, 20, 4))
         self.save_recordings = Toggle("Keep recordings on this PC")
@@ -5505,6 +5808,7 @@ class SettingsPage(Page):
             box.blockSignals(True)
             box.setChecked(on)
             box.blockSignals(False)
+        self.wake.refresh()
 
     def _apply(self, *_) -> None:
         self._show_keys()
@@ -5513,9 +5817,9 @@ class SettingsPage(Page):
 
 # ---------------------------------------------------------------- the first-run welcome
 
-PROVIDER_TILES = [("gemini", "Gemini", "Free key"), ("groq", "Groq", "Free key, fastest"),
-                  ("openai", "OpenAI", "Pay as you go"), ("anthropic", "Anthropic", "Pay as you go"),
-                  ("ollama", "Ollama", "Runs on this PC")]
+PROVIDER_TILES = [tile for tile in [("gemini", "Gemini", "Free key"), ("groq", "Groq", "Free key, fastest"),
+                                    ("openai", "OpenAI", "Pay as you go"), ("anthropic", "Anthropic", "Pay as you go"),
+                                    ("ollama", "Ollama", "Runs on this PC")] if offered(tile[0])]  # sst.gateway.OFFERED
 # The model the welcome picks for each provider from its own list, as the research notes of 2026-10-06 say (the newest
 # match of the first pattern that finds one): the pinned id first. Groq's llama-3.1-8b-instant was shut down on
 # 2026-08-16; gpt-oss-20b replaces it. OpenAI's "any mini" could pick a pricier or retiring one (o4-mini).
@@ -5627,7 +5931,7 @@ WELCOME_STEPS = {"setup": "Setup", "key": "Key", "check": "This PC", "hear": "He
 
 
 class WelcomePage(QWidget):
-    """The first run. First a setup (sst.setups: Recommended first, Fastest, Multilingual, Local or Custom), then what it
+    """The first run. First a setup (sst.setups: Recommended first, Multilingual, Local or Custom), then what it
     needs: its key (checked with the provider, then saved), or for Local a check that this PC can run the model; then a
     first dictation. Custom keeps the steps of before: how Rflow hears you (Parakeet on this PC, or a cloud model), a
     first dictation, and an optional AI connection (the model is chosen for the user)."""
@@ -5955,11 +6259,11 @@ class WelcomePage(QWidget):
             ("check", "ok", "Works offline, free, no account"),
             ("check", "ok", "Fast here: about 0.4 s a sentence")],
             ("download", f"One download of {_size(parakeet.download.size)}"))
-        self.cloud_option = self._option("cloud", "In the cloud", "Gemini, OpenAI or Groq", "", [
-            ("check", "ok", "99 languages, Tamil and Japanese too"),
+        self.cloud_option = self._option("cloud", "In the cloud", "Google Gemini", "", [
+            ("check", "ok", "Many languages, Tamil and Japanese too"),
             ("check", "ok", "Nothing to download"),
-            ("info", "warn", "Your voice goes to the provider")],
-            ("key", "Needs an API key from the provider"))
+            ("info", "warn", "Your voice goes to Google")],
+            ("key", "Needs a Gemini API key"))
         for option, key in ((self.local_option, "local"), (self.cloud_option, "cloud")):
             option.clicked.connect(lambda k=key: self._choose(k))
             option.setFixedWidth(340)
@@ -6794,6 +7098,11 @@ class MainWindow(QWidget):
         elif current == "welcome":
             self.pages[current].refresh(self.ready)
 
+    def usage_changed(self) -> None:
+        """A Gemini call was counted: AI & models' cost card, if it is on screen (it refreshes itself when shown)."""
+        if "models" in self.pages.built and self.current_page() == "models":
+            self.pages["models"].costs.refresh()
+
     def set_status(self, message: str, ready: bool) -> None:
         self.ready, self.status_message = ready, message
         if "home" in self.pages.built:
@@ -6839,6 +7148,11 @@ class MainWindow(QWidget):
             self.update_link.setVisible(not self.compact)  # the rail has no room for it: the banner says it
             self._fit_sidebar()
 
+    def show_wake(self) -> None:
+        """The wake word's status changed (TrayApp._on_wake_changed): its card says so, if it's built."""
+        if "settings" in self.pages.built:
+            self.pages["settings"].wake.show_status()
+
     def set_update_status(self, message: str) -> None:
         self._update_status = message
         if "settings" in self.pages.built:
@@ -6872,6 +7186,7 @@ class PreviewApp:
         self.last_scan: dict | None = None
         self.calls: list[tuple] = []  # what the window asked for
         self._dictionary = None
+        self.usage = usage.Ledger(None)  # in memory: what Gemini cost, for screenshots and tests
 
     def hotkey_label(self) -> str:
         return parse_hotkey(self.settings.hotkey).label
@@ -7072,7 +7387,7 @@ class PreviewApp:
     _voice_state: tuple = ("missing", 0, "")  # the voice isn't downloaded in the preview
 
     def live_voice(self):
-        return DANNY
+        return LOCAL_VOICE
 
     def live_voice_state(self) -> tuple:
         return self._voice_state
@@ -7088,6 +7403,24 @@ class PreviewApp:
     def set_live_duck(self, depth: float) -> None:
         self.calls.append(("set_live_duck", depth))
         self.apply_settings(dataclasses.replace(self.settings, live_duck=depth))
+
+    _wake: WakeState | None = None  # the wake word as the card shows it, for screenshots and tests
+
+    def wake_state(self) -> WakeState:
+        return self._wake or WakeState(size=57_900_000)
+
+    def set_wake_enabled(self, on: bool) -> None:
+        self.calls.append(("set_wake_enabled", on))
+        self.apply_settings(dataclasses.replace(self.settings, wake_enabled=on))
+
+    def download_wake_models(self) -> None:
+        self.calls.append(("download_wake_models",))
+
+    def cancel_wake_download(self) -> None:
+        self.calls.append(("cancel_wake_download",))
+
+    def open_wake_setup(self, parent=None) -> None:
+        self.calls.append(("open_wake_setup",))  # the dialog itself is tested on its own (tests/test_wakeui.py)
 
     def run_translation(self, text: str, target: str, second: str = ""):
         from sst.translate import Translation

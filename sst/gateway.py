@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from sst import modelrules, netconnect
+from sst import modelrules, netconnect, usage
 from sst.settings import CONFIG_DIR
 
 GATEWAY_FILE = CONFIG_DIR / "gateway.json"  # the API keys, encrypted for the Windows user; never in git
@@ -96,6 +96,16 @@ PROVIDERS = {p.key: p for p in [
     Provider("vllm", "vLLM or another OpenAI-compatible server", needs_key=False, own_server=True,
              hint="choose after Load models"),
 ]}
+# The providers Rflow offers (the owner's decision of 2026-10-23): Google Gemini, Ollama on this PC and the user's own
+# server. OpenAI, Anthropic and Groq stay in PROVIDERS (and their speech models in sst.engines) for a later phase, but
+# the window, the setups and the welcome show only these: adding a key here brings a provider back everywhere.
+OFFERED = ("gemini", "ollama", "vllm")
+
+
+def offered(key: str) -> bool:
+    """Whether the window may offer a provider, or a speech model by its SPEECH_MODELS key (Parakeet, Whisper and the
+    user's own server always: they aren't a provider's)."""
+    return key not in PROVIDERS or key in OFFERED
 
 
 def provider_for(url: str) -> str:
@@ -283,9 +293,10 @@ class Polisher:
 
     def routes(self) -> list[tuple["Polisher", str]]:
         """The models to ask, in order: the chosen one; the backup model, never the chosen one again; and, when a cloud
-        provider is chosen and the user has a key for another one, that provider's model from the ready-made setups
-        (sst.setups), so no credit or a used-up quota at one provider doesn't stop the cleanup. Without such a key,
-        nothing else is asked."""
+        provider is chosen and the user has a key for another offered one (OFFERED), that provider's model from the
+        ready-made setups (sst.setups), so no credit or a used-up quota at one provider doesn't stop the cleanup. While
+        Gemini is the only cloud provider offered, that is only for a profile still on a provider no longer offered.
+        Without such a key, nothing else is asked."""
         routes = [(self, self.model)]
         if self.fallback and self.fallback != self.model:
             routes.append((self, self.fallback))
@@ -376,7 +387,8 @@ class Polisher:
         """For the Settings "Test" button: clean one short sentence with the chosen model. Raises with a readable reason."""
         t0 = time.perf_counter()
         try:
-            answer = self._ask(self.model, "so this is a quick test of the dictation clean up")
+            with usage.feature("tests"):
+                answer = self._ask(self.model, "so this is a quick test of the dictation clean up")
         except TimeoutError:
             raise GatewayError("no answer in time") from None
         except (OSError, http.client.HTTPException) as e:
@@ -415,6 +427,8 @@ class Polisher:
                     "messages": [{"role": "user", "content": text}]}
             if modelrules.claude_takes_temperature(model):
                 body["temperature"] = 0
+            elif modelrules.claude_thinking_off(model):  # Haiku 5.5: no thinking, so no room for it
+                body["thinking"] = {"type": "disabled"}
             else:  # Claude 4.7 and later refuse it; room in case the model thinks first
                 body["max_tokens"] += THINKING_ROOM
             return "/messages", body
@@ -453,14 +467,17 @@ class Polisher:
     def _ask(self, model: str, text: str, timeout: float | None = None, limit: int | None = None) -> str:
         words = len(text.split())
         path, body = self._body(model, text, limit or ANSWER_TOKENS + ANSWER_TOKENS_PER_WORD * words)
+        sent = json.dumps(body)
         with self._lock:
-            status, data, headers = self._request(path, json.dumps(body), timeout or ANSWER_TIMEOUT + ANSWER_PER_WORD * words)
+            status, data, headers = self._request(path, sent, timeout or ANSWER_TIMEOUT + ANSWER_PER_WORD * words)
         try:
             answer = json.loads(data)
         except ValueError:
             answer = None
         if status == 200:
             netconnect.forgive(self._where, self.config.api_key, model)
+            if self.config.service.key == "gemini":  # the cost tracker (sst.usage): an answer cut short is billed too
+                usage.record("cleanup", model, **usage.chat_counts(answer, sent, _written(answer)))
         elif isinstance(answer, list) and answer and isinstance(answer[0], dict):
             answer = answer[0]  # an error wrapped in a list (Gemini's OpenAI-compatible endpoint)
         if status != 200 and (found := netconnect.refusal(status, data, headers)):
@@ -565,6 +582,14 @@ class Polisher:
 
 def _short(model: str) -> str:
     return model.rsplit("/", 1)[-1]
+
+
+def _written(answer) -> str:
+    """The text of an OpenAI-compatible answer, whatever its shape ("" when it has none)."""
+    try:
+        return str(answer["choices"][0]["message"]["content"] or "")
+    except (KeyError, IndexError, TypeError):
+        return ""
 
 
 def _detail(answer, data: str) -> str:
