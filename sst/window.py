@@ -79,7 +79,7 @@ from sst.commands import DEFAULT_PHRASES, UNDO, normalize, parse_phrases, phrase
 from sst.engines import DEFAULT_MODEL, SPEECH_MODELS, usable
 from sst.engines.cloud import CLOUD, SPEECH
 from sst.engines.whisper import LANGUAGES
-from sst.gateway import PROVIDERS, SPEECH_SERVER, GatewayConfig, Polisher
+from sst.gateway import PROVIDERS, SPEECH_SERVER, GatewayConfig, Polisher, offered
 from sst.hotkey import parse_hotkey
 from sst.live.contracts import LANGUAGES as LIVE_LANGUAGES
 from sst.live.contracts import LiveConfig, language_name
@@ -2567,10 +2567,11 @@ class _InUseCard:
 
 
 # How Rflow hears you, in two groups; the cloud group's tiles, in this order: a cloud speech model (its SPEECH_MODELS
-# key), its name on the tile, and the icon that stands in for its logo until there is one.
+# key), its name on the tile, and the icon that stands in for its logo until there is one. Only the providers offered
+# (sst.gateway.OFFERED): Gemini and your own server for now.
 SPEECH_GROUPS = [("local", "On this PC"), ("cloud", "Cloud")]
-CLOUD_TILES = [("openai", "OpenAI", "cloud"), ("groq", "Groq", "cloud"), ("gemini", "Gemini", "cloud"),
-               ("server", "Your own server", "models")]
+CLOUD_TILES = [tile for tile in [("openai", "OpenAI", "cloud"), ("groq", "Groq", "cloud"), ("gemini", "Gemini", "cloud"),
+                                 ("server", "Your own server", "models")] if offered(tile[0])]
 
 
 class _CloudTile(Card):
@@ -2639,8 +2640,9 @@ def _show_only(stack: QStackedWidget, index: int) -> None:
 
 class SpeechPage(Page):
     """Which model turns the voice into text, a building block of its own, chosen apart from the AI connection. Two
-    groups: On this PC (Parakeet and Whisper, with their download, size and Scan this PC), and Cloud: four tiles (OpenAI,
-    Groq, Gemini, your own server), each opening its key, its model, a Test and Use."""
+    groups: On this PC (Parakeet and Whisper, with their download, size and Scan this PC), and Cloud: a tile for each
+    provider offered and your own server (CLOUD_TILES: Gemini and your own server for now), each opening its key, its
+    model, a Test and Use."""
 
     def __init__(self, app, go_to=None):
         go_to = go_to or (lambda page: None)
@@ -2662,7 +2664,7 @@ class SpeechPage(Page):
         self.groups.addWidget(self._cloud_group())
         self.add(self.groups)
         self.body.addStretch()
-        chosen = SPEECH_MODELS.get(app.settings.speech_model, SPEECH_MODELS[DEFAULT_MODEL])
+        chosen = SPEECH_MODELS.get(setups.chosen_speech(app.settings, app.gateway), SPEECH_MODELS[DEFAULT_MODEL])
         self.show_where("local" if chosen.where == "local" else chosen.key)
 
     def _group(self, words: str) -> tuple[QWidget, QVBoxLayout]:
@@ -2706,7 +2708,7 @@ class SpeechPage(Page):
         return group
 
     def show_where(self, where: str) -> None:
-        """A group ("local", "cloud"), or a cloud tile by its model ("openai", "groq", "gemini", "server")."""
+        """A group ("local", "cloud"), or a cloud tile by its model ("gemini", "server")."""
         group = "local" if where == "local" else "cloud"
         self.where[group].setChecked(True)
         _show_only(self.groups, [key for key, _ in SPEECH_GROUPS].index(group))
@@ -2781,7 +2783,8 @@ class CleanupPage(Page):
         self.form.setVerticalSpacing(12)
         self.provider = fit_to_width(Choice(), 16)
         for provider in PROVIDERS.values():
-            self.provider.addItem(provider.name, provider.key)
+            if offered(provider.key):  # Gemini, Ollama and your own server for now (sst.gateway.OFFERED)
+                self.provider.addItem(provider.name, provider.key)
         self.form.addRow(caption("Provider", "2", wrap=False), self.provider)
         self.gateway_url = QLineEdit()
         field(self.gateway_url)
@@ -2835,17 +2838,21 @@ class CleanupPage(Page):
         # The (address, key, model, backup model) of each provider left on this page, so switching back loses nothing.
         # The others come from app.gateway, where Your API keys and the speech page may also have saved a key.
         self._memory: dict[str, tuple[str, str, str, str]] = {}
-        # Nothing chosen yet: start with the first provider in the list rather than an empty custom server.
-        self._provider = gateway.chosen or next(iter(PROVIDERS))
+        # Nothing chosen yet: start with the first provider in the list rather than an empty custom server. A provider
+        # no longer offered shows as that one too, with no model: its settings stay as saved until Save.
+        if self._moved():
+            log.info("AI cleanup's provider %s is no longer offered: AI connection shows %s", gateway.chosen,
+                     self.provider.itemData(0))
+        self._provider = gateway.chosen if gateway.chosen and not self._moved() else self.provider.itemData(0)
         self.provider.blockSignals(True)
         self.provider.setCurrentIndex(self.provider.findData(self._provider))
         self.provider.blockSignals(False)
         self.cleanup_on.blockSignals(True)
         self.cleanup_on.setChecked(settings.cleanup)
         self.cleanup_on.blockSignals(False)
-        self.gateway_url.setText(gateway.base_url if gateway.chosen else self._fresh(self._provider)[0])
+        self.gateway_url.setText(gateway.base_url if gateway.chosen == self._provider else self._fresh(self._provider)[0])
         self.api_key.show_saved(gateway.key_for(self._provider))
-        for box, value in ((self.model, settings.cleanup_model), (self.fallback, settings.cleanup_fallback)):
+        for box, value in zip((self.model, self.fallback), self._saved_models(), strict=True):
             box.clear()
             if value:
                 box.addItem(value)
@@ -2854,6 +2861,16 @@ class CleanupPage(Page):
         self._show_provider()
         self._saved = self._fields()
         self._show_state()
+
+    def _moved(self) -> bool:
+        """AI cleanup's provider is one Rflow no longer offers (sst.gateway.OFFERED): this page shows the first offered."""
+        chosen = self.app.gateway.chosen
+        return bool(chosen) and not offered(chosen)
+
+    def _saved_models(self) -> tuple[str, str]:
+        """The model and the backup model as saved, as this page shows them (none for a provider no longer offered)."""
+        s = self.app.settings
+        return ("", "") if self._moved() else (s.cleanup_model, s.cleanup_fallback)
 
     def _fresh(self, key: str) -> tuple[str, str, str, str]:
         """A provider's fields before any change here: its saved address and key."""
@@ -2914,7 +2931,7 @@ class CleanupPage(Page):
     def refresh(self) -> None:
         clean = not self.unsaved()
         if clean and (self.app.settings.cleanup != self.cleanup_on.isChecked()
-                      or self.app.settings.cleanup_model != self.model.currentText().strip()):
+                      or self._saved_models()[0] != self.model.currentText().strip()):
             self.discard_changes()  # changed elsewhere (the switch on AI & models, the welcome): show what's saved
             return
         saved = self.app.gateway.key_for(self._provider)
@@ -3002,7 +3019,8 @@ def provider_name(key: str) -> str:
     return PROVIDERS[key].name.split(" (")[0] if key in PROVIDERS else key
 
 
-KEY_PROVIDERS = [key for key, p in PROVIDERS.items() if p.needs_key]  # a key each: OpenAI, Anthropic, Gemini, Groq
+# A key each, for the providers offered (sst.gateway.OFFERED): Gemini for now. Keys saved for the others stay in the file.
+KEY_PROVIDERS = [key for key, p in PROVIDERS.items() if p.needs_key and offered(key)]
 SERVERS = ("vllm", SPEECH_SERVER)  # your own server: AI cleanup's and the speech model's (mostly the same one)
 
 
@@ -3012,7 +3030,7 @@ def _uses(app, name: str) -> list[str]:
     uses = []
     if name == app.gateway.chosen and s.cleanup_model:  # "vllm": AI cleanup's own server
         uses.append("AI cleanup")
-    if s.speech_model == ("server" if name == SPEECH_SERVER else name):
+    if setups.chosen_speech(s, app.gateway) == ("server" if name == SPEECH_SERVER else name):
         uses.append("speech")
     if name == "gemini":
         uses.append("live translation")  # Gemini Live Translate, whenever it's started
@@ -3174,8 +3192,8 @@ class _KeyRow(QWidget):
 
 
 class _KeysCard:
-    """Your API keys, at the top of AI & models: a line for each provider that has a key (OpenAI, Anthropic, Google
-    Gemini, Groq) and for your own server, masked, each with Edit; "Add a key" for the others. Speech, AI cleanup and
+    """Your API keys, at the top of AI & models: a line for each provider offered that has a key (KEY_PROVIDERS: Google
+    Gemini for now) and for your own server, masked, each with Edit; "Add a key" for the others. Speech, AI cleanup and
     live translation all read their keys from here, and saving one never changes which provider or model they use (the
     user testing's M-04: a Gemini key added for live translation switched the cleanup to Gemini, with no model)."""
 
@@ -3297,11 +3315,12 @@ def setup_uses(app, setup: setups.Setup, local: str = "parakeet") -> tuple[str, 
     """What a setup uses, in two short lines: (speech, AI). Custom: what is chosen now."""
     s = app.settings
     if setup.key == "custom":
-        model = s.speech_cloud_models.get(s.speech_model, "") if s.speech_model in CLOUD else s.speech_server_model
+        speech = setups.chosen_speech(s, app.gateway)
+        model = s.speech_cloud_models.get(speech, "") if speech in CLOUD else s.speech_server_model
         chosen = app.gateway.chosen
         ai = (f"{setups.model_name(s.cleanup_model)}, on {provider_name(chosen).removeprefix('Google ')}"
               if s.cleanup and s.cleanup_model and chosen else "No AI cleanup")
-        return _speech_words(s.speech_model, model), ai
+        return _speech_words(speech, model), ai
     if setup.key == "local":
         return "Parakeet or Whisper, on this PC", "AI on this PC: coming soon"
     return (_speech_words(setup.speech, setups.speech_model_for(setup, s.speech_language)),
@@ -3525,16 +3544,18 @@ class _SetupsCard:
     # -- the tiles
 
     def set_columns(self, columns: int) -> None:
-        """Three tiles a row (Custom two wide under them), or two on a narrow page."""
+        """Three tiles a row (Custom across under them), or two on a narrow page."""
         if columns == self.columns:
             return
         self.columns = columns
         for tile in self.tiles.values():
             self.grid.removeWidget(tile)
-        places = {"recommended": (0, 0, 1), "fastest": (0, 1, 1), "multilingual": (0, 2, 1), "local": (1, 0, 1),
-                  "custom": (1, 1, 2)} if columns == 3 else \
-            {"recommended": (0, 0, 1), "fastest": (0, 1, 1), "multilingual": (1, 0, 1), "local": (1, 1, 1),
-             "custom": (2, 0, 2)}
+        # The setups offered in order (setups.ORDER: no Fastest while Groq isn't offered), and Custom after them: the
+        # rest of the last line, or a line of its own
+        keys = [key for key in setups.ORDER if key != "custom"]
+        places = {key: (i // columns, i % columns, 1) for i, key in enumerate(keys)}
+        line, column = divmod(len(keys), columns)
+        places["custom"] = (line, column, columns - column)
         for key, (line, column, span) in places.items():
             self.grid.addWidget(self.tiles[key], line, column, 1, span)
         for column in range(3):
@@ -3628,7 +3649,7 @@ class _SetupsCard:
     def _speech_fact(self, setup: setups.Setup) -> str:
         s = self.app.settings
         if setup.key == "custom":
-            speech = SPEECH_MODELS.get(s.speech_model)
+            speech = SPEECH_MODELS.get(setups.chosen_speech(s, self.app.gateway))
             if speech is None:
                 return "Speech: no model yet."
             if speech.where == "cloud":
@@ -3783,8 +3804,8 @@ class ModelsPage(Page):
     def __init__(self, app, go_to):
         super().__init__("AI & models", "How Rflow hears you, the AI that polishes what you say, and the keys they use.")
         self.app, self.go_to = app, go_to
-        # Setups, first on the page: ready-made pairs of a speech model and an AI (Recommended, Fastest, Multilingual,
-        # Local, Custom), with what they cost
+        # Setups, first on the page: ready-made pairs of a speech model and an AI (Recommended, Multilingual, Local,
+        # Custom), with what they cost
         self.setups = QWidget()
         self.setups_layout = QVBoxLayout(self.setups)
         self.setups_layout.setContentsMargins(0, 0, 0, 0)
@@ -3875,7 +3896,7 @@ class ModelsPage(Page):
         for i, (title, words, page) in enumerate([
                 ("Every speech model", "Parakeet and Whisper on this PC, the cloud models, your own server, Scan this PC",
                  "speech"),
-                ("AI provider and backup model", "OpenAI, Anthropic, Gemini, Groq, Ollama or your own server", "cleanup"),
+                ("AI provider and backup model", "Gemini, Ollama on this PC or your own server", "cleanup"),
                 ("Reading test", "Read 30 sentences: how many words does Rflow get wrong?", "reading")]):
             if i:
                 column.addWidget(divider())
@@ -5700,9 +5721,9 @@ class SettingsPage(Page):
 
 # ---------------------------------------------------------------- the first-run welcome
 
-PROVIDER_TILES = [("gemini", "Gemini", "Free key"), ("groq", "Groq", "Free key, fastest"),
-                  ("openai", "OpenAI", "Pay as you go"), ("anthropic", "Anthropic", "Pay as you go"),
-                  ("ollama", "Ollama", "Runs on this PC")]
+PROVIDER_TILES = [tile for tile in [("gemini", "Gemini", "Free key"), ("groq", "Groq", "Free key, fastest"),
+                                    ("openai", "OpenAI", "Pay as you go"), ("anthropic", "Anthropic", "Pay as you go"),
+                                    ("ollama", "Ollama", "Runs on this PC")] if offered(tile[0])]  # sst.gateway.OFFERED
 # The model the welcome picks for each provider from its own list, as the research notes of 2026-10-06 say (the newest
 # match of the first pattern that finds one): the pinned id first. Groq's llama-3.1-8b-instant was shut down on
 # 2026-08-16; gpt-oss-20b replaces it. OpenAI's "any mini" could pick a pricier or retiring one (o4-mini).
@@ -5814,7 +5835,7 @@ WELCOME_STEPS = {"setup": "Setup", "key": "Key", "check": "This PC", "hear": "He
 
 
 class WelcomePage(QWidget):
-    """The first run. First a setup (sst.setups: Recommended first, Fastest, Multilingual, Local or Custom), then what it
+    """The first run. First a setup (sst.setups: Recommended first, Multilingual, Local or Custom), then what it
     needs: its key (checked with the provider, then saved), or for Local a check that this PC can run the model; then a
     first dictation. Custom keeps the steps of before: how Rflow hears you (Parakeet on this PC, or a cloud model), a
     first dictation, and an optional AI connection (the model is chosen for the user)."""
@@ -6142,11 +6163,11 @@ class WelcomePage(QWidget):
             ("check", "ok", "Works offline, free, no account"),
             ("check", "ok", "Fast here: about 0.4 s a sentence")],
             ("download", f"One download of {_size(parakeet.download.size)}"))
-        self.cloud_option = self._option("cloud", "In the cloud", "Gemini, OpenAI or Groq", "", [
-            ("check", "ok", "99 languages, Tamil and Japanese too"),
+        self.cloud_option = self._option("cloud", "In the cloud", "Google Gemini", "", [
+            ("check", "ok", "Many languages, Tamil and Japanese too"),
             ("check", "ok", "Nothing to download"),
-            ("info", "warn", "Your voice goes to the provider")],
-            ("key", "Needs an API key from the provider"))
+            ("info", "warn", "Your voice goes to Google")],
+            ("key", "Needs a Gemini API key"))
         for option, key in ((self.local_option, "local"), (self.cloud_option, "cloud")):
             option.clicked.connect(lambda k=key: self._choose(k))
             option.setFixedWidth(340)
