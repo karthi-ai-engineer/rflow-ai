@@ -22,6 +22,7 @@ from sst.settings import Settings, Stats  # noqa: E402
 from sst.snippets import load  # noqa: E402
 from sst.transform import TRANSFORMS, TransformGuard  # noqa: E402
 from sst.ui import KeyCap  # noqa: E402
+from sst.wakeui import BLUETOOTH  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -287,6 +288,74 @@ def test_settings_apply_at_once_and_keep_the_rest():
     caps = [cap.key_text for cap in page.hotkey_caps.findChildren(KeyCap) if cap.isVisibleTo(page)]
     assert caps == ["Menu"]  # the key, drawn as a key
     assert (s.vocabulary, s.cleanup, s.cleanup_model, s.welcomed) == (["Tamil"], True, "m", True)  # untouched
+
+
+def test_starting_with_the_voice_is_off_until_switched_on_next_to_the_dictation_key():
+    window, app = _window()
+    card = window.pages["settings"].wake
+    assert not card.toggle.isChecked() and card.details.isHidden()
+    card.toggle.setChecked(True)
+    assert ("set_wake_enabled", True) in app.calls and app.settings.wake_enabled and not card.details.isHidden()
+    assert not card.models.isHidden() and card.download.text() == "Download (58 MB)"  # the models come first
+    assert not card.setup.isEnabled() and card.setup.text() == "Set up" and "Not set up yet" in card.keyword.text()
+    card.download.click()
+    assert ("download_wake_models",) in app.calls
+    app._wake = w.WakeState(models="downloading", percent=40, size=57_900_000)
+    card.refresh()
+    assert card.download.isHidden() and not card.cancel.isHidden() and "40%" in card.models_caption.text()
+    assert card.lamp.state == "warn" and "40%" in card.status.text()
+
+
+def test_the_wake_card_says_where_it_listens_and_sets_the_keyword_up_again():
+    window, app = _window(settings=Settings(welcomed=True, wake_enabled=True))
+    app._wake = w.WakeState(keyword="okay type", heard=9, models="ready", listening="Microphone (Realtek)")
+    card = window.pages["settings"].wake
+    card.refresh()
+    assert card.models.isHidden() and card.lamp.state == "ok"
+    assert card.status.text().startswith("Listening for “okay type” on Microphone (Realtek)")
+    assert card.keyword.text() == "“okay type”  ·  heard 9 of 10 in the setup" and card.setup.text() == "Set up again"
+    card.setup.click()
+    assert ("open_wake_setup",) in app.calls
+    app._wake = w.WakeState(keyword="okay type", heard=9, models="ready", note=BLUETOOTH)
+    card.refresh()
+    assert card.lamp.state == "warn" and card.status.text() == BLUETOOTH  # why it doesn't listen
+
+
+def test_the_wake_card_says_which_microphone_and_lets_it_listen_on_the_headset():
+    window, app = _window(settings=Settings(welcomed=True, wake_enabled=True))
+    headset = "Headset (OnePlus Nord Buds 3r)"
+    app._wake = w.WakeState(keyword="karthi", heard=10, said=13, models="ready", listening="Microphone (Realtek)",
+                            instead=headset)
+    card = window.pages["settings"].wake
+    card.refresh()
+    assert card.keyword.text() == "“karthi”  ·  heard 10 of 13 in the setup"  # the takes said again count too
+    assert card.status.text().startswith("Listening for “karthi” on Microphone (Realtek).")
+    assert f"Not on {headset}: turn on “Listen on my Bluetooth headset”" in card.status.text()
+    assert not card.bluetooth.isChecked()
+    card.bluetooth.setChecked(True)
+    assert app.settings.wake_bluetooth
+    app._wake = w.WakeState(keyword="karthi", heard=10, said=13, models="ready", listening=headset)
+    card.refresh()
+    assert card.status.text().startswith(f"Listening for “karthi” on {headset}.") and "Not on" not in card.status.text()
+    assert card.bluetooth.isChecked()
+
+
+def test_end_phrases_are_saved_as_typed_and_done_is_warned_against():
+    window, app = _window(settings=Settings(welcomed=True, wake_enabled=True))
+    card = window.pages["settings"].wake
+    assert card.phrases.text() == "stop it" and "Not “done”" in card.phrases_caption.text()
+    card.phrases.setText(" stop it ,End it, stop it,")
+    card.phrases.editingFinished.emit()
+    assert app.settings.wake_end_phrases == ["stop it", "End it"] and card.phrases.text() == "stop it, End it"
+    card.phrases.setText("stop it, Done.")
+    card.phrases.editingFinished.emit()
+    assert app.settings.wake_end_phrases == ["stop it", "Done."]
+    assert card.phrases_caption.text().startswith("“Done.” ends a dictation whenever you say the word")
+    card.phrases.setText("")
+    card.phrases.editingFinished.emit()
+    assert app.settings.wake_end_phrases == ["stop it"]  # there's always one
+    card.voice.setChecked(False)
+    assert not app.settings.wake_voice_check
 
 
 def test_the_microphone_is_chosen_on_ai_and_models():

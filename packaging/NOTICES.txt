@@ -37,6 +37,15 @@ Gemini, the translation is spoken in Gemini's own voice and this one stands in w
   espeak-ng data, the 6 files English needs (from k2-fsa's sherpa-onnx copy of Danny), GNU GPL v3:
   https://github.com/espeak-ng/espeak-ng  (read by sherpa-onnx's espeak-ng code, below, to turn words into phonemes).
 
+Wake word models (not included: downloaded from their makers only when the user turns the wake word on)
+  Keyword spotter sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01 (k2-fsa, trained with icefall on GigaSpeech),
+  released under the Apache License 2.0: https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models
+  Rflow downloads that release's archive and keeps five of its files, unchanged (checked byte for byte).
+  NVIDIA TitaNet-small speaker model (titanet_small; sherpa-onnx's ONNX export nemo_en_titanet_small.onnx, from
+  https://huggingface.co/csukuangfj/speaker-embedding-models). Its model card puts it under the license of the
+  NVIDIA NeMo toolkit, the Apache License 2.0: https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/titanet_small
+  https://github.com/NVIDIA/NeMo/blob/main/LICENSE
+
 Fonts
 -----
 Geist and Geist Mono  SIL Open Font License 1.1   https://github.com/vercel/geist-font
