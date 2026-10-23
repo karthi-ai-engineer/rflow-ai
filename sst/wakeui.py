@@ -3,9 +3,12 @@ this is where its microphone, its thread, its turns and its 10-try setup meet th
 
 While it's on and set up, every block the always-on microphone delivers goes to a WakeListener: Recorder.tap hands it
 on, and a thread of its own (WakeFeeder, never the UI thread) brings it to 16 kHz, cuts 100 ms frames and feeds them.
-A Bluetooth headset's microphone is never kept open (it would drop the headset to call quality): with one chosen,
-another microphone that isn't one listens (the built-in one), and the turn records there too, so the moment before the
-keyword is heard is kept; with none, the wake word doesn't listen and the Settings card says why. Listening pauses
+It listens on dictation's microphone. A Bluetooth headset's is kept open only when the user lets it ("Listen on my
+Bluetooth headset": the headset plays in call quality while it listens; dictation's always-on microphone never keeps
+one open either, sst.audio.Recorder). Otherwise, with a headset chosen, another microphone that isn't one listens (the
+built-in one), and the turn records there too, so the moment before the keyword is heard is kept; with none, the wake
+word doesn't listen and the Settings card says why. The setup records on the microphone the wake word listens on, and
+both say which one it is. Listening pauses
 while live translation uses the microphone, while a dictation started with the keys or Text Transform runs, and while
 the setup's tries are recorded.
 
@@ -50,7 +53,7 @@ QUEUE_BLOCKS = 1000  # ~50 s of the microphone's 50 ms blocks; more means the li
 CHECK_EVERY = 3.0  # seconds between looks at whether the microphone listened to is still open and still the right one
 SUGGESTIONS = ("okay type", "computer")  # heard best in the spike (94.5% and 90.9%); "Rflow" alone 74.5%
 BLUETOOTH = ("Your Bluetooth headset's microphone is chosen, and keeping it on would drop the headset to call quality. "
-             "Rflow listens on another microphone when there is one: connect one, or choose another in AI & models.")
+             "Turn on “Listen on my Bluetooth headset” below, connect another microphone, or choose one in AI & models.")
 
 log = logging.getLogger(__name__)
 
@@ -82,13 +85,15 @@ def keyword_trim(setup, end_phrases) -> Callable[[str], str]:
 class WakeState:
     """What the Settings card shows (TrayApp.wake_state; PreviewApp makes its own)."""
     keyword: str = ""  # the keyword set up ("" before the setup)
-    heard: int = 0  # how many of the setup's tries were heard
+    heard: int = 0  # how many of the setup's takes were heard
+    said: int = 0  # how many takes were said in the setup (0: not known, set up when every take was a try)
     tries: int = 10
     models: str = "missing"  # ready, missing or downloading
     percent: int = 0  # downloaded so far, while downloading
     size: int = 0  # bytes still to download
     problem: str = ""  # why the last download failed
     listening: str = ""  # the microphone listened to now ("" when it isn't listening)
+    instead: str = ""  # dictation's Bluetooth headset, when another microphone listens instead
     note: str = ""  # why it isn't listening or is paused ("" when it listens, or is off)
 
 
@@ -217,6 +222,7 @@ class WakeController(QObject):
         self.recorder: Recorder | None = None  # the microphone listened to: dictation's own, or one of its own
         self.shared = True  # listening on dictation's microphone (else a wired one, a Bluetooth headset being chosen)
         self.microphone = ""  # the name of the microphone listened to, for the card
+        self.instead = ""  # the Bluetooth headset dictation uses, when another microphone listens instead
         self.problem = ""  # why it doesn't listen
         self.note = ""  # why it's paused now
         self.active = False  # a turn is being recorded
@@ -260,12 +266,16 @@ class WakeController(QObject):
 
     def choose_microphone(self) -> tuple[bool, str | None, str, str]:
         """Where the wake word listens: (on dictation's own microphone, the device to open (None: Windows' default),
-        its name, why it can't listen). A Bluetooth headset's microphone is never kept open: another one that isn't
-        one listens instead (Windows' default first), and with none, nothing does."""
-        chosen = self.app.settings.microphone
+        its name, why it can't listen). Dictation's own, a Bluetooth headset's too when the user lets it listen there;
+        else another one that isn't a headset's (Windows' default first), and with none, nothing. `instead` is then the
+        headset's name, for the card."""
+        s = self.app.settings
+        chosen = s.microphone
         default = self._default()
-        if not self._call_quality(chosen or None):
+        self.instead = ""
+        if s.wake_bluetooth or not self._call_quality(chosen or None):
             return True, chosen or None, chosen or default, ""
+        self.instead = chosen or default
         others = [name for name in self._microphones() if name != chosen and not self._call_quality(name)]
         pick = default if default in others else others[0] if others else ""
         if not pick:
@@ -356,7 +366,7 @@ class WakeController(QObject):
         self.background(lambda: wake_api().WakeListener(setup, phrases, voice_check=voice_check), done)
 
     def _changed(self) -> None:
-        shown = (self.listening, self.microphone, self.problem, self.note)
+        shown = (self.listening, self.microphone, self.instead, self.problem, self.note)
         if shown != self._shown:
             self._shown = shown
             if self.on_change is not None:
@@ -368,6 +378,7 @@ class WakeController(QObject):
         r.warm_seconds = math.inf
         r.preroll_seconds = max(r.preroll_seconds, PREROLL)
         r.tap = self.feeder.put
+        r.keep_call_quality = self.shared and self.app.settings.wake_bluetooth  # the headset, as the user chose
         r.keep_open()
 
     def _stop_listening(self) -> None:
@@ -378,6 +389,7 @@ class WakeController(QObject):
             self._finish("listening stopped")
         if self.recorder is not None:
             self.recorder.tap = None
+            self.recorder.keep_call_quality = False  # dictation's headset goes back to opening only to dictate
             if not self.shared:
                 self.recorder.close()
         if self.feeder is not None:
@@ -553,38 +565,84 @@ def _level(rms: float) -> float:
     return min(1.0, max(0.0, (20 * math.log10(rms + 1e-6) + 55) / 40))
 
 
+class WakeTools:
+    """What the setup borrows for a while, loaded on its threads when first needed and let go of with it: the spotter's
+    model as a recogniser (spellings learned from the tries) and the synthetic voice (the check of a typed keyword).
+    `api` is sst.wake; voice() makes the voice (sst.live.voice.PiperVoice), or None when it isn't downloaded: then the
+    check is skipped."""
+
+    def __init__(self, api, voice: Callable[[], object | None]):
+        self._api, self._voice = api, voice
+        # The tries' transcriptions and the keyword's check each have their own (neither model is used by two threads
+        # at once): a check still running doesn't hold up a try
+        self._lock, self._check_lock = threading.Lock(), threading.Lock()
+        self._transcriber = self._check_transcriber = self._tts = None
+        self._no_voice = False
+
+    def transcribe(self, audio: np.ndarray) -> str:
+        with self._lock:
+            if self._transcriber is None:
+                self._transcriber = self._api.Transcriber()
+            return self._transcriber(audio)
+
+    def hearing(self, keyword: str):
+        """sst.wake.check_hearing(keyword) with the synthetic voice: (Hearing, a phrase to suggest or None); None
+        without the voice."""
+        with self._check_lock:
+            if self._tts is None and not self._no_voice:
+                self._tts = self._voice()
+                self._no_voice = self._tts is None
+            if self._tts is None:
+                return None
+            tts = self._tts
+
+            def say(text: str, speed: float) -> np.ndarray:
+                return resample(np.asarray(tts.synthesize(text, speed), dtype=np.float32), tts.rate)
+            if self._check_transcriber is None:
+                self._check_transcriber = self._api.Transcriber()
+            return self._api.check_hearing(keyword, say, self._api.Spotter, self._check_transcriber)
+
+
 class WakeSetupDialog(QDialog):
     """The keyword typed, then said ten ways, one at a time (sst.wake.Enrollment's prompts), each followed by heard or
-    not heard: a try not heard counts as one of the ten, and that prompt may be tried once more. Saved when heard at
-    least `passes` times; else refused, with advice. The tries are used in memory only: nothing is recorded to disk.
+    not heard. A take not heard isn't a try used up: the same prompt is said again (the owner's wish), and after
+    `misses` in a row the window gives advice and offers another keyword. A take too quiet (under `quiet_db`) isn't
+    counted at all: speak closer, or choose another microphone. Saved when one spelling was heard often enough; else
+    refused, with advice. The takes are used in memory only: nothing is recorded to disk.
 
-    check(text): why the keyword can't be used, or None. enroll(keyword): an Enrollment (built on a thread: the spotter
-    loads its model). new_recorder(): the microphone (the Bluetooth rule applied by the app). save(setup): keep it."""
+    check(text): why the keyword can't be used, or None. hearing(text): whether the spotter hears it at all
+    (WakeTools.hearing: (Hearing, suggestion) or None; None: no check). enroll(keyword): an Enrollment (built on a
+    thread: the spotter loads its model). new_recorder(): the microphone (`microphone`, chosen by the app: where the
+    wake word listens). save(setup): keep it."""
 
-    MAX_SECONDS = 6.0  # a try stops by itself
+    MAX_SECONDS = 6.0  # a take stops by itself
+    CHECK_DELAY = 700  # ms after the typing stops before the keyword is checked with the synthetic voice
 
-    def __init__(self, parent=None, *, microphone: str, problem: str, check, enroll, new_recorder, save,
-                 tries: int = 10, passes: int = 8):
+    def __init__(self, parent=None, *, microphone: str, problem: str, check, enroll, new_recorder, save, hearing=None,
+                 tries: int = 10, passes: int = 8, misses: int = 3, quiet_db: float = -50.0):
         super().__init__(parent)
         self._check, self._enroll, self._new_recorder, self._save = check, enroll, new_recorder, save
-        self.tries, self.passes, self.problem = tries, passes, problem
+        self._hearing = hearing
+        self.tries, self.passes, self.misses, self.quiet_db, self.problem = tries, passes, misses, quiet_db, problem
+        self.microphone = microphone or "Windows' default microphone"
         self.enrollment = None
         self.recorder = None
         self.recording = False
         self.busy = False
-        self.results: list[bool] = []  # each try: heard or not
-        self.prompt = 0  # which of the prompts is said now
-        self.retried = False  # this prompt was tried again already
+        self.results: list[bool] = []  # each take: heard or not
+        self.missed = 0  # takes not heard (or too quiet) in a row on this try
         self.saved = None  # the WakeSetup once saved
+        self.heard_check = None  # the last check with the synthetic voice: (keyword, Hearing, suggestion)
+        self._checking = ""  # the keyword being checked now
         self._closed = False
         theme.load_fonts()
         theme.make_host(self)
         self.setWindowTitle("Rflow: set up your keyword")
         self.setStyleSheet(theme.stylesheet())
         self.setFont(theme.font(14))
-        self.setFixedSize(560, 540)
+        self.setFixedSize(560, 560)
         self.pages = QStackedWidget()
-        self.pages.addWidget(self._keyword_page(microphone))
+        self.pages.addWidget(self._keyword_page())
         self.pages.addWidget(self._tries_page())
         self.pages.addWidget(self._result_page())
         layout = QVBoxLayout(self)
@@ -592,6 +650,7 @@ class WakeSetupDialog(QDialog):
         layout.addWidget(self.pages)
         self._meter = QTimer(self, interval=50, timeout=self._show_level)
         self._limit = QTimer(self, singleShot=True, timeout=self._stop_try)
+        self._hear_later = QTimer(self, singleShot=True, interval=self.CHECK_DELAY, timeout=self._hear)
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, activated=self._space)
         self._keyword_changed()
 
@@ -604,7 +663,7 @@ class WakeSetupDialog(QDialog):
 
     # -- 1: the keyword
 
-    def _keyword_page(self, microphone: str) -> QWidget:
+    def _keyword_page(self) -> QWidget:
         page, layout = card(12, (24, 24, 24, 24))
         layout.addWidget(label("Your keyword", "title"))
         layout.addWidget(label("Say it in any app to start dictating, then say your end phrase to type the text. Choose "
@@ -621,18 +680,21 @@ class WakeSetupDialog(QDialog):
         chips = QHBoxLayout()
         chips.setSpacing(8)
         chips.addWidget(label("Heard well:", "caption", "3", wrap=False))
+        self.suggestion = button("", lambda _=False: self.keyword.setText(self.suggestion.text()), kind="chip", size="sm")
+        self.suggestion.hide()  # the phrase the check suggests, when it suggests one
+        chips.addWidget(self.suggestion)
         for suggestion in SUGGESTIONS:
             chips.addWidget(button(suggestion, lambda _=False, s=suggestion: self.keyword.setText(s), kind="chip",
                                    size="sm"))
         chips.addStretch()
         layout.addLayout(chips)
-        layout.addWidget(label("A short name alone, like “Rflow”, is often missed: in a phrase it's heard better.",
+        layout.addWidget(label("A name is heard best on its own or after “hey” or “hello”; a word after it runs into it.",
                                "caption", "3"))
         layout.addStretch()
         mic = QHBoxLayout()
         mic.setSpacing(8)
         self.mic_lamp = Lamp("warn" if self.problem else "ok")
-        self.mic_words = label(self.problem or f"Microphone: {microphone or 'Windows default'}", "caption", "2")
+        self.mic_words = label(self.problem or f"Listening on {self.microphone}", "caption", "2")
         mic.addWidget(self.mic_lamp, 0, Qt.AlignmentFlag.AlignTop)
         mic.addWidget(self.mic_words, 1)
         layout.addLayout(mic)
@@ -649,9 +711,50 @@ class WakeSetupDialog(QDialog):
     def _keyword_changed(self, *_) -> None:
         text = self.keyword.text().strip()
         why = self._check(text) if text else None
-        self.warning.setText(why or "")
-        self.warning.setVisible(bool(why))
+        heard = self.heard_check if self.heard_check and self.heard_check[0] == text else None
+        if why or not text or self._hearing is None:
+            self._hear_later.stop()
+        elif heard is None:
+            self._hear_later.start()  # once the typing stops
+        if why:
+            words, tone = why, "warn"
+        elif heard is not None and heard[1] is not None and not heard[1].ok:
+            other = heard[2]
+            words, tone = (f"Rflow can't recognise “{text}” reliably. Try a phrase of 2-3 words, like "
+                           + (f"“{other}” or “okay type”." if other and other != "okay type" else "“okay type”.")), "warn"
+        elif text and self._checking == text:
+            words, tone = f"Checking how well Rflow hears “{text}”…", "3"
+        else:
+            words, tone = "", "warn"
+        self.warning.setText(words)
+        set_tone(self.warning, tone)
+        self.warning.setVisible(bool(words))
+        suggested = heard[2] if heard is not None and heard[1] is not None and not heard[1].ok else None
+        self.suggestion.setText(suggested or "")
+        self.suggestion.setVisible(bool(suggested) and suggested not in SUGGESTIONS)
         self.start_button.setEnabled(bool(text) and not why and not self.problem and not self.busy)
+
+    def _hear(self) -> None:
+        """The typed keyword said by the synthetic voice and listened for (a few seconds, on a thread): one at a time;
+        a keyword typed meanwhile is checked when it's done."""
+        text = self.keyword.text().strip()
+        if self._checking or not text or self._check(text) or self._closed:
+            return
+        self._checking = text
+        self._keyword_changed()
+
+        def done(result, error) -> None:
+            self._checking = ""
+            if self._closed:
+                return
+            if error is not None:
+                log.warning("Wake word: the keyword couldn't be checked (%s)", type(error).__name__)
+            self.heard_check = (text, *(result or (None, None)))
+            if result is not None:
+                log.info("Wake word: the keyword typed was heard in %d of %d synthetic takes%s", result[0].heard,
+                         result[0].said, "" if result[0].ok else "; a phrase was suggested")
+            self._keyword_changed()  # and checks the keyword typed meanwhile, if it changed
+        _in_background(self, lambda: self._hearing(text), done)
 
     def _start(self) -> None:
         if not self.start_button.isEnabled():
@@ -659,8 +762,9 @@ class WakeSetupDialog(QDialog):
         keyword = self.keyword.text().strip()
         self.busy = True
         self.start_button.setEnabled(False)
-        self.results, self.prompt, self.retried = [], 0, False
+        self.results, self.missed = [], 0
         self.pages.setCurrentIndex(1)
+        self.change_button.hide()
         self._show_try("Getting ready…", "")
         _in_background(self, lambda: self._enroll(keyword), self._ready)
 
@@ -700,10 +804,20 @@ class WakeSetupDialog(QDialog):
         verdict.addWidget(self.verdict)
         verdict.addStretch()
         layout.addLayout(verdict)
+        self.hint = label("", "caption", "2")
+        self.hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.hint.hide()
+        layout.addWidget(self.hint)
         layout.addStretch()
+        self.try_mic = label(f"Listening on {self.microphone}", "caption", "3")
+        self.try_mic.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.try_mic)
         footer = QHBoxLayout()
         footer.addWidget(button("Cancel", self.reject, kind="quiet"))
         footer.addStretch()
+        self.change_button = button("Change keyword", self._again, kind="quiet")
+        self.change_button.hide()
+        footer.addWidget(self.change_button)
         layout.addLayout(footer)
         return page
 
@@ -716,12 +830,13 @@ class WakeSetupDialog(QDialog):
             self.pages.setCurrentIndex(0)
             self._keyword_changed()
             self.warning.setText(f"The setup couldn't start: {error}")
+            set_tone(self.warning, "warn")
             self.warning.show()
             return
         self.enrollment = enrollment
         try:
             self.recorder = self._new_recorder()
-            self.recorder.warm_seconds = math.inf  # open from now on: a try starts at once, with the moment before it
+            self.recorder.warm_seconds = math.inf  # open from now on: a take starts at once, with the moment before it
             self.recorder.keep_open()
         except Exception as e:
             self._show_try(f"Couldn't open the microphone: {e}", "err")
@@ -729,16 +844,19 @@ class WakeSetupDialog(QDialog):
             return
         self._show_try("", "")
 
+    @property
+    def done_tries(self) -> int:
+        return getattr(self.enrollment, "tries", 0)
+
     def _show_try(self, message: str, tone: str) -> None:
         """The try's page as it is now; `message`: a word under the button (tone ok, err, or "" for a plain one)."""
-        n = len(self.results)
+        n = self.done_tries
         self.counter.setText(f"Try {min(n + 1, self.tries)} of {self.tries}")
-        for dot, heard in zip(self.dots, self.results + [None] * self.tries, strict=False):
-            dot.set_state("off" if heard is None else "ok" if heard else "err")
+        for i, dot in enumerate(self.dots):
+            dot.set_state("ok" if i < n else "err" if i == n and self.missed else "off")
         prompts = self.enrollment.prompts if self.enrollment is not None else []
-        self.prompt_label.setText(prompts[self.prompt] if self.prompt < len(prompts) else "")
-        self.record_button.setText("Stop" if self.recording else "Try again" if tone == "err" and self.retried
-                                   else "Record")
+        self.prompt_label.setText(prompts[n] if n < len(prompts) else "")
+        self.record_button.setText("Stop" if self.recording else "Try again" if self.missed else "Record")
         self.record_button.setEnabled(self.enrollment is not None and not self.busy)
         self.orb.set_state("live" if self.recording else "ai" if self.busy else "ready")
         if not message and not self.recording and self.enrollment is not None:
@@ -785,9 +903,15 @@ class WakeSetupDialog(QDialog):
         if len(sound) < 0.3 * rate:
             self._show_try("Too short: press Record, then say it.", "")
             return
+        sound = resample(sound, rate)  # 16 kHz, as the spotter and the voice print want it
+        level = wake_api().level_db(sound)
+        if level < self.quiet_db:  # the spotter would miss it, and the voice print learn the room: not counted
+            log.info("Wake word setup: a take too quiet (%.0f dBFS) on %s: not counted", level, self.microphone)
+            self.missed += 1
+            self._missed("Too quiet: speak closer or choose another microphone.")
+            return
         self.busy = True
         self._show_try("Checking…", "")
-        sound = resample(sound, rate)  # 16 kHz, as the spotter and the voice print want it
         _in_background(self, lambda: self.enrollment.add(sound), self._added)
 
     def _added(self, heard, error) -> None:
@@ -800,17 +924,27 @@ class WakeSetupDialog(QDialog):
             return
         heard = bool(heard)
         self.results.append(heard)
-        if heard:
-            self.prompt, self.retried, message, tone = self.prompt + 1, False, "Heard", "ok"
-        elif not self.retried:
-            self.retried, message, tone = True, "Not heard: try again", "err"  # the same prompt, once more
-        else:
-            self.prompt, self.retried, message, tone = self.prompt + 1, False, "Not heard again: on to the next", "err"
-        log.info("Wake word setup: try %d %s", len(self.results), "heard" if heard else "not heard")
-        if getattr(self.enrollment, "done", False) or len(self.results) >= self.tries:
+        if getattr(self.enrollment, "done", False):
             self._finish()
             return
-        self._show_try(message, tone)
+        if heard:
+            self.missed = 0
+            self.hint.hide()
+            self.change_button.hide()
+            self._show_try("Heard", "ok")
+            return
+        self.missed += 1
+        self._missed("Not heard: say it again")
+
+    def _missed(self, message: str) -> None:
+        """A take not heard, or too quiet: the same try again; after `misses` in a row, advice and another keyword."""
+        if self.missed >= self.misses:
+            self.hint.setText(f"Not heard {self.missed} times in a row. Speak a little louder or closer to "
+                              f"{self.microphone}, or choose another keyword: a name is heard best on its own or after "
+                              "“hey”.")
+            self.hint.show()
+            self.change_button.show()
+        self._show_try(message, "err")
 
     # -- 3: the result
 
@@ -857,6 +991,7 @@ class WakeSetupDialog(QDialog):
         self.busy = False
         keyword = self.keyword.text().strip()
         heard = getattr(self.enrollment, "heard", sum(self.results))
+        said = getattr(self.enrollment, "said", len(self.results))
         if error is None and setup is not None:
             try:
                 self._save(setup)
@@ -866,10 +1001,10 @@ class WakeSetupDialog(QDialog):
         self.done_button.setEnabled(True)
         self.done_button.setFocus()
         if self.saved is not None:
-            log.info("Wake word set up: heard %d of %d", heard, self.tries)
+            log.info("Wake word set up: heard %d of %d takes", heard, said)
             self.result_orb.set_state("done")
             self.result_title.setText("Saved")
-            self.result_words.setText(f"Rflow heard “{keyword}” {heard} of {self.tries} times.")
+            self.result_words.setText(f"Rflow heard “{keyword}” {heard} of the {said} times you said it.")
             self.result_advice.setText("Say it in any app to start dictating, and your end phrase to type the text.")
             self.done_button.setText("Done")
             return
@@ -882,14 +1017,18 @@ class WakeSetupDialog(QDialog):
             self.result_words.setText(f"The setup couldn't be finished: {error}")
             self.result_advice.setText("Try again in a moment.")
             return
-        log.info("Wake word setup refused: heard %d of %d", heard, self.tries)
+        log.info("Wake word setup refused: one spelling heard in %d of %d takes", heard, said)
         self.result_title.setText("Not saved")
-        self.result_words.setText(f"Rflow heard “{keyword}” only {heard} of {self.tries} times.")
-        self.result_advice.setText(f"It needs to be heard at least {self.passes} times. Try a longer keyword (two or three "
-                                   "syllables, like “okay type”), or a quieter room.")
+        self.result_words.setText(f"Rflow heard “{keyword}” as different words: one of them only {heard} of the "
+                                  f"{said} times.")
+        self.result_advice.setText(f"It needs to hear it the same way at least {self.passes} times. Try a phrase of 2-3 "
+                                   "words, like “okay type”, or a quieter room.")
 
     def _again(self) -> None:
+        self._close_recorder()
         self.enrollment = None
+        self.missed = 0
+        self.hint.hide()
         self.pages.setCurrentIndex(0)
         self.keyword.selectAll()
         self.keyword.setFocus()
@@ -909,5 +1048,6 @@ class WakeSetupDialog(QDialog):
 
     def done(self, result: int) -> None:
         self._closed = True
+        self._hear_later.stop()
         self._close_recorder()
         super().done(result)

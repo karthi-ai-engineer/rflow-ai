@@ -238,11 +238,12 @@ def test_trimming_the_history_leaves_no_half_written_file(tmp_path, monkeypatch)
 
 def test_the_wake_word_is_off_until_chosen_and_ends_with_stop_it(tmp_path):
     s = Settings()
-    assert not s.wake_enabled and s.wake_end_phrases == ["stop it"] and s.wake_voice_check
+    assert not s.wake_enabled and s.wake_end_phrases == ["stop it"] and s.wake_voice_check and not s.wake_bluetooth
     path = tmp_path / "settings.json"
-    Settings(wake_enabled=True, wake_end_phrases=["stop it", "end it"], wake_voice_check=False).save(path)
+    Settings(wake_enabled=True, wake_end_phrases=["stop it", "end it"], wake_voice_check=False, wake_bluetooth=True).save(path)
     loaded = Settings.load(path)
     assert loaded.wake_enabled and loaded.wake_end_phrases == ["stop it", "end it"] and not loaded.wake_voice_check
+    assert loaded.wake_bluetooth
 
 
 def test_the_wake_word_setup_is_kept_in_the_profile_and_goes_with_it(tmp_path, monkeypatch):

@@ -78,7 +78,7 @@ from sst.transform import Transformer
 from sst.transformui import TransformController
 from sst.translate import Translator, system_language
 from sst.translateui import TranslateController
-from sst.wakeui import WakeController, WakeSetupDialog, WakeState, wake_api
+from sst.wakeui import WakeController, WakeSetupDialog, WakeState, WakeTools, wake_api
 from sst.window import APP_NAME, ICON_FILE, LOG_DIR, MainWindow, PreviewApp
 
 if TYPE_CHECKING:
@@ -1120,9 +1120,9 @@ class TrayApp:
         """What Settings' "Start with your voice" card shows."""
         wake = self.wake
         state = WakeState(listening=wake.microphone if wake.listening else "", note=wake.problem or wake.note,
-                          problem=self.wake_problem)
+                          problem=self.wake_problem, instead=wake.instead if wake.listening else "")
         if wake.setup is not None:
-            state.keyword, state.heard = wake.setup.keyword, wake.setup.heard
+            state.keyword, state.heard, state.said = wake.setup.keyword, wake.setup.heard, wake.setup.said
         try:
             api = wake_api()
             missing = [m for m in (api.KWS, api.VOICE) if not m.installed()]
@@ -1199,8 +1199,9 @@ class TrayApp:
             self.window.refresh()
 
     def open_wake_setup(self, parent=None) -> None:
-        """The 10-try setup (a dialog): the keyword typed, then said ten ways; kept when heard often enough. It records
-        on the microphone the wake word listens on (never a Bluetooth headset's), in memory only."""
+        """The 10-try setup (a dialog): the keyword typed (checked with live translation's voice, when it's downloaded),
+        then said ten ways; kept when heard often enough. It records on the microphone the wake word listens on (a
+        Bluetooth headset's only when the user lets it), in memory only."""
         try:
             api = wake_api()
         except Exception as e:
@@ -1211,10 +1212,13 @@ class TrayApp:
         def new_recorder() -> Recorder:
             recorder = Recorder(device)
             recorder.raw = self.settings.raw_audio
+            recorder.keep_call_quality = True  # a headset's only when the wake word listens there: open for the tries
             return recorder
+        tools = WakeTools(api, lambda: PiperVoice(DANNY) if DANNY.ready() else None)  # English, as the spotter
         dialog = WakeSetupDialog(parent, microphone=name, problem=problem, check=api.check_keyword,
-                                 enroll=lambda keyword: api.Enrollment(keyword), new_recorder=new_recorder,
-                                 save=self.save_wake_setup, tries=api.TRIES, passes=api.PASS)
+                                 enroll=lambda keyword: api.Enrollment(keyword, transcribe=tools.transcribe),
+                                 hearing=tools.hearing, new_recorder=new_recorder, save=self.save_wake_setup,
+                                 tries=api.TRIES, passes=api.PASS, misses=api.MISSES, quiet_db=api.QUIET_DB)
         self.wake.setting_up = True  # the tries mustn't start a dictation
         try:
             dialog.exec()

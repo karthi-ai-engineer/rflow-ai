@@ -321,6 +321,25 @@ def test_the_wake_card_says_where_it_listens_and_sets_the_keyword_up_again():
     assert card.lamp.state == "warn" and card.status.text() == BLUETOOTH  # why it doesn't listen
 
 
+def test_the_wake_card_says_which_microphone_and_lets_it_listen_on_the_headset():
+    window, app = _window(settings=Settings(welcomed=True, wake_enabled=True))
+    headset = "Headset (OnePlus Nord Buds 3r)"
+    app._wake = w.WakeState(keyword="karthi", heard=10, said=13, models="ready", listening="Microphone (Realtek)",
+                            instead=headset)
+    card = window.pages["settings"].wake
+    card.refresh()
+    assert card.keyword.text() == "“karthi”  ·  heard 10 of 13 in the setup"  # the takes said again count too
+    assert card.status.text().startswith("Listening for “karthi” on Microphone (Realtek).")
+    assert f"Not on {headset}: turn on “Listen on my Bluetooth headset”" in card.status.text()
+    assert not card.bluetooth.isChecked()
+    card.bluetooth.setChecked(True)
+    assert app.settings.wake_bluetooth
+    app._wake = w.WakeState(keyword="karthi", heard=10, said=13, models="ready", listening=headset)
+    card.refresh()
+    assert card.status.text().startswith(f"Listening for “karthi” on {headset}.") and "Not on" not in card.status.text()
+    assert card.bluetooth.isChecked()
+
+
 def test_end_phrases_are_saved_as_typed_and_done_is_warned_against():
     window, app = _window(settings=Settings(welcomed=True, wake_enabled=True))
     card = window.pages["settings"].wake

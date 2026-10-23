@@ -55,6 +55,9 @@ class Settings:
     wake_enabled: bool = False
     wake_end_phrases: list[str] = field(default_factory=lambda: ["stop it"])  # never "done": said in dictation too often
     wake_voice_check: bool = True  # only the voice the setup learned starts it
+    # Listen on a Bluetooth headset's microphone though it isn't kept open for dictation (always_on_mic off): it drops the
+    # headset to call quality while it listens. With always_on_mic it's open anyway, and the wake word listens there.
+    wake_bluetooth: bool = False
     voice_commands: bool = True  # hold the dictation key and say "make it concise" (sst.commands)
     command_phrases: dict[str, str] = field(default_factory=dict)  # transform -> the user's own phrases ("a, b"); else defaults
     # Snippets (sst.snippets): {"cue": "my email", "text": "xyz@gmail.com", "anywhere": false}, typed when said
