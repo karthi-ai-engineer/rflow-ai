@@ -83,7 +83,7 @@ from sst.gateway import PROVIDERS, SPEECH_SERVER, GatewayConfig, Polisher
 from sst.hotkey import parse_hotkey
 from sst.live.contracts import LANGUAGES as LIVE_LANGUAGES
 from sst.live.contracts import LiveConfig, language_name
-from sst.live.voice import DANNY
+from sst.live.voice import LOCAL as LOCAL_VOICE
 from sst.pipeline.contracts import VoiceConfig
 from sst.pipeline.dictionary import speech_hints
 from sst.pipeline.formatting import Formatter
@@ -4238,7 +4238,7 @@ class LivePage(Page):
         column.addWidget(self.note)
         self.add(self.start_card)
 
-        # Hear it: the translation spoken aloud by a voice on the laptop (sst.live.voice), a row of its own
+        # Hear it: the translation spoken aloud in Gemini's voice, or the laptop's (sst.live.voice), a row of its own
         self.voice_card, column = card(6, (20, 18, 20, 18))
         self.speak = Toggle("Speak the translation")
         self.speak.toggled.connect(self._speak_toggled)
@@ -4258,7 +4258,8 @@ class LivePage(Page):
         speed.setContentsMargins(0, 10, 0, 0)
         speed.setSpacing(0)
         speed.addWidget(divider())
-        line = setting_row("Speed", "It speeds up by itself when it falls behind.", self.speed)[0]
+        line = setting_row("Speed", "Of the voice on this laptop; it speeds up by itself when it falls behind. Gemini's "
+                                    "own voice keeps its pace.", self.speed)[0]
         line.layout().setContentsMargins(0, 14, 0, 0)
         speed.addWidget(line)
         # How loud the other apps stay while it runs: lowered like under an interpreter, the whole time, back when it stops
@@ -4412,18 +4413,22 @@ class LivePage(Page):
             self.duck.setValue(round(s.live_duck * 100))
             self.duck.blockSignals(False)
             self._show_duck(self.duck.value())
+        # Gemini says the translation in its own voice, in any language; the voice on this laptop stands in for it
+        gemini = "Gemini says the translation in its own voice as it's translated."
         if state == "downloading":
-            words = f"Downloading the voice {voice.name}: {percent}%. It starts speaking when it's here."
+            words = (f"Downloading {LOCAL_VOICE.name}, the voice on this laptop: {percent}%. {gemini} {LOCAL_VOICE.name} "
+                     f"stands in when Gemini's voice doesn't come.")
         elif problem:
-            words = f"The voice couldn't be downloaded ({problem}). Switch it on again to try once more."
+            words = (f"The voice on this laptop couldn't be downloaded ({problem}). {gemini} Switch it on again to try "
+                     f"once more.")
         elif not spoken:
-            words = (f"{voice.name} speaks {speaks}: choose {speaks} below to hear the translation. Until then the "
-                     f"translation is only shown.")
+            words = (f"{gemini} {voice.name}, the voice on this laptop, speaks only {speaks}: it stands in when Gemini's "
+                     f"doesn't come only for what's translated into {speaks}.")
         elif state == "missing":
-            words = (f"{voice.name}, an {speaks} voice that runs on this laptop, reads each sentence out as it's "
-                     f"translated. Downloaded the first time ({round(voice.size / 1e6)} MB).")
+            words = (f"{gemini} {voice.name}, an {speaks} voice that runs on this laptop, stands in when Gemini's "
+                     f"doesn't come. Downloaded the first time ({round(voice.size / 1e6)} MB).")
         else:
-            words = f"{voice.name}, an {speaks} voice on this laptop, reads each sentence out as it's translated."
+            words = f"{gemini} {voice.name}, an {speaks} voice on this laptop, stands in when Gemini's doesn't come."
             if source != "computer":
                 words += " Through speakers the microphone pauses while it speaks; headphones keep it listening."
         self.speak_caption.setText(words)
@@ -7072,7 +7077,7 @@ class PreviewApp:
     _voice_state: tuple = ("missing", 0, "")  # the voice isn't downloaded in the preview
 
     def live_voice(self):
-        return DANNY
+        return LOCAL_VOICE
 
     def live_voice_state(self) -> tuple:
         return self._voice_state

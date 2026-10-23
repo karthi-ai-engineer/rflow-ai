@@ -12,6 +12,11 @@ volume the user changes meanwhile keeps the user's. Rflow hears the lowered apps
 its own level (sst.live.level) and Gemini translates speech down to -70 dBFS (measured), so the meeting is still
 translated. Even at 0%: an app at a mixer volume of exactly 0 is silence in the mix Rflow hears, so 0% is INAUDIBLE
 instead (phase 37 measured an app at 0.03% translated in full, and nobody hears it).
+
+And the capture lifts them back (#201): every app is lowered by one factor (its own volume x the level, the level
+never under INAUDIBLE), which the Ducker tells sst.live.wasapi.lowering at each change; Windows applies an app's volume
+before the loopback, exactly, so the computer's capture divides by it (wasapi.Lifter) and the meeting reaches the
+translation at its own level, and the check that finds a call (wasapi._Checked) counts it as before.
 """
 import ctypes
 import json
@@ -26,13 +31,14 @@ from ctypes import POINTER, byref, c_float, c_int, c_void_p, wintypes
 from dataclasses import dataclass
 from pathlib import Path
 
+from sst.live import wasapi
 from sst.live.wasapi import _CLSCTX_ALL, _GUID, E_RENDER, _com, _enumerator, _method, _release
 
 STEP = 0.02  # seconds between steps
 DOWN = 0.15  # seconds from full volume to silence (a smaller step down takes less)
 UP = 0.6  # and back up, when the user raises the level: gently
 RESCAN = 0.5  # seconds between looks for apps that started playing while the others are lowered
-INAUDIBLE = 0.0003  # the lowest mixer volume Rflow sets: 0% for the user, still heard by live translation (see above)
+INAUDIBLE = 0.0003  # the lowest level (x the app's own volume) Rflow sets: 0% for the user, never silence (see above)
 CHANGED = 0.02  # a volume this far from what Rflow set was changed by the user: theirs from now on
 KEEP = 7 * 86_400  # seconds a lowered app that isn't running is remembered, to be put back when it runs again
 RECORD = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "sst" / "lowered-apps.json"
@@ -53,8 +59,10 @@ class Ducker:
     `depth`: how loud the other apps stay, 0.0 to 1.0 (1.0: as they are; 0.0: INAUDIBLE)."""
 
     def __init__(self, depth: float, find: Callable[[bool], list] | None = None, record: Path = RECORD,
-                 clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time,
+                 lowering: wasapi.Lowering | None = None):
         self.depth = _bounded(depth)
+        self.lowering = lowering or wasapi.lowering  # told the factor the apps are at, for the capture to lift them
         self._find = find or apps
         self.record, self._clock, self._wall = record, clock, wall
         self._lowered: dict[str, _Lowered] = {}
@@ -138,8 +146,9 @@ class Ducker:
                          ", ".join(sorted(names)))
 
     def _apply(self) -> None:
+        factor = 1.0 if self._level >= 1.0 else max(self._level, INAUDIBLE)  # the same for every app: lifted back exactly
         for key, item in list(self._lowered.items()):
-            want = item.original if self._level >= 1.0 else max(item.original * self._level, INAUDIBLE)
+            want = item.original * factor
             if want == item.now:  # where it is already: Windows isn't asked again
                 continue
             try:
@@ -151,6 +160,7 @@ class Ducker:
                 item.now = want
             except OSError:  # the app ended
                 self._drop(key)
+        self.lowering.set(factor if self._lowered else 1.0)
 
     def _drop(self, key: str) -> None:
         item = self._lowered.pop(key)

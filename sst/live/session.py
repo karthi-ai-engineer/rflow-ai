@@ -23,9 +23,19 @@ While a way has shown no words, the bar's status line says why (NOTE events), fr
 With Both the microphone says nothing of its own silence: the user listening is silent. note(lane, message) shows
 something a capture found out instead (a device with no sound on it), until words come.
 
-With speaking on, the translation also goes to a Speaker (sst.live.speaker), and a way that could hear the voice gets
-silence while it speaks: the microphone near speakers (not headphones), and what the laptop plays where Windows can't
-leave Rflow's own sound out (before Windows 11). So the spoken translation is never heard and translated again.
+With speaking on, the translation also goes to a Speaker (sst.live.speaker): the engine's own voice (an engine with an
+`on_audio` attribute: Gemini's), else the words to say with the laptop's voice. A way that could hear the voice gets
+silence while it speaks: the microphone near speakers (not headphones), and what the laptop plays where Rflow's own sound
+can't be left out (before Windows 11, or the output's whole mix when process loopback misses a call, while the voice
+plays on that output). So the spoken translation is never heard and translated again; the meeting's words under the
+voice are lost meanwhile (the mix can't be told apart from the voice in it).
+
+With Both on speakers (the output isn't headphones or a headset), the microphone hears the others' words from the
+speakers, which would be translated as the user's. So the microphone gets silence while the computer plays sound one
+would hear and ECHO_HANGOVER after (the room's echo; the sound reaches the capture before the speakers play it). Gated,
+not echo-cancelled: Windows' echo cancellation is the device's (many microphones have none), comes with communications
+mode, which lowers the other apps by Windows' own setting and treats the room's voices as noise. The user's words while
+the others speak are lost; theirs are translated by the computer's way anyway.
 """
 import logging
 import statistics
@@ -39,6 +49,7 @@ import numpy as np
 from sst.live.contracts import MIC, RATE, SYSTEM, Kind, LiveConfig, LiveEvent, already_in, language_name
 from sst.live.transcript import Transcript
 
+ECHO_HANGOVER = 0.5  # seconds the microphone stays silenced after the speakers played (Both on speakers)
 LISTENING = "Listening…"
 NO_SPEECH = "Hearing sound, but no speech yet"
 NOTHING = {SYSTEM: "Nothing heard yet: is the sound playing on this laptop?", MIC: "Nothing heard from the microphone"}
@@ -55,6 +66,19 @@ def dbfs(frame: bytes) -> float:
     samples = np.frombuffer(frame[: len(frame) // 2 * 2], dtype="<i2").astype(np.float32)
     rms = float(np.sqrt(np.mean(samples * samples))) / 32768 if len(samples) else 0.0
     return 20 * np.log10(rms) if rms > 0 else -np.inf
+
+
+def _path(capture) -> str:
+    """How a way's sound was captured, for the log: the capture's own word for it (`path`) if it has one, else what its
+    attributes say (sst.live.wasapi.Capture: the device, and whether Rflow's own sound was in it)."""
+    path = getattr(capture, "path", None)
+    if isinstance(path, str) and path:
+        return path
+    what = getattr(capture, "what", "") or type(capture).__name__
+    if what == "output device":
+        what += ", the whole mix" if getattr(capture, "hears_self", False) else ", process loopback"
+    rate = getattr(capture, "device_rate", 0)
+    return f"{what} at {rate} Hz" if rate else what
 
 
 @dataclass
@@ -82,6 +106,7 @@ class LiveSession:
         self.speaker = None  # speaks the translation aloud (sst.live.speaker), while the user wants it
         self._hearing: dict[str, _Hearing] = {}
         self._lock = threading.Lock()  # the notes: frames come on the capture's thread, events on the engine's
+        self._gated = False  # the microphone was silenced for the speakers' sound (said once in the log)
 
     @property
     def running(self) -> bool:
@@ -94,6 +119,8 @@ class LiveSession:
         with self._lock:
             self._hearing[lane] = _Hearing()
         engine = engine_factory(self._event)
+        if hasattr(engine, "on_audio"):  # the translation spoken by the engine itself: to the speaker, if one speaks
+            engine.on_audio = lambda pcm, rate: self._audio(lane, pcm, rate)
         engine.start()
         if hasattr(capture, "on_problem"):  # why it hears nothing (Windows' sound muted), shown like the engine's
             capture.on_problem = lambda message: self._event(LiveEvent(Kind.ERROR, message, lane=lane))
@@ -119,11 +146,14 @@ class LiveSession:
         with self._lock:
             self._hearing.pop(lane, None)
         lags, lines = self.lags.get(lane, []), self.lines.get(lane, 0)
+        report = getattr(engine, "report", None)  # the engine's numbers (GeminiLiveTranslate.report): never any text
+        engine_says = f"; {report()}" if callable(report) else ""
         if lags:
-            log.info("Live captions stopped (%s): %d lines; translation complete %.1f s after the voice paused "
-                     "(median of %d), %.1f s at most", lane, lines, statistics.median(lags), len(lags), max(lags))
+            log.info("Live captions stopped (%s, %s): %d lines; translation complete %.1f s after the voice paused "
+                     "(median of %d), %.1f s at most%s", lane, _path(capture), lines, statistics.median(lags), len(lags),
+                     max(lags), engine_says)
         else:
-            log.info("Live captions stopped (%s): %d lines", lane, lines)
+            log.info("Live captions stopped (%s, %s): %d lines%s", lane, _path(capture), lines, engine_says)
 
     def stop(self) -> None:
         for lane in list(self.lanes):
@@ -137,6 +167,10 @@ class LiveSession:
             old.stop()
             log.info("The voice said %d sentences (%d skipped to keep up); the voice skipped a repeat %d times", old.said,
                      old.skipped, old.repeats)
+            if getattr(old, "sound_s", 0) or getattr(old, "voiced", 0):
+                log.info("Gemini's own voice: %.0f s played (%.0f s left out to keep up), %d sentences said by it, %d by "
+                         "the laptop's voice in its place, %d by neither", old.sound_s, old.sound_skipped_s, old.voiced,
+                         old.said, old.unvoiced)
         if speaker is not None:
             speaker.start()
 
@@ -159,8 +193,23 @@ class LiveSession:
             if speaker is not None and speaker.speaking and (
                     not speaker.private if lane == MIC else getattr(capture, "hears_self", False)):
                 frame = bytes(len(frame))
+            elif lane == MIC and self._speakers_heard():
+                frame = bytes(len(frame))
             engine.feed(frame)
         return feed
+
+    def _speakers_heard(self) -> bool:
+        """With Both, the computer plays through speakers (not headphones) and had sound just now: the microphone may
+        be hearing it."""
+        system = self.lanes.get(SYSTEM)
+        if self.config.source != "both" or system is None or getattr(system[0], "private", None) is not False:
+            return False
+        if not system[0].sounding(ECHO_HANGOVER):
+            return False
+        if not self._gated:
+            self._gated = True
+            log.info("Live captions: Both on speakers: the microphone is silenced while the computer plays sound")
+        return True
 
     # -- the status line
 
@@ -225,6 +274,12 @@ class LiveSession:
             self.on_event(event)
 
     # -- the engines' events
+
+    def _audio(self, lane: str, pcm: bytes, rate: int) -> None:
+        """A piece of the translation spoken by the engine (its thread): to the speaker, which knows the ways it plays."""
+        speaker = self.speaker
+        if speaker is not None and hasattr(speaker, "hear_audio"):
+            speaker.hear_audio(lane, pcm, rate)
 
     def _event(self, event: LiveEvent) -> None:
         if event.kind is Kind.LINE:

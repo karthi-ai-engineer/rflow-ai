@@ -2,22 +2,33 @@
 
     setup        {"setup": {"model": ..., "generationConfig": {"responseModalities": ["AUDIO"],
                   "translationConfig": {"targetLanguageCode": "en", "echoTargetLanguage": false}},
-                  "inputAudioTranscription": {}, "outputAudioTranscription": {}}}
+                  "inputAudioTranscription": {}, "outputAudioTranscription": {}, "sessionResumption": {"handle": ...}}}
                  (the transcripts are the setup's own fields, as in the API reference; Google's Live Translate
                  guide shows them in generationConfig, which the server closes with 1007 "Unknown name")
     audio        {"realtimeInput": {"audio": {"data": <base64 PCM16 16 kHz mono>, "mimeType": "audio/pcm;rate=16000"}}}
+    silence      {"realtimeInput": {"audioStreamEnd": true}}: after SILENCE_SEND_S of digital silence no audio is sent
+                 (Google bills the audio streamed); the next sound reopens the stream, after PREROLL_FRAMES of silence
     answers      serverContent.inputTranscription.text   the words heard, piece by piece
                  serverContent.outputTranscription.text  their translation, piece by piece
-                 serverContent.modelTurn                 the translated voice (24 kHz), unused: captions only
+                 serverContent.modelTurn.parts[].inlineData  the translation spoken: base64 PCM16 mono, 24 kHz
+                                                         (https://ai.google.dev/gemini-api/docs/live-guide), given to
+                                                         on_audio when the translation is spoken aloud
+                 sessionResumptionUpdate.newHandle       where the session can be taken up again (kept in memory only)
                  goAway                                  the connection ends soon: a new one is opened
 
-The model translates continuously, a few seconds behind the speaker. It only produces audio (and bills it), so the
-voice is thrown away and its transcript shown. A line ends when the model ends its turn, or after LiveConfig.line_pause_s
-without new words, or once a long translation and the words heard are both at a sentence end (one runs ahead of the
-other, either way). How far a line trailed the speaker is measured from when the audio last had
-a voice in it to when the line's translation was complete, and only when the voice had paused. A connection lives ~10
-minutes: before that a new one is opened (frames wait in the queue meanwhile, so no audio is lost). The key is never
-logged.
+The model translates continuously, a few seconds behind the speaker. It only produces audio (and bills it, spoken or
+not): its transcript is shown, and the audio itself goes to `on_audio(pcm, rate)` if set (the session sets it while the
+translation is spoken; the same message may carry audio and transcript, the audio goes first). Asking for it costs
+nothing more: the setup has always asked for AUDIO, the only modality the model takes. A line ends when the model ends
+its turn, or after LiveConfig.line_pause_s without new words, or once a long translation and the words heard are both
+at a sentence end (one runs ahead of the other, either way). How far a line trailed the speaker is measured from when
+the audio last had a voice in it to when the line's translation was complete, and only when the voice had paused. A
+connection lives ~10 minutes: before that, at a pause, a new one is opened (frames wait in the queue meanwhile, so no
+audio is lost), and it takes up the same session with the last resumption handle, so the model keeps what was said
+(Live API session resumption, https://ai.google.dev/gemini-api/docs/live-session; a setup Google refuses with it is
+sent again without).
+Google's refusals (no credit, a key not accepted, a quota used up) are said plainly and end the captions; a short rate
+limit is waited out. The key and the handle are never logged.
 """
 import base64
 import contextlib
@@ -30,11 +41,13 @@ import socket
 import threading
 import time
 import urllib.request
+from collections import deque
 from collections.abc import Callable
 from urllib.parse import urlsplit
 
 import numpy as np
 
+from sst import netconnect
 from sst.live.contracts import Kind, LiveConfig, LiveEvent
 
 URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
@@ -42,6 +55,16 @@ QUEUE_FRAMES = 50  # 5 s of audio: when the network falls further behind, the ol
 LONG_LINE = 120  # characters: a translation this long ends its line where both texts are at a sentence end
 VOICE_LEVEL = 10 ** (-45 / 20)  # a frame louder than -45 dBFS has a voice in it (for measuring the lag only)
 VOICE_PAUSE = 0.3  # seconds: the voice has paused, so a translation arriving now is measured from that pause
+SILENT_PEAK = 32  # a frame whose samples all stay within this (of 32,768: -60 dBFS) is digital silence
+SILENCE_SEND_S = 2.0  # this much silence is still sent (the model hears the pause and ends its line); after it, none
+PREROLL_FRAMES = 2  # the last 200 ms of silence not sent go first when sound comes back
+RECONNECT_GRACE_S = 45.0  # past reconnect_s, the new connection waits this long at most for a pause (Google's ~10 min)
+QUOTA_TRIES = 3  # a quota refusal that doesn't say when it lifts is tried this often before the captions stop
+QUOTA_WAIT = 30.0  # seconds between those tries
+LONGEST_WAIT = 600.0  # a rate limit asking for longer than this ends the captions instead
+BYTES_PER_S = 32_000  # 16 kHz, 16-bit
+VOICE_RATE = 24_000  # Google's audio out: "always 24kHz", raw little-endian 16-bit PCM (the Live API guide)
+_RATE = re.compile(r"rate=(\d+)")
 _SENTENCE_END = re.compile(r"[.!?。！？]\s*$")
 _SENTENCES = re.compile(r"[。！？!?]+|\.+(?!\w)")  # each sentence end once ("?!", "..."); "3.5" is none
 _CJK = "".join(f"{chr(a)}-{chr(b)}" for a, b in (
@@ -99,12 +122,32 @@ class GeminiLiveTranslate:
         self._opened = 0.0
         self._closed: str | None = None  # why the server closed the connection, once it did
         self._thread: threading.Thread | None = None
+        self.on_audio: Callable[[bytes, int], None] | None = None  # the translation spoken (PCM16 mono, its rate)
+        self._resume = True  # ask for session resumption (dropped if Google refuses a setup with it)
+        self._token = ""  # where the session can be taken up again: in memory only, never logged
+        self._stream_end = True  # say when the audio pauses (dropped if Google refuses it)
+        self._ended = False  # audioStreamEnd was the last thing sent on this connection
+        self._quiet_bytes = 0  # of silence in a row so far (bytes: tenths of a second would add up to 2.0000000000000004)
+        self._skipping = False  # silence long enough: frames aren't sent until sound comes back
+        self._preroll: deque[bytes] = deque(maxlen=PREROLL_FRAMES)
+        self._quota = 0  # quota refusals in a row
+        self._started = 0.0
+        # for the session's log line (report()): never any text
         self.dropped = 0  # frames dropped because the network fell behind
+        self.sent = 0  # frames sent
+        self.silence_s = 0.0  # seconds of silence not sent
+        self.reconnects = 0
+        self.reconnect_s = 0.0  # seconds without a connection between them, in all
+        self.resumed = 0  # reconnects that took up the same session
+        self.first_words: float | None = None  # seconds from start() to the first words shown
+        self.audio_s = 0.0  # seconds of the translation spoken that came (given to on_audio or not)
+        self.error = ""  # the last error, as the user saw it
 
     # -- the caller's side
 
     def start(self) -> None:
         self._stop.clear()
+        self._started = self._clock()
         self._thread = threading.Thread(target=self._run, name="live-gemini", daemon=True)
         self._thread.start()
 
@@ -130,41 +173,93 @@ class GeminiLiveTranslate:
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(wait)
 
+    def report(self) -> str:
+        """How the session went, for the log: numbers only."""
+        first = f"first words after {self.first_words:.1f} s" if self.first_words is not None else "no words"
+        parts = [first, f"{self.sent} frames sent, {self.dropped} dropped", f"{self.silence_s:.0f} s of silence not sent",
+                 f"{self.reconnects} reconnects ({self.reconnect_s:.1f} s without a connection, {self.resumed} resumed)",
+                 f"{self.audio_s:.0f} s of Gemini's voice"]
+        if self.error:
+            parts.append(f"last error: {self.error}")
+        return "; ".join(parts)
+
     # -- the connection
 
     def _run(self) -> None:
         backoff, failures = 1.0, 0
+        lost: float | None = None  # when the last connection ended
         while not self._stop.is_set():
+            resuming, in_setup = bool(self._token), True
             try:
                 self._status("Connecting to Google…")
                 ws = self._open()
-                backoff, failures = 1.0, 0
+                in_setup = False
+                if lost is not None:
+                    gap = self._clock() - lost
+                    self.reconnects, self.reconnect_s, self.resumed = (
+                        self.reconnects + 1, self.reconnect_s + gap, self.resumed + resuming)
+                    log.info("Live captions: connected again in %.1f s (%s)", gap,
+                             "the same session" if resuming else "a new session")
+                    lost = None
+                backoff, failures, self._quota = 1.0, 0, 0
                 self._status("Listening")
                 receiver = threading.Thread(target=self._receive, args=(ws,), name="live-gemini-in", daemon=True)
                 receiver.start()
                 self._send(ws)
-                self._finish_line()  # a new connection starts with no memory of this line
+                if not self._token:
+                    self._finish_line()  # a new session starts with no memory of this line; a resumed one goes on
                 with contextlib.suppress(Exception):
                     ws.close()
                 receiver.join(2)
                 self._ws = None
+                lost = self._clock()
             except Exception as e:
                 self._ws = None
                 if self._stop.is_set():
                     break
+                if lost is None and self._opened:  # a connection there was: the time until the next one counts
+                    lost = self._clock()
                 failures += 1
                 log.warning("Live captions: %s", self._scrub(_describe(e)))
                 if failures == 1 and isinstance(e, TimeoutError):
                     continue  # a first connection that stalls (seen on the dev laptop): again at once, quietly
-                message = self._explain(e)
-                self.on_event(LiveEvent(Kind.ERROR, message, lane=self.lane))
-                if message in GIVE_UP:
+                if self._without_extras(e, in_setup, resuming):
+                    continue  # asked again at once without what Google didn't take
+                message, wait = self._judge(e, backoff)
+                if wait is not None and not in_setup and self._skipping:
+                    log.info("Live captions: Google closed a connection that had no sound to hear: a new one")
+                else:  # an idle connection closing is nothing the user needs to see; anything else is
+                    self.error = message
+                    self.on_event(LiveEvent(Kind.ERROR, message, lane=self.lane))
+                if wait is None:
                     break  # trying again won't help
                 self._status("Reconnecting…")
-                self._stop.wait(backoff)
+                self._stop.wait(wait)
                 backoff = min(backoff * 2, 30.0)
         self._finish_line()
         self._status("Stopped")
+
+    def _without_extras(self, error: Exception, in_setup: bool, resuming: bool) -> bool:
+        """Google refused something this engine adds and can do without: a handle it no longer knows (they last 2 hours),
+        session resumption (a preview model may not take it), or audioStreamEnd. Each is dropped once and the
+        connection made again at once; a refusal of anything else is the error it is."""
+        if in_setup and resuming and not isinstance(error, OSError):
+            log.info("Live captions: the session couldn't be taken up again: a new one")
+            self._token = ""
+            return True
+        if self._judge(error, 0.0, count=False)[0] != NOT_ACCEPTED:
+            return False
+        raw = self._scrub(_describe(error)).lower().replace("_", "")
+        named = "unknown name" in raw  # Google names the field it doesn't know: only that one is dropped
+        if in_setup and self._resume and (not named or "sessionresumption" in raw):
+            log.info("Live captions: Google refused session resumption: reconnecting without it")
+            self._resume, self._token = False, ""
+            return True
+        if not in_setup and self._ended and self._stream_end and (not named or "audiostreamend" in raw):
+            log.info("Live captions: Google refused audioStreamEnd: long silences are left out without it")
+            self._stream_end = False
+            return True
+        return False
 
     def _open(self):
         self._goaway, self._closed = False, None
@@ -179,7 +274,9 @@ class GeminiLiveTranslate:
             },
             "inputAudioTranscription": {},  # the words heard
             "outputAudioTranscription": {},  # the translation, as text
+            **({"sessionResumption": {"handle": self._token} if self._token else {}} if self._resume else {}),
         }}))
+        self._ended = False
         reply = json.loads(ws.recv(timeout=15))
         if "setupComplete" not in reply:
             raise ConnectionError(f"setup not accepted: {str(reply)[:200]}")
@@ -191,7 +288,7 @@ class GeminiLiveTranslate:
         while not self._stop.is_set():
             if self._closed is not None:
                 raise self._closed
-            if self._goaway or self._clock() - self._opened > self.config.reconnect_s:
+            if self._goaway or self._due():
                 log.info("Live captions: a new connection (the old one ends soon)")
                 return
             try:
@@ -200,8 +297,49 @@ class GeminiLiveTranslate:
                 frame = b""
             self._check_pause()
             if frame:
-                ws.send(json.dumps({"realtimeInput": {"audio": {
-                    "data": base64.b64encode(frame).decode("ascii"), "mimeType": "audio/pcm;rate=16000"}}}))
+                self._stream(ws, frame)
+
+    def _due(self) -> bool:
+        """Time for a new connection: past reconnect_s at a pause (the voice paused, no line being built), or anyway
+        RECONNECT_GRACE_S later, still before Google's ~10 minutes."""
+        age = self._clock() - self._opened
+        if age <= self.config.reconnect_s:
+            return False
+        if self._skipping or age > self.config.reconnect_s + RECONNECT_GRACE_S:
+            return True
+        with self._lock:
+            pending = bool(self._source or self._translation)
+        return not pending and self._clock() - self._voice_at >= VOICE_PAUSE
+
+    def _stream(self, ws, frame: bytes) -> None:
+        """Send a frame, unless it's more of a long digital silence: Google bills every second streamed. Once the
+        silence has lasted SILENCE_SEND_S (enough for the model to hear the pause and finish its line), the stream is
+        ended (audioStreamEnd: the model finalises what it heard) and frames wait for sound; the last PREROLL_FRAMES of
+        the silence go first then, so the model hears the voice begin."""
+        seconds = len(frame) / BYTES_PER_S
+        self._quiet_bytes = self._quiet_bytes + len(frame) if _silent(frame) else 0
+        if self._quiet_bytes > SILENCE_SEND_S * BYTES_PER_S:
+            if not self._skipping:
+                self._skipping = True
+                if self._stream_end:  # without it, the 2 s sent are the pause the model hears
+                    ws.send(json.dumps({"realtimeInput": {"audioStreamEnd": True}}))
+                    self._ended = True
+            self._preroll.append(frame)
+            self.silence_s += seconds
+            return
+        if self._skipping:
+            self._skipping = False
+            for before in self._preroll:
+                self._send_audio(ws, before)
+                self.silence_s -= len(before) / BYTES_PER_S
+            self._preroll.clear()
+        self._send_audio(ws, frame)
+
+    def _send_audio(self, ws, frame: bytes) -> None:
+        ws.send(json.dumps({"realtimeInput": {"audio": {
+            "data": base64.b64encode(frame).decode("ascii"), "mimeType": "audio/pcm;rate=16000"}}}))
+        self._ended = False
+        self.sent += 1
 
     def _receive(self, ws) -> None:
         try:
@@ -219,7 +357,12 @@ class GeminiLiveTranslate:
     def _handle(self, message: dict) -> None:
         if "goAway" in message:
             self._goaway = True
+        update = message.get("sessionResumptionUpdate") or {}
+        if update.get("resumable") and update.get("newHandle"):
+            self._token = update["newHandle"]
         content = message.get("serverContent") or {}
+        for part in (content.get("modelTurn") or {}).get("parts") or ():
+            self._voice(part.get("inlineData") or {})
         heard = content.get("inputTranscription") or {}
         if heard.get("text"):
             self._add(Kind.SOURCE, heard["text"], heard.get("languageCode", ""))
@@ -229,8 +372,28 @@ class GeminiLiveTranslate:
         if content.get("turnComplete"):
             self._finish_line()
 
+    def _voice(self, blob: dict) -> None:
+        """A piece of the translation spoken, to on_audio. A listener's failure never ends the connection."""
+        mime = str(blob.get("mimeType") or "audio/pcm")
+        if not blob.get("data") or not mime.startswith("audio/"):
+            return
+        try:
+            pcm = base64.b64decode(blob["data"])
+        except ValueError:
+            log.warning("Live captions: a piece of Gemini's voice that isn't base64 was left out")
+            return
+        rate = int(m.group(1)) if (m := _RATE.search(mime)) else VOICE_RATE
+        self.audio_s += len(pcm) / (2 * rate)
+        if self.on_audio is not None:
+            try:
+                self.on_audio(pcm, rate)
+            except Exception:
+                log.exception("Live captions: Gemini's voice couldn't be passed on")
+
     def _add(self, kind: Kind, piece: str, language: str) -> None:
         now = self._clock()
+        if self.first_words is None:
+            self.first_words = now - self._started
         with self._lock:
             if kind is Kind.SOURCE:
                 self._source = _join(self._source, piece)
@@ -295,26 +458,65 @@ class GeminiLiveTranslate:
     def _scrub(self, text: str) -> str:
         return text.replace(self.key, "***") if self.key else text
 
-    def _explain(self, error: Exception) -> str:
-        """The error in plain words (the provider's own goes to the log)."""
-        raw = self._scrub(_describe(error)).lower()
-        if "api key" in raw or "api_key" in raw or "unauthenticated" in raw or "unregistered caller" in raw:
-            return REFUSED_KEY
-        if "not found" in raw or "is not supported" in raw or "404" in raw or "permission" in raw:
-            return NO_MODEL  # e.g. 1008 "models/... is not found for API version v1beta"
-        if "quota" in raw or "429" in raw or "resource_exhausted" in raw or "rate limit" in raw:
-            return "Google's quota for this key is used up for now: captions try again shortly."
+    def _judge(self, error: Exception, backoff: float, count: bool = True) -> tuple[str, float | None]:
+        """The error in plain words (the provider's own goes to the log), and how long to wait before trying again
+        (None: trying again won't help, the captions stop). Google refuses on the WebSocket itself, in its close frame's
+        code and reason (1008: the key or the model; 1011: a quota, as reported in the field); an HTTP status comes only
+        when the handshake itself is refused. `count`: a quota refusal counts towards QUOTA_TRIES."""
+        status, body = _http(error)
+        raw = self._scrub(f"{_describe(error)} {body}").lower()
+        if status == 402 or _CREDIT.search(raw) or ("billing" in raw and "quota" not in raw):
+            return NO_CREDIT, None
+        if status in (401, 403) or "api key" in raw or "api_key" in raw or "unauthenticated" in raw \
+                or "unregistered caller" in raw:
+            return REFUSED_KEY, None
+        if "not found" in raw or "is not supported" in raw or status == 404 or "404" in raw or "permission" in raw:
+            return NO_MODEL, None  # e.g. 1008 "models/... is not found for API version v1beta"
+        if status == 429 or "quota" in raw or "429" in raw or "resource_exhausted" in raw or "rate limit" in raw:
+            if _DAILY.search(raw):
+                return QUOTA_DAY, None
+            wait = netconnect.retry_after(body or _reason(error))
+            if wait is not None and wait <= LONGEST_WAIT:
+                return RATE_LIMITED.format(max(1, round(wait))), max(wait, 1.0)
+            self._quota += count
+            if wait is not None or self._quota >= QUOTA_TRIES:
+                return QUOTA_STOP, None
+            return QUOTA_NOW, QUOTA_WAIT
         if "(1007)" in raw or "invalid json" in raw or "unknown name" in raw or "invalid argument" in raw:
-            return NOT_ACCEPTED  # the request itself: the same one would be refused again
+            return NOT_ACCEPTED, None  # the request itself: the same one would be refused again
         if isinstance(error, (OSError, TimeoutError)) or "timed out" in raw or "getaddrinfo" in raw:
-            return "Can't reach Google: check the internet connection. Captions try again shortly."
-        return "The connection to Google broke: captions try again shortly."
+            return "Can't reach Google: check the internet connection. Captions try again shortly.", backoff
+        return "The connection to Google broke: captions try again shortly.", backoff
 
 
-REFUSED_KEY = "Google refused the key: check the Gemini key in AI & models."
+REFUSED_KEY = "Gemini didn't accept the key: check the Gemini key in AI & models."
+NO_CREDIT = "Gemini credit used up: add credit in Google AI Studio."
 NO_MODEL = "This key can't use Gemini Live Translate (a preview model) yet."
 NOT_ACCEPTED = "Google didn't accept Rflow's request: live captions need an update to Rflow."
-GIVE_UP = (REFUSED_KEY, NO_MODEL, NOT_ACCEPTED)  # trying again won't help: the captions stop and say why
+QUOTA_DAY = "Gemini's daily quota for this key is used up: live translation works again tomorrow."
+QUOTA_NOW = "Gemini's quota for this key is used up for now: captions try again shortly."
+QUOTA_STOP = "Gemini's quota for this key is used up: check its plan and billing in Google AI Studio."
+RATE_LIMITED = "Gemini asks to wait {} s (a rate limit): captions try again then."
+GIVE_UP = (REFUSED_KEY, NO_CREDIT, NO_MODEL, NOT_ACCEPTED, QUOTA_DAY, QUOTA_STOP)  # the captions stop and say why
+# No credit: a 402, the prepaid credits run out ("prepayment credits are depleted"), or a billing problem that isn't
+# Google's quota message ("You exceeded your current quota, please check your plan and billing details": a quota)
+_CREDIT = re.compile(r"prepay|credits? (are |is )?(depleted|exhausted|used up)|out of credits?|insufficient[_ ](balance|funds)"
+                     r"|credit balance|payment required")
+_DAILY = re.compile(r"per[ _]?day|daily|\brpd\b")
+
+
+def _http(error: Exception) -> tuple[int, str]:
+    """The HTTP status and body of a refused WebSocket handshake (websockets' InvalidStatus, or the legacy
+    InvalidStatusCode), else (0, "")."""
+    response = getattr(error, "response", None)
+    status = getattr(response, "status_code", None) or getattr(error, "status_code", None) or 0
+    body = getattr(response, "body", b"") or b""
+    return int(status), body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)
+
+
+def _reason(error: Exception) -> str:
+    close = getattr(error, "rcvd", None)
+    return str(close.reason) if close is not None else str(error)
 
 
 def _describe(error: Exception) -> str:
@@ -324,6 +526,12 @@ def _describe(error: Exception) -> str:
     if close is not None:
         return f"Google closed the connection ({close.code}): {close.reason}"
     return f"{type(error).__name__}: {error}"
+
+
+def _silent(frame: bytes) -> bool:
+    """Digital silence: what a capture sends while nothing plays, a muted microphone, the voice muted out."""
+    samples = np.frombuffer(frame[: len(frame) // 2 * 2], dtype="<i2")
+    return not len(samples) or int(np.max(np.abs(samples.astype(np.int32)))) <= SILENT_PEAK
 
 
 def _level(frame: bytes) -> float:

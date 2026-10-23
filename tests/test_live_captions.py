@@ -334,10 +334,10 @@ class FakeSpeaker:
     language = "en"
 
     def __init__(self, config):
-        self.lanes, self.speed, self.config = None, None, config
+        self.lanes, self.own, self.speed, self.config = None, None, None, config
 
-    def set_lanes(self, lanes):
-        self.lanes = tuple(lanes)
+    def set_lanes(self, lanes, own=None):
+        self.lanes, self.own = tuple(lanes), tuple(own or ())
 
     def set_speed(self, speed):
         self.speed = speed
@@ -356,13 +356,14 @@ def speaking_captions(ready=True):
     return live, made, speakers
 
 
-def test_speaking_starts_with_the_session_and_says_the_ways_into_the_voices_language():
+def test_speaking_starts_with_the_session_gemini_says_any_language_the_laptops_voice_its_own():
     live, made, speakers = speaking_captions()
     live.start(LiveConfig(source="both", target="en", mic_target="ja", speak=True, speak_speed=1.15))
-    assert made[0].speaker is speakers[0] and speakers[0].lanes == (SYSTEM,) and speakers[0].speed == 1.15
-    assert live.bar.speak_button.isChecked()
-    live.set_source("microphone")  # into Japanese: nothing for an English voice
-    assert speakers[0].lanes == () and "speaks English" in live.bar.speak_button.toolTip()
+    assert made[0].speaker is speakers[0] and speakers[0].lanes == speakers[0].own == (SYSTEM,)  # not the user's words
+    assert speakers[0].speed == 1.15 and live.bar.speak_button.isChecked()
+    live.set_source("microphone")  # into Japanese: Gemini says it; nothing for an English voice on the laptop
+    assert speakers[0].lanes == () and speakers[0].own == (MIC,)
+    assert "speaks only English" in live.bar.speak_button.toolTip()
     live.set_speak(False)
     assert made[0].speaker is None and not live.bar.speak_button.isChecked()
     live.stop()

@@ -50,8 +50,10 @@ from sst.live.gemini import GeminiLiveTranslate
 from sst.live.session import LiveSession
 from sst.live.speaker import Speaker
 from sst.live.transcript import Transcript
-from sst.live.voice import DANNY, VOICES, PiperVoice, Voice
+from sst.live.voice import LOCAL as LOCAL_VOICE
+from sst.live.voice import PiperVoice, Voice
 from sst.live.voice import install as install_voice
+from sst.live.voice import local as local_voice
 from sst.live.wasapi import Capture, Player
 from sst.pipeline.asr import ASRScheduler, EngineBackend
 from sst.pipeline.contracts import VoiceConfig
@@ -1001,7 +1003,9 @@ class TrayApp:
     # -- the spoken translation (sst.live.voice, sst.live.speaker)
 
     def live_voice(self) -> Voice:
-        return VOICES.get(self.settings.live_voice, DANNY)
+        """The voice on this laptop (Ryan; an older Rflow's Danny until Ryan is downloaded): Gemini speaks the
+        translation in its own voice, this one stands in when Gemini's audio doesn't come."""
+        return local_voice()
 
     def live_voice_state(self) -> tuple[str, int, str]:
         """("ready" / "downloading" / "missing", the percent downloaded, why the last download failed)."""
@@ -1010,19 +1014,22 @@ class TrayApp:
         return ("ready" if self.live_voice().ready() else "missing"), 0, self.voice_problem
 
     def _live_speaker(self, config: LiveConfig) -> Speaker | None:
-        """The voice saying the translation aloud; None while it isn't downloaded."""
-        voice = self.live_voice()
-        if not voice.ready():
-            return None
-        return Speaker(lambda: PiperVoice(voice), Player(), config.spoken_lanes(voice.language), voice.language,
-                       config.speak_speed, on_problem=lambda message: self.live.event.emit(
-                           LiveEvent(Kind.ERROR, message, lane="voice")), ducker=Ducker(config.duck))
+        """What says the translation aloud: Gemini's own voice at once, the laptop's in its place once downloaded (the
+        voice is looked for at each load: a download finished meanwhile is used)."""
+        language = self.live_voice().language
+
+        def load() -> PiperVoice | None:
+            voice = local_voice()
+            return PiperVoice(voice) if voice.ready() else None
+        return Speaker(load, Player(), config.spoken_lanes(language), language, config.speak_speed,
+                       on_problem=lambda message: self.live.event.emit(LiveEvent(Kind.ERROR, message, lane="voice")),
+                       ducker=Ducker(config.duck), own=config.spoken_lanes())
 
     def set_live_speak(self, on: bool) -> None:
-        """The translation spoken aloud, or not: saved, at once while it runs; the voice is downloaded the first time
-        (then it starts speaking by itself)."""
+        """The translation spoken aloud, or not: saved, at once while it runs; the laptop's voice is downloaded the
+        first time (Ryan also where an older Rflow has Danny), to stand in when Gemini's audio doesn't come."""
         self.apply_settings(dataclasses.replace(self.settings, live_speak=on))
-        if on and self.live_voice_state()[0] == "missing":
+        if on and not LOCAL_VOICE.ready():
             self.download_live_voice()
         self.live.set_speak(on)
         if self.window.isVisible():
@@ -1041,7 +1048,7 @@ class TrayApp:
         """Download and prepare the voice in the background (once; the progress shows on the bar and the page)."""
         if self.voice_downloading is not None:
             return
-        voice, last = self.live_voice(), [-1]
+        voice, last = LOCAL_VOICE, [-1]
         self.voice_downloading, self.voice_problem = 0, ""
 
         def progress(done: int, total: int) -> None:
@@ -1072,7 +1079,7 @@ class TrayApp:
         if error:
             self._notify(APP_NAME, f"The voice couldn't be downloaded: {error}", QSystemTrayIcon.MessageIcon.Warning)
         else:
-            log.info("The voice %s is ready", self.live_voice().name)
+            log.info("The voice %s is ready", LOCAL_VOICE.name)
             self.live.set_speak(self.settings.live_speak)  # here now: it speaks if speaking is still wanted
         if self.window.isVisible():
             self.window.refresh()
@@ -1107,6 +1114,8 @@ class TrayApp:
             if answer != QMessageBox.StandardButton.Yes:
                 return "Not started."
             self.apply_settings(dataclasses.replace(s, live_told=True))
+        if s.live_speak and not self.voice_problem and not LOCAL_VOICE.ready():
+            self.download_live_voice()  # e.g. an older Rflow's Danny here: Ryan comes in the background, once a run
         try:
             self.live.start(self.live_config(), geometry=list(self.settings.live_bar) or None)
         except Exception as e:  # e.g. no output device or microphone to listen to
