@@ -109,7 +109,6 @@ TEXT: dict[tuple[str, str], TextPrice] = {
     ("gemini", "gemini-flash-latest"): TextPrice(0.75, 3.75, "medium"),  # an alias: 3.6 Flash today
     ("gemini", "gemini-2.5-pro"): TextPrice(1.25, 10.00, "medium"),  # thinking can't be turned off
     ("gemini", "gemini-3.1-pro-preview"): TextPrice(2.00, 12.00, "high"),  # paid only
-    ("gemini", "gemini-4-argon"): TextPrice(2.00, 10.00, "low"),  # $4 / $20 from 2026-12-01
     # OpenAI (reasoning tokens billed as output)
     ("openai", "gpt-5-nano"): TextPrice(0.05, 0.40, "medium"),
     ("openai", "gpt-6-luna"): TextPrice(0.10, 0.50, "medium"),
