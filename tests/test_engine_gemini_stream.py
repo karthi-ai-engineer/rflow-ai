@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 from websockets.sync.server import serve
 
+from sst import usage
 from sst.engines import gemini_stream, load_engine
 from sst.engines.cloud import CLOUD, CloudEngine
 from sst.engines.gemini_stream import GeminiEngine, GeminiStream
@@ -287,3 +288,41 @@ def test_your_words_go_as_custom_vocabulary(live):
     assert server.setup["inputAudioTranscription"]["customVocabulary"] == ["Rflow", "Karthi"]
     assert server.setup["inputAudioTranscription"]["languageCodes"] == []  # automatic
     stream.close()
+
+
+# ---- the cost tracker (sst.usage): a stream counted once, by the seconds sent
+
+@pytest.fixture
+def ledger():
+    counted = usage.Ledger(None)
+    usage.use(counted)  # the conftest puts back none after the test
+    return counted
+
+
+def _entries(ledger) -> dict:
+    return {key: entry for day in ledger.days.values() for key, entry in day.items()}
+
+
+def test_a_stream_is_counted_once_by_its_seconds_and_googles_count_of_the_text(live, ledger):
+    said = {**final("Hello there."), "usageMetadata": {"promptTokenCount": 11, "responseTokenCount": 4}}
+    server = live(after_end=[said])
+    stream = stream_for(server)
+    speak(stream, [VOICE, VOICE, VOICE, QUIET])
+    stream.end()
+    assert stream.final() == "Hello there."
+    stream.close()
+    assert _entries(ledger) == {f"live_dictation|{LIVE}": {"audio_in": 10, "text_in": 0, "out": 4, "thoughts": 0,
+                                                           "audio_out": 0, "seconds": 0.4, "calls": 1}}
+
+
+def test_a_failed_stream_is_counted_once_and_one_that_sent_nothing_not_at_all(live, ledger):
+    server = live(during={1: [{"goAway": {"timeLeft": "5s"}}]})
+    stream = stream_for(server)
+    speak(stream, [VOICE])
+    assert wait_until(lambda: stream.failed)
+    stream.close()
+    stream.close()
+    assert _entries(ledger)[f"live_dictation|{LIVE}"]["calls"] == 1
+    unused = stream_for(live())
+    unused.close()
+    assert len(_entries(ledger)) == 1 and _entries(ledger)[f"live_dictation|{LIVE}"]["calls"] == 1
