@@ -88,6 +88,7 @@ class SpeechPrice:
     output: float = 0.0  # per 1M tokens out, thinking included
     transcribe: bool = False  # Gemini Transcribe (no instruction, Google's token rates) rather than a Flash model
     thinking: str = ""
+    audio_out: float = 0.0  # per 1M audio tokens out: Live Translate speaks its translation
 
 
 _CLAUDE_NEW = 1.3  # Claude 4.7 and later: the same text is ~30% more tokens
@@ -166,6 +167,9 @@ SPEECH: dict[tuple[str, str], SpeechPrice] = {
     # Google Gemini, by the token
     ("gemini", "gemini-3.5-transcribe"): SpeechPrice(audio=2.00, output=12.00, transcribe=True),
     ("gemini", "gemini-3.5-transcribe-live"): SpeechPrice(audio=3.50, output=21.00, transcribe=True),  # the Live API
+    # Live translation (sst.live), on the Live API too: 25 tokens a second of audio each way, "approximately $0.0368 per
+    # minute" (Google's footnote); free on the free tier. Not a dictation model: no speech list shows it.
+    ("gemini", "gemini-3.5-live-translate-preview"): SpeechPrice(audio=3.50, audio_out=21.00),
     ("gemini", "gemini-2.5-flash-lite"): SpeechPrice(audio=0.30, text=0.10, output=0.40),
     ("gemini", "gemini-3.1-flash-lite"): SpeechPrice(audio=0.50, text=0.25, output=1.50, thinking="minimal"),
     ("gemini", "gemini-3.5-flash-lite"): SpeechPrice(audio=0.30, text=0.30, output=2.50, thinking="minimal"),
@@ -175,6 +179,21 @@ SPEECH: dict[tuple[str, str], SpeechPrice] = {
     ("gemini", "gemini-3.5-flash"): SpeechPrice(audio=0.75, text=0.75, output=3.75, thinking="medium"),  # 3.6 Flash
     ("gemini", "gemini-flash-latest"): SpeechPrice(audio=0.75, text=0.75, output=3.75, thinking="medium"),
     # gemini-flash-lite-latest: Google documents no target for it any more, so no price
+}
+
+LIVE_AUDIO = 25  # tokens per second of audio on the Live API, in and out (Transcribe Live, Live Translate)
+
+# Prices that change on a known day: (provider, model) -> [(the first day, the price from then on)], latest last. The
+# tables above are today's; a day's use is priced as it was that day (text_price_on, speech_price_on), which is why the
+# cost tracker (sst.usage) keeps tokens, not dollars. 3.6 Flash doubles (Google's pricing page) and 3.8 Flash, priced
+# the same, with it (the notes' table); their audio price is assumed to double as well.
+TEXT_FROM: dict[tuple[str, str], list[tuple[str, TextPrice]]] = {
+    ("gemini", "gemini-3.6-flash"): [("2027-01-01", TextPrice(1.50, 7.50, "medium"))],
+    ("gemini", "gemini-3.8-flash"): [("2027-01-01", TextPrice(1.50, 7.50, "medium"))],
+}
+SPEECH_FROM: dict[tuple[str, str], list[tuple[str, SpeechPrice]]] = {
+    ("gemini", "gemini-3.6-flash"): [("2027-01-01", SpeechPrice(audio=1.50, text=1.50, output=7.50, thinking="medium"))],
+    ("gemini", "gemini-3.8-flash"): [("2027-01-01", SpeechPrice(audio=1.50, text=1.50, output=7.50, thinking="medium"))],
 }
 
 LOCAL_SPEECH = ("parakeet", "whisper-turbo")  # on this PC: free
@@ -261,6 +280,23 @@ def _find(table: dict, provider: str, model: str):
     """A model's price: by its id as the provider lists it, or as a dated snapshot of a model in the table."""
     name = model.strip().removeprefix("models/").lower()
     return table.get((provider, name)) or table.get((provider, _SNAPSHOT.sub("", name)))
+
+
+def _on(table: dict, changes: dict, provider: str, model: str, day: str):
+    """The price on a day (an ISO date, "2026-10-23"): the table's, or a scheduled change's from its first day on."""
+    price = _find(table, provider, model)
+    for first, later in _find(changes, provider, model) or ():
+        if day >= first:
+            price = later
+    return price
+
+
+def text_price_on(provider: str, model: str, day: str) -> TextPrice | None:
+    return _on(TEXT, TEXT_FROM, provider, model, day)
+
+
+def speech_price_on(provider: str, model: str, day: str) -> SpeechPrice | None:
+    return _on(SPEECH, SPEECH_FROM, provider, model, day)
 
 
 def text_monthly(price: TextPrice, usage: Usage = TYPICAL) -> float:

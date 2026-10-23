@@ -47,7 +47,7 @@ from urllib.parse import urlsplit
 
 import numpy as np
 
-from sst import netconnect
+from sst import costs, netconnect, usage
 from sst.live.contracts import Kind, LiveConfig, LiveEvent
 
 URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
@@ -63,6 +63,7 @@ QUOTA_TRIES = 3  # a quota refusal that doesn't say when it lifts is tried this 
 QUOTA_WAIT = 30.0  # seconds between those tries
 LONGEST_WAIT = 600.0  # a rate limit asking for longer than this ends the captions instead
 BYTES_PER_S = 32_000  # 16 kHz, 16-bit
+FRAME_S = 0.1  # seconds of audio in a frame (sst.live.wasapi's 100 ms frames)
 VOICE_RATE = 24_000  # Google's audio out: "always 24kHz", raw little-endian 16-bit PCM (the Live API guide)
 _RATE = re.compile(r"rate=(\d+)")
 _SENTENCE_END = re.compile(r"[.!?。！？]\s*$")
@@ -142,6 +143,8 @@ class GeminiLiveTranslate:
         self.first_words: float | None = None  # seconds from start() to the first words shown
         self.audio_s = 0.0  # seconds of the translation spoken that came (given to on_audio or not)
         self.error = ""  # the last error, as the user saw it
+        self._billed = (0, 0.0)  # (frames sent, seconds of voice received) already in the cost tracker (_bill)
+        self._usage: dict = {}  # the last usageMetadata Google sent, for the log
 
     # -- the caller's side
 
@@ -189,6 +192,7 @@ class GeminiLiveTranslate:
         backoff, failures = 1.0, 0
         lost: float | None = None  # when the last connection ended
         while not self._stop.is_set():
+            self._bill()  # the connection before, if any
             resuming, in_setup = bool(self._token), True
             try:
                 self._status("Connecting to Google…")
@@ -236,8 +240,26 @@ class GeminiLiveTranslate:
                 self._status("Reconnecting…")
                 self._stop.wait(wait)
                 backoff = min(backoff * 2, 30.0)
+        self._bill()
         self._finish_line()
         self._status("Stopped")
+
+    def _bill(self) -> None:
+        """What was streamed since the last time into the cost tracker (sst.usage): the seconds sent and the seconds of
+        Google's voice received, at the Live API's 25 tokens a second each way. After each connection, so a long
+        session counts as it goes. Google's usageMetadata is only logged, to compare: Google staff on its forum say
+        Live sessions bill more than the price page's footnote, which no one has confirmed."""
+        sent, spoken = self.sent - self._billed[0], self.audio_s - self._billed[1]
+        if sent <= 0 and spoken <= 0:
+            return
+        self._billed = (self.sent, self.audio_s)
+        seconds = sent * FRAME_S
+        if self._usage:
+            log.info("Live captions: Google's last count: %s prompt and %s response tokens (Rflow counts %.0f s sent, "
+                     "%.0f s received)", self._usage.get("promptTokenCount"), self._usage.get("responseTokenCount"),
+                     self.sent * FRAME_S, self.audio_s)
+        usage.record("live_translation", self.config.model, audio_in=round(seconds * costs.LIVE_AUDIO),
+                     audio_out=round(spoken * costs.LIVE_AUDIO), seconds=seconds, calls=0)
 
     def _without_extras(self, error: Exception, in_setup: bool, resuming: bool) -> bool:
         """Google refused something this engine adds and can do without: a handle it no longer knows (they last 2 hours),
@@ -357,6 +379,8 @@ class GeminiLiveTranslate:
     def _handle(self, message: dict) -> None:
         if "goAway" in message:
             self._goaway = True
+        if isinstance(message.get("usageMetadata"), dict):
+            self._usage = message["usageMetadata"]
         update = message.get("sessionResumptionUpdate") or {}
         if update.get("resumable") and update.get("newHandle"):
             self._token = update["newHandle"]
