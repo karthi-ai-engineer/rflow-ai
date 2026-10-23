@@ -1424,6 +1424,47 @@ def test_ai_and_models_shows_both_halves_and_switches_the_cleanup():
     assert ("check_ai", "gemini", "gemini-3.5-flash-lite") in app.calls
 
 
+def test_the_cost_card_shows_today_this_month_and_each_feature():
+    window, app = _window(gateway=GatewayConfig(provider="gemini", api_key="AIza-key-0000-9f3c"))
+    today = date.today()
+    app.usage.record("dictation", "gemini-3.5-transcribe", audio_in=500_000, seconds=1500)  # $1.00, 25 minutes
+    app.usage.record("cleanup", "gemini-3.5-flash-lite", text_in=100_000, out=20_000)  # $0.03 + $0.05
+    if today.day > 1:  # earlier this month: in the month, not today
+        app.usage.days[today.replace(day=1).isoformat()] = {"translate|gemini-3.5-flash-lite": dict(
+            dict.fromkeys(("audio_in", "text_in", "out", "thoughts", "audio_out", "seconds"), 0.0), calls=3.0,
+            text_in=1_000_000.0)}
+    window.show_page("models")
+    card = window.pages["models"].costs
+    assert card.frame.isVisibleTo(window.pages["models"]) and card.today.text() == "$1.08"
+    assert card.month.text() == ("$1.38" if today.day > 1 else "$1.08")
+    shown = _shown(card.frame)
+    assert "What Gemini costs (estimate)" in shown and "Dictation | 25 min | $1.00" in shown
+    assert "AI cleanup | 1 call | $0.08" in shown and f"as of {w.nice_day(w.costs.SEEN)}" in shown
+    assert ("Translate | 3 calls | $0.30" in shown) == (today.day > 1)
+    assert _button(card.frame, "Billing in AI Studio")
+    # A call counted while the page is shown: the card follows
+    app.usage.record("live_translation", "gemini-3.5-live-translate-preview", audio_in=1500, audio_out=1500, seconds=60,
+                     calls=0)
+    window.usage_changed()
+    assert "Live translation | 1 min | $0.04" in _shown(card.frame)
+
+
+def test_the_cost_card_waits_for_a_gemini_key_and_says_a_free_key_is_billed_nothing():
+    window, app = _window()
+    window.show_page("models")
+    card = window.pages["models"].costs
+    assert not card.frame.isVisibleTo(window.pages["models"])  # no Gemini key, nothing counted
+    app.gateway = GatewayConfig(provider="gemini", api_key="AIza-key")
+    window.refresh()
+    assert card.frame.isVisibleTo(window.pages["models"]) and card.today.text() == "$0.00"
+    assert "Nothing counted this month yet" in _shown(card.frame)
+    app.usage.record("dictation", "gemini-3.5-transcribe", audio_in=500_000, seconds=60)
+    app.settings.gemini_free_tier = True
+    window.refresh()
+    assert card.month.text() == "$0.00" and "$0 billed: a free key (would cost $1.00 this month)." in _shown(card.frame)
+    assert w.dollars(0.004) == "<$0.01" and w.dollars(0) == "$0.00" and w.dollars(12.4) == "$12"
+
+
 def test_a_key_added_on_ai_and_models_changes_nothing_else():
     # The user testing's M-04: a Gemini key added for live translation switched AI cleanup to Gemini, with no model.
     window, app = _window(gateway=GatewayConfig("", "sk-openai-key-0000", "openai"),

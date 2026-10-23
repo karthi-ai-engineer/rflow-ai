@@ -73,7 +73,7 @@ from PySide6.QtWidgets import (
     QWidgetItem,
 )
 
-from sst import RECORDINGS_DIR, __version__, bench, costs, setups, theme
+from sst import RECORDINGS_DIR, __version__, bench, costs, setups, theme, usage
 from sst.audio import LevelMeter, Take, call_quality, save_wav
 from sst.commands import DEFAULT_PHRASES, UNDO, normalize, parse_phrases, phrases_for
 from sst.engines import DEFAULT_MODEL, SPEECH_MODELS, usable
@@ -3771,6 +3771,98 @@ def scan_memory(key: str) -> str:
     return f"{MEMORY_GB.get(key, 1.0) + SYSTEM_GB:.1f} GB"
 
 
+# ---------------------------------------------------------------- What Gemini costs (under Your API keys)
+
+def dollars(amount: float) -> str:
+    """$1.24, $13; a little that isn't nothing: "<$0.01"."""
+    return "$0.00" if amount <= 0 else "<$0.01" if amount < 0.005 else costs.money(amount)
+
+
+def nice_day(day: str) -> str:
+    """"2026-10-06" as "6 Oct 2026"."""
+    try:
+        when = date.fromisoformat(day)
+    except ValueError:
+        return day
+    return f"{when.day} {when:%b %Y}"
+
+
+class _CostsCard:
+    """What Gemini costs, an estimate (sst.usage): today and this month in dollars, the month by feature, a link to
+    AI Studio's Billing page (the real figure) and the day the prices were read. Shown once there is a Gemini key or
+    anything counted; refreshed when the page is shown and when a call is counted (MainWindow.usage_changed)."""
+
+    def __init__(self, app):
+        self.app = app
+        self.frame, layout = card(10, (20, 18, 20, 18))
+        self.billing = button("Billing in AI Studio", lambda _=False: open_link(usage.BILLING), link=True, size="sm",
+                              icon="external", icon_after=True)
+        layout.addLayout(row(label("What Gemini costs (estimate)", "heading", wrap=False), self.billing, stretch_at=1))
+        totals = QHBoxLayout()
+        totals.setSpacing(32)
+        self.today, self.month = label("", "hero", wrap=False), label("", "hero", wrap=False)
+        for title, value in (("Today", self.today), ("This month", self.month)):
+            column = QVBoxLayout()
+            column.setSpacing(2)
+            column.addWidget(label(title.upper(), "caps", wrap=False))
+            column.addWidget(value)
+            totals.addLayout(column)
+        totals.addStretch()
+        layout.addLayout(totals)
+        self.free = caption("", "ok")  # a free key: nothing is billed
+        layout.addWidget(self.free)
+        self.table, self.lines = card(0, (14, 6, 14, 6), kind="well")
+        layout.addWidget(self.table)
+        self.empty = caption("Nothing counted this month yet. Each call to Gemini is: speech, AI cleanup, Text Transform, "
+                             "Translate and live translation.", "3")
+        layout.addWidget(self.empty)
+        self.note = caption("", "3")
+        layout.addWidget(self.note)
+
+    def refresh(self) -> None:
+        ledger, key = getattr(self.app, "usage", None), self.app.gateway.key_for("gemini")
+        summary = ledger.summary() if ledger is not None else usage.Summary()
+        shown = bool(key) or summary.used
+        self.frame.setVisible(shown)
+        if not shown:
+            return
+        # TODO(owner): the key's tier can't be read from the key; Settings.gemini_free_tier waits for a way to set it.
+        free = bool(getattr(self.app.settings, "gemini_free_tier", False))
+        self.today.setText("$0.00" if free else dollars(summary.today))
+        self.month.setText("$0.00" if free else dollars(summary.month))
+        self.free.setVisible(free and summary.used)
+        self.free.setText(f"$0 billed: a free key (would cost {dollars(summary.month)} this month).")
+        clear(self.lines)
+        for i, line in enumerate(summary.lines):
+            if i:
+                self.lines.addWidget(divider())
+            self.lines.addWidget(self._line(line))
+        self.table.setVisible(bool(summary.lines))
+        self.empty.setVisible(not summary.lines)
+        note = (f"Estimated from what Rflow sent and got back, at Google's list prices as of {nice_day(costs.SEEN)}. "
+                "Google's Billing page has the real figure.")
+        if summary.unpriced:
+            note += f" {summary.unpriced} call{'s' if summary.unpriced > 1 else ''} to a model Rflow has no price for " \
+                    "aren't in it."
+        self.note.setText(note)
+
+    @staticmethod
+    def _line(line: "usage.Line") -> QWidget:
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 8, 0, 8)
+        layout.setSpacing(12)
+        layout.addWidget(label(line.title, wrap=False), 1)
+        amount = caption(line.amount, "2", wrap=False)
+        layout.addWidget(amount)
+        cost = label(dollars(line.cost), wrap=False)
+        cost.setFont(font(13, 500, mono=True))
+        cost.setMinimumWidth(72)
+        cost.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(cost)
+        return widget
+
+
 # ---------------------------------------------------------------- AI & models (the overview)
 
 PAIR_WIDTH = 760  # a page narrower than this shows How Rflow hears you above the AI connection, not beside it
@@ -3795,6 +3887,8 @@ class ModelsPage(Page):
 
         self.keys = _KeysCard(self, app)
         self.add(self.keys.frame)
+        self.costs = _CostsCard(app)
+        self.add(self.costs.frame)
 
         self.pair = QBoxLayout(QBoxLayout.Direction.LeftToRight)
         self.pair.setSpacing(24)
@@ -3947,6 +4041,7 @@ class ModelsPage(Page):
         s = app.settings
         self.setup_card.refresh()
         self.keys.refresh()
+        self.costs.refresh()
         model = SPEECH_MODELS.get(app.speech_in_use())
         loading, downloading = app.loading_speech, app.downloading
         fetching = bool(downloading) and downloading[0] == DEFAULT_MODEL and model is None
@@ -4915,7 +5010,7 @@ class TransformPage(Page):
                 self.result.show()
                 self._say(f"{TRANSFORMS[key].name} in {result.seconds:.1f} s" +
                           (f" (checked and fixed once: {result.attempts} answers)" if result.attempts > 1 else ""))
-        run_in_background(self, lambda: self.app.run_transform(sample, key), done)
+        run_in_background(self, lambda: usage.within("tests", self.app.run_transform, sample, key), done)
 
 
 # What Translate shows for some selected text (into English, the default): names, numbers and times stay as written.
@@ -5087,7 +5182,8 @@ class TranslatePage(Page):
             self._say(f"{result.target} in {result.seconds:.1f} s" + (": " + "; ".join(result.warnings)
                                                                         if result.warnings else ""))
         second = self._second()
-        run_in_background(self, lambda: self.app.run_translation(sample, s.translate_to, second), done)
+        run_in_background(self, lambda: usage.within("tests", self.app.run_translation, sample, s.translate_to, second),
+                          done)
 
 
 # ---------------------------------------------------------------- Formatting
@@ -6981,6 +7077,11 @@ class MainWindow(QWidget):
         elif current == "welcome":
             self.pages[current].refresh(self.ready)
 
+    def usage_changed(self) -> None:
+        """A Gemini call was counted: AI & models' cost card, if it is on screen (it refreshes itself when shown)."""
+        if "models" in self.pages.built and self.current_page() == "models":
+            self.pages["models"].costs.refresh()
+
     def set_status(self, message: str, ready: bool) -> None:
         self.ready, self.status_message = ready, message
         if "home" in self.pages.built:
@@ -7064,6 +7165,7 @@ class PreviewApp:
         self.last_scan: dict | None = None
         self.calls: list[tuple] = []  # what the window asked for
         self._dictionary = None
+        self.usage = usage.Ledger(None)  # in memory: what Gemini cost, for screenshots and tests
 
     def hotkey_label(self) -> str:
         return parse_hotkey(self.settings.hotkey).label

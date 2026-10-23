@@ -35,7 +35,7 @@ from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QFontMetri
 from PySide6.QtNetwork import QLocalServer
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
-from sst import DOWNLOADS_DIR, __version__, bench, downloads, instance, scan, theme, updates
+from sst import DOWNLOADS_DIR, __version__, bench, downloads, instance, scan, theme, updates, usage
 from sst.audio import PREROLL_SECONDS, TAIL_SECONDS, Recorder, default_microphone, input_device_names
 from sst.commands import UNDO, match_command, phrases_for
 from sst.dictate import DEFAULT_HOTKEY, Dictation, wispr_flow_running
@@ -410,6 +410,7 @@ class _Signals(QObject):
     scan_done = Signal(object)  # the scan's result (sst.scan.save), or {"error": why}
     key = Signal()  # the dictation shortcut's listener queued an event, from the keyboard hook's thread
     live_key = Signal()  # the same for live translation's shortcut
+    usage = Signal()  # a Gemini call was counted (sst.usage), from the thread that made it
 
 
 class TrayApp:
@@ -468,6 +469,7 @@ class TrayApp:
         self.signals.scan_done.connect(self._on_scan_done)
         self.signals.key.connect(self._pump)  # the keys wake the app up: nothing polls between them
         self.signals.live_key.connect(self._live_key_pump)
+        self.signals.usage.connect(self._on_usage)
 
         self.icon = QIcon(str(ICON_FILE))
         self.recording_icon = _with_red_dot(self.icon)
@@ -1363,7 +1365,8 @@ class TrayApp:
         def complete(prompt: str, message: str) -> str:
             return Polisher(self.gateway, s.cleanup_model, [], fallback=s.cleanup_fallback or None,
                             system_prompt=prompt).complete(message)
-        result = Translator(complete).translate(text, target, second)
+        with usage.feature("translate"):  # Translate's "Try it" has said "tests" already
+            result = Translator(complete).translate(text, target, second)
         log.info("Translated %d characters into %s in %.1f s%s", len(text), result.target, result.seconds,
                  f" ({'; '.join(result.warnings)})" if result.warnings else "")
         return result
@@ -1392,7 +1395,8 @@ class TrayApp:
                             system_prompt=prompt).complete(message)
         # The user's name for Japanese emails, Translate's languages (as the Translate popup has them)
         context = TransformContext.of(s, system_language())
-        result = Transformer(complete, context=context).transform(text, key, terms)
+        with usage.feature("transform"):  # Text Transform's "Try it" has said "tests" already
+            result = Transformer(complete, context=context).transform(text, key, terms)
         log.info("Text Transform %s: %s in %.1f s after %d attempt(s)%s", key, "done" if result.accepted else "kept the text",
                  result.seconds, result.attempts, f" ({'; '.join(result.reasons)})" if result.reasons else "")
         return result
@@ -1484,7 +1488,8 @@ class TrayApp:
         if engine.name in REMOTE:  # scored without Parakeet to fall back on, so that a provider's failure shows
             engine = self._new_engine(engine.name, fallback=False)
             engine.words = speech_hints(s.vocabulary)
-        results = evaluate.run(folders, engine, evaluate.pipelines_for(polishers, title=engine.title), progress)
+        with usage.feature("tests"):
+            results = evaluate.run(folders, engine, evaluate.pipelines_for(polishers, title=engine.title), progress)
         results.save(evaluate.output_folder(folders))
         return results
 
@@ -1667,6 +1672,9 @@ class TrayApp:
             self._tell(LOAD_PROBLEMS.pop(0))
         self.gateway = GatewayConfig.load(self.profile.gateway_file)
         self.stats = Stats.load(self.profile.stats_file, history=self.profile.history_file)
+        # What Gemini costs (AI & models' card): the profile's own count; the one before is saved as it goes
+        self.usage = usage.Ledger(self.profile.usage_file, on_change=self._usage_counted)
+        usage.use(self.usage)
         old = getattr(self, "dictionary", None)
         # Each person's dictionary (terms, sound-alikes, learned corrections), with "Your words" mirrored into it.
         self.dictionary, problem = DictionaryStore.open(self.profile.folder() / "dictionary.db")
@@ -1676,6 +1684,17 @@ class TrayApp:
         self.learner = Learner(self.dictionary)  # corrections made twice become suggestions, never rules by themselves
         if old is not None:
             old.close()
+
+    def _usage_counted(self) -> None:
+        """A Gemini call was counted, on the thread that made it: the cost card updates on the UI thread."""
+        signals = getattr(self, "signals", None)
+        if signals is not None:
+            signals.usage.emit()
+
+    def _on_usage(self) -> None:
+        window = getattr(self, "window", None)
+        if window is not None and window.isVisible():
+            window.usage_changed()
 
     def bench_dir(self) -> Path:
         return self.profile.folder(bench.BENCH_DIR)
@@ -1862,6 +1881,7 @@ class TrayApp:
         if self.dictation:
             self.dictation.close()
         self.server.close()
+        self.usage.flush()  # after live translation stopped: its last minutes are counted
 
     def quit(self) -> None:
         self._stop_all()
