@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from sst import gateway, netconnect
+from sst import gateway, netconnect, usage
 from sst.gateway import GatewayConfig, GatewayError, Polisher, plausible
 
 HEARD = "so we merge the five pr's today"
@@ -73,7 +73,8 @@ class FakeGateway:
                 if anthropic:
                     return self._reply(200, {"type": "message", "role": "assistant",
                                              "content": [{"type": "text", "text": answer}]})
-                self._reply(200, {"choices": [{"message": {"role": "assistant", "content": answer}}]})
+                self._reply(200, {"choices": [{"message": {"role": "assistant", "content": answer}}],
+                                  "usage": {"prompt_tokens": 120, "completion_tokens": 9, "total_tokens": 189}})
 
             def do_GET(self):
                 fake.requests.append({"auth": self.headers.get("Authorization"), "x-api-key": self.headers.get("x-api-key"),
@@ -503,3 +504,47 @@ def test_the_speech_server_keeps_its_own_address_and_key(tmp_path):
     assert loaded.speech_server() == ("http://localhost:8000/v1", "speech-key") and loaded.service.key == "vllm"
     assert loaded.with_entry(SPEECH_SERVER, "", "").speech_server() == ("", "")
     assert GatewayConfig().speech_server() == ("", "")
+
+
+# ---- the cost tracker (sst.usage): a Gemini answer counted once, for the feature its caller names
+
+@pytest.fixture
+def ledger():
+    counted = usage.Ledger(None)
+    usage.use(counted)  # the conftest puts back none after the test
+    return counted
+
+
+def _calls(ledger) -> dict:
+    (day,) = ledger.days.values()
+    return {key: entry["calls"] for key, entry in day.items()}
+
+
+def test_a_gemini_cleanup_is_counted_with_the_thinking_as_output(fake, ledger):
+    assert fake.polisher(provider="gemini").polish(HEARD) == CLEAN
+    # total - prompt is billed as output: 9 written and 60 of thinking, which Gemini leaves out of completion_tokens
+    assert ledger.days[next(iter(ledger.days))] == {"cleanup|good": {
+        "audio_in": 0, "text_in": 120, "out": 9, "thoughts": 60, "audio_out": 0, "seconds": 0, "calls": 1}}
+
+
+def test_a_backup_model_is_a_call_of_its_own_and_a_failed_one_none(fake, ledger):
+    fake.polisher("cut", fallback="good", provider="gemini").polish(HEARD)  # cut short: billed, never used
+    assert _calls(ledger) == {"cleanup|cut": 1, "cleanup|good": 1}
+    fake.polisher("error", fallback="good", provider="gemini").polish(HEARD)
+    assert _calls(ledger) == {"cleanup|cut": 1, "cleanup|good": 2}
+
+
+def test_the_caller_names_the_feature_and_the_test_button_is_a_test(fake, ledger):
+    polisher = fake.polisher(provider="gemini")
+    with usage.feature("transform"):
+        polisher.complete(HEARD)
+    with usage.feature("tests"), usage.feature("translate"):  # the outermost caller says what it is for
+        polisher.complete(HEARD)
+    polisher.check()
+    assert _calls(ledger) == {"transform|good": 1, "tests|good": 2}
+
+
+def test_only_gemini_is_counted(fake, ledger):
+    fake.polisher().polish(HEARD)
+    fake.polisher(provider="openai").polish(HEARD)
+    assert ledger.days == {}

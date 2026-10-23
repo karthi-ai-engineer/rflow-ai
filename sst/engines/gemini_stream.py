@@ -35,6 +35,7 @@ from urllib.parse import urlsplit
 
 import numpy as np
 
+from sst import costs, usage
 from sst.engines.cloud import CloudEngine, vocabulary_list
 
 URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
@@ -136,6 +137,8 @@ class GeminiStream:
         self._opened = 0.0
         self._ws = None
         self.sent = 0  # samples sent
+        self._usage: dict = {}  # the last usageMetadata Google sent, if any
+        self._billed = False  # into the cost tracker once, when the stream closes or fails
 
     # -- the caller's side
 
@@ -194,6 +197,7 @@ class GeminiStream:
                 return
             self._closing = True
             self._cond.notify_all()
+        self._bill()
         self._frames.put(_END)
         ws = self._ws
         if ws is not None:
@@ -264,6 +268,8 @@ class GeminiStream:
         content = message.get("serverContent") or {}
         now = self._clock()
         with self._cond:
+            if isinstance(message.get("usageMetadata"), dict):
+                self._usage = message["usageMetadata"]
             self._last_message = now
             final = content.get("inputTranscription") or {}
             if isinstance(final, dict) and isinstance(final.get("text"), str) and final["text"]:
@@ -304,6 +310,23 @@ class GeminiStream:
             self.failed = self._scrub(reason)
             self._cond.notify_all()
         log.warning("Gemini Live: %s; the recording goes to the batch model", self.failed)
+        self._bill()  # the audio sent is billed all the same; the stream sends no more
+
+    def _bill(self) -> None:
+        """The stream into the cost tracker (sst.usage), once: the seconds sent at the Live API's 25 tokens a second,
+        and the text written, by Google's count when it gave one, else by its length. Google's own count of the audio
+        is only logged, to compare."""
+        with self._cond:
+            if self._billed or not self.sent:
+                return
+            self._billed = True
+            seconds, meta, text = self.sent / RATE, dict(self._usage), _joined(self._finals)
+        written = int(meta.get("responseTokenCount") or 0) or len(text) // usage.CHARS_PER_TOKEN
+        if meta:
+            log.info("Gemini Live: Google counted %s prompt and %s response tokens for %.1f s",
+                     meta.get("promptTokenCount"), meta.get("responseTokenCount"), seconds)
+        usage.record("live_dictation", self.model, audio_in=round(seconds * costs.LIVE_AUDIO), out=written,
+                     seconds=seconds)
 
     def _scrub(self, text: str) -> str:
         return text.replace(self.key, "***") if self.key else text

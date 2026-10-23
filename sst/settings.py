@@ -50,6 +50,9 @@ class Settings:
     live_duck: float = 0.1  # how loud the other apps stay while it speaks (0.0: barely, 1.0: as they are; sst.live.ducking)
     live_voice: str = "en_US-danny-low"  # the voice (sst.live.voice VOICES)
     live_told: bool = False  # the notice (audio goes to Google, the cost) was accepted once
+    # The Gemini key is on Google's free tier: the cost card says "$0 billed (would cost $X)". No key can tell its tier,
+    # and nothing sets it yet (TODO: the owner decides how it is asked or found out).
+    gemini_free_tier: bool = False
     # Start with your voice (sst.wake, sst.wakeui): the keyword starts a hands-free dictation, an end phrase types it.
     # The keyword itself, learned in its 10-try setup, is kept apart: Profile.wake_file.
     wake_enabled: bool = False
@@ -264,6 +267,11 @@ class Profile:
     @property
     def stats_file(self) -> Path:
         return self.folder() / "stats.json"
+
+    @property
+    def usage_file(self) -> Path:
+        """What the profile's Gemini use cost (sst.usage): tokens and seconds a day, by feature and model. No text."""
+        return self.folder() / "usage.json"
 
     @property
     def gateway_file(self) -> Path:

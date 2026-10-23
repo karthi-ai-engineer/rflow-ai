@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from sst import modelrules, netconnect
+from sst import modelrules, netconnect, usage
 from sst.settings import CONFIG_DIR
 
 GATEWAY_FILE = CONFIG_DIR / "gateway.json"  # the API keys, encrypted for the Windows user; never in git
@@ -387,7 +387,8 @@ class Polisher:
         """For the Settings "Test" button: clean one short sentence with the chosen model. Raises with a readable reason."""
         t0 = time.perf_counter()
         try:
-            answer = self._ask(self.model, "so this is a quick test of the dictation clean up")
+            with usage.feature("tests"):
+                answer = self._ask(self.model, "so this is a quick test of the dictation clean up")
         except TimeoutError:
             raise GatewayError("no answer in time") from None
         except (OSError, http.client.HTTPException) as e:
@@ -466,14 +467,17 @@ class Polisher:
     def _ask(self, model: str, text: str, timeout: float | None = None, limit: int | None = None) -> str:
         words = len(text.split())
         path, body = self._body(model, text, limit or ANSWER_TOKENS + ANSWER_TOKENS_PER_WORD * words)
+        sent = json.dumps(body)
         with self._lock:
-            status, data, headers = self._request(path, json.dumps(body), timeout or ANSWER_TIMEOUT + ANSWER_PER_WORD * words)
+            status, data, headers = self._request(path, sent, timeout or ANSWER_TIMEOUT + ANSWER_PER_WORD * words)
         try:
             answer = json.loads(data)
         except ValueError:
             answer = None
         if status == 200:
             netconnect.forgive(self._where, self.config.api_key, model)
+            if self.config.service.key == "gemini":  # the cost tracker (sst.usage): an answer cut short is billed too
+                usage.record("cleanup", model, **usage.chat_counts(answer, sent, _written(answer)))
         elif isinstance(answer, list) and answer and isinstance(answer[0], dict):
             answer = answer[0]  # an error wrapped in a list (Gemini's OpenAI-compatible endpoint)
         if status != 200 and (found := netconnect.refusal(status, data, headers)):
@@ -578,6 +582,14 @@ class Polisher:
 
 def _short(model: str) -> str:
     return model.rsplit("/", 1)[-1]
+
+
+def _written(answer) -> str:
+    """The text of an OpenAI-compatible answer, whatever its shape ("" when it has none)."""
+    try:
+        return str(answer["choices"][0]["message"]["content"] or "")
+    except (KeyError, IndexError, TypeError):
+        return ""
 
 
 def _detail(answer, data: str) -> str:

@@ -13,6 +13,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidStatus
 from websockets.frames import Close
 from websockets.http11 import Response
 
+from sst import usage
 from sst.live import gemini
 from sst.live.contracts import Kind, LiveConfig
 from sst.live.gemini import GeminiLiveTranslate
@@ -687,3 +688,32 @@ def test_without_a_listener_the_voice_is_only_counted(live):
     assert wait_until(lambda: server.sent)
     server.say(modelTurn=spoken(bytes([1, 0]) * 2400), outputTranscription={"text": "Hello."}, turnComplete=True)
     assert wait_until(lambda: kinds(events, Kind.LINE)) and engine.audio_s == pytest.approx(0.1)
+
+
+# ---- the cost tracker (sst.usage): the seconds each way, after each connection
+
+def test_live_translation_is_counted_after_each_connection_by_the_seconds_each_way(live, monkeypatch):
+    ledger = usage.Ledger(None)
+    monkeypatch.setattr(usage, "_ledger", ledger)
+    first, second = FakeServer(), FakeServer()
+    engine, _, _ = live([first, second])
+    engine.start()
+    assert wait_until(lambda: first.sent)
+    for _ in range(4):
+        engine.feed(VOICE)
+    assert wait_until(lambda: len(first.frames) == 4)
+    first.say(modelTurn=spoken(bytes([1, 0]) * 4800))  # 0.2 s of Google's voice
+    assert wait_until(lambda: engine.audio_s > 0)
+    first.incoming.put({"goAway": {"timeLeft": "10s"}, "usageMetadata": {"promptTokenCount": 10}})
+    assert wait_until(lambda: second.sent)
+
+    def counted():
+        return next(iter(ledger.days.values()), {}).get("live_translation|gemini-3.5-live-translate-preview", {})
+    assert counted()["audio_in"] == 10 and counted()["audio_out"] == 5 and counted()["seconds"] == pytest.approx(0.4)
+    for _ in range(2):
+        engine.feed(VOICE)
+    assert wait_until(lambda: len(second.frames) == 2)
+    engine.stop()
+    assert counted()["audio_in"] == 15 and counted()["seconds"] == pytest.approx(0.6) and counted()["audio_out"] == 5
+    assert usage.cost("gemini-3.5-live-translate-preview", "2026-10-23", counted()) == pytest.approx(
+        (15 * 3.50 + 5 * 21.00) / 1e6)

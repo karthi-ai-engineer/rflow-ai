@@ -253,6 +253,28 @@ def test_each_profile_has_its_own_setup(tray_app):
     assert [p.id for p in app.profiles.items] == ["default"]
 
 
+def test_each_profile_counts_what_gemini_costs_and_the_app_names_the_feature(tray_app, monkeypatch):
+    from sst import usage
+    app, _, _ = tray_app
+    assert usage.active() is app.usage and app.usage.path == app.profile.usage_file
+
+    class Counting:  # a Gemini model that counts each answer the way sst.gateway does
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def complete(self, message):
+            usage.record("cleanup", "gemini-3.5-flash-lite", text_in=100)
+            return message
+    monkeypatch.setattr(sst_app, "Polisher", Counting)
+    app.run_transform("so this is the text we keep for the test", "concise")
+    app.run_translation("Hello there.", "Spanish")
+    assert {key.split("|")[0] for day in app.usage.days.values() for key in day} == {"transform", "translate"}
+    first = app.usage
+    app.create_profile("Rahul")
+    assert usage.active() is app.usage and app.usage is not first and app.usage.days == {}
+    assert first.path.exists()  # the first profile's count was saved as the other took over
+
+
 def _wait_for(condition, qt_wait):
     for _ in range(100):
         if condition():
