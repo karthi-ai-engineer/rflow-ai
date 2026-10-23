@@ -373,19 +373,19 @@ def test_a_cloud_model_needs_its_key_then_takes_over_with_parakeet_behind_it(tra
 
     app, saved, _ = tray_app
     parakeet = app.dictation.engine
-    app.choose_speech_model("openai")  # no key yet: the page asks for one instead
+    app.choose_speech_model("gemini")  # no key yet: the page asks for one instead
     assert app.settings.speech_model == "parakeet"
     app.add_words(["Karthi"])
-    app.use_cloud_speech("openai", "sk-test", "gpt-4o-transcribe")
-    assert saved["gateway"].key_for("openai") == "sk-test"  # encrypted with the others, shared with AI cleanup
-    assert saved["settings"].speech_cloud_models == {"openai": "gpt-4o-transcribe"}
-    assert _wait_for(lambda: app.speech_in_use() == "openai", QTest.qWait)
+    app.use_cloud_speech("gemini", "AIza-test", "gemini-3.5-transcribe")
+    assert saved["gateway"].key_for("gemini") == "AIza-test"  # encrypted with the others, shared with AI cleanup
+    assert saved["settings"].speech_cloud_models == {"gemini": "gemini-3.5-transcribe"}
+    assert _wait_for(lambda: app.speech_in_use() == "gemini", QTest.qWait)
     engine = app.dictation.engine
-    assert (engine.api_key, engine.model, engine.words) == ("sk-test", "gpt-4o-transcribe", ["Karthi"])
+    assert (engine.api_key, engine.model, engine.words) == ("AIza-test", "gemini-3.5-transcribe", ["Karthi"])
     assert engine.fallback() is parakeet  # already in memory: nothing to load when the provider fails
-    assert "speech: Openai" in app.window.status_message
-    app.use_cloud_speech("openai", "sk-new", "whisper-1")  # the card's Save: no reload
-    assert app.dictation.engine is engine and (engine.api_key, engine.model) == ("sk-new", "whisper-1")
+    assert "speech: Gemini" in app.window.status_message
+    app.use_cloud_speech("gemini", "AIza-new", "gemini-3.5-flash-lite")  # the card's Save: no reload
+    assert app.dictation.engine is engine and (engine.api_key, engine.model) == ("AIza-new", "gemini-3.5-flash-lite")
     app.set_speech_language("ta")
     assert engine.language == "ta"
     app.save_cleanup(False, "", "", GatewayConfig())  # the key is gone: back to Parakeet, the one in memory
@@ -397,11 +397,11 @@ def test_starting_with_a_cloud_model_loads_parakeet_only_when_needed(tray_app):
     from PySide6.QtTest import QTest
 
     app, _, _ = tray_app
-    app.use_cloud_speech("groq", "gsk-test", "")
-    assert _wait_for(lambda: app.speech_in_use() == "groq", QTest.qWait)
-    app._local = None  # as after a start with Groq chosen: Parakeet isn't in memory
+    app.use_cloud_speech("gemini", "AIza-test", "")
+    assert _wait_for(lambda: app.speech_in_use() == "gemini", QTest.qWait)
+    app._local = None  # as after a start with Gemini chosen: Parakeet isn't in memory
     engine = app.dictation.engine
-    assert engine.model == "whisper-large-v3-turbo"  # Groq's first model
+    assert engine.model == "gemini-3.5-transcribe"  # Gemini's first model
     first = engine.fallback()
     assert first.name == "parakeet" and engine.fallback() is first  # loaded once
 
@@ -486,9 +486,23 @@ def test_a_new_install_can_start_with_a_cloud_model_only(no_parakeet, tray_app):
     from PySide6.QtTest import QTest
 
     app, _, _ = tray_app
-    app.use_cloud_speech("groq", "gsk-test", "")
-    assert _wait_for(lambda: app.speech_in_use() == "groq", QTest.qWait)
+    app.use_cloud_speech("gemini", "AIza-test", "")
+    assert _wait_for(lambda: app.speech_in_use() == "gemini", QTest.qWait)
     assert app.listener.running and app._local is None  # nothing on this computer
+
+
+def test_a_profile_on_a_provider_no_longer_offered_dictates_with_gemini_or_parakeet(tray_app):
+    from PySide6.QtTest import QTest
+
+    app, _, _ = tray_app
+    app.use_cloud_speech("groq", "gsk-test", "")  # Groq chosen before it was hidden: no crash, Parakeet types
+    assert app.settings.speech_model == "groq" and app.gateway.key_for("groq") == "gsk-test"  # the choice is kept
+    QTest.qWait(50)
+    assert _wait_for(lambda: app.speech_in_use() == "parakeet" and not app.loading_speech, QTest.qWait)
+    app.save_key("gemini", "AIza-test")
+    app.use_cloud_speech("openai", "sk-test", "")  # with a Gemini key: Gemini, on its first model
+    assert _wait_for(lambda: app.speech_in_use() == "gemini", QTest.qWait)
+    assert app.dictation.engine.model == "gemini-3.5-transcribe"
 
 
 def test_the_tray_app_dictates_through_the_voice_pipeline(tray_app):
