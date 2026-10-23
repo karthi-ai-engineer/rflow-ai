@@ -20,7 +20,6 @@ import time
 from pathlib import Path
 
 from sst import __version__
-from sst.audio import list_input_devices, load_wav, record_until_enter, save_recording
 from sst.engines import DEFAULT_MODEL, ENGINES, load_engine, usable
 from sst.engines.cloud import CLOUD, REMOTE
 
@@ -64,6 +63,8 @@ def _transcribe_and_report(engine, audio, rate) -> str:
 
 
 def cmd_start(args) -> None:
+    from sst.audio import record_until_enter, save_recording  # the audio modules start PortAudio: not for `sst app`
+
     engine = _load(args.engine)  # load before recording so there is no wait after you stop talking
 
     while True:
@@ -84,6 +85,8 @@ def cmd_start(args) -> None:
 
 
 def cmd_file(args) -> None:
+    from sst.audio import load_wav
+
     path = Path(args.path)
     audio, rate = load_wav(path)
     engine = _load(args.engine)
@@ -91,6 +94,8 @@ def cmd_file(args) -> None:
 
 
 def cmd_devices(args) -> None:
+    from sst.audio import list_input_devices
+
     print("\n".join(list_input_devices()))
 
 
@@ -169,9 +174,9 @@ def cmd_live(args) -> None:
 
 
 def cmd_app(args) -> None:
-    from sst.app import main as app_main
+    from sst.instance import launch  # a running Rflow is asked to show its window before the app is imported
 
-    sys.exit(app_main())
+    sys.exit(launch())
 
 
 def cmd_eval(args) -> None:

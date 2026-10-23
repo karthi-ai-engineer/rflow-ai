@@ -22,6 +22,7 @@ from sst.settings import Settings, Stats  # noqa: E402
 from sst.snippets import load  # noqa: E402
 from sst.transform import TRANSFORMS, TransformGuard  # noqa: E402
 from sst.ui import KeyCap  # noqa: E402
+from sst.wakeui import BLUETOOTH  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -81,6 +82,66 @@ def test_someone_who_has_been_welcomed_starts_at_home_and_can_open_every_page():
             assert window.nav[w.SECTION[key]].isChecked()
 
 
+def test_building_and_opening_the_window_flashes_no_other_window():
+    """A widget made visible before it has a parent shows as a window of its own for a moment: at start-up that was
+    dozens of small "Rflow" windows opening and closing (#181)."""
+    from PySide6.QtCore import QEvent, QObject
+    from PySide6.QtWidgets import QWidget
+
+    class Spy(QObject):
+        shown: list[str] = []
+
+        def eventFilter(self, obj, event):
+            if event.type() == QEvent.Type.Show and isinstance(obj, QWidget) and obj.isWindow() \
+                    and not isinstance(obj, w.MainWindow):
+                self.shown.append(f"{type(obj).__name__} {obj.objectName()} {obj.size().toTuple()}")
+            return False
+
+    spy = Spy()
+    QApplication.instance().installEventFilter(spy)
+    try:
+        for kwargs in ({}, {"settings": Settings()}, {"gateway": GatewayConfig("http://localhost:8000/v1", "k", "vllm")}):
+            window, _ = _window(**kwargs)
+            window.open()
+            for key in window.pages:
+                window.show_page(key)
+            window.hide()
+    finally:
+        QApplication.instance().removeEventFilter(spy)
+    assert spy.shown == []
+
+
+def test_pages_are_built_when_first_wanted_as_the_window_is_then(monkeypatch):
+    """Building all fifteen pages took 3-5 s and 107 MB at every start: Home (and the welcome) now, the rest when used.
+    A page built after the theme, the window's width or the app's settings changed is as if it had been there all along."""
+    window, _ = _window(settings=Settings())
+    assert set(window.pages.built) == {"home", "welcome"}
+    monkeypatch.setattr(w, "dark_mode", lambda: False)
+    born_light, _ = _window(settings=Settings(welcomed=True, hotkey="menu"))  # light and "menu" from the start
+    early = born_light.pages["settings"]  # built in light (the theme is global: before the next window sets dark)
+    monkeypatch.setattr(w, "dark_mode", lambda: True)
+    window, app = _window()
+    assert set(window.pages.built) == {"home"} and len(window.pages) == 15 and "settings" in window.pages
+    assert list(window.pages)[:3] == ["home", "dictionary", "snippets"]
+    for win in (window, born_light):
+        win.open("home")
+        win.resize(820, 600)  # narrow: the pages' tighter margins
+        win.set_update_status("Rflow is up to date.")
+        win.set_status("Ready: hold Ctrl+Win", True)
+    window.apply_theme("light")
+    app.settings = dataclasses.replace(app.settings, hotkey="menu")  # e.g. another profile's settings
+    window.show_page("settings")
+    born_light.show_page("settings")
+    page = window.pages["settings"]
+    assert "settings" in window.pages.built and window.current_page() == "settings" and window.pages["home"].ready
+    assert page.update_status.text() == "Rflow is up to date." and page.hotkey.currentData() == "menu"
+    assert page.body.contentsMargins().left() == early.body.contentsMargins().left() == 24
+    assert page.grab().toImage() == early.grab().toImage()  # in the theme in use, icons and all
+    for win in (window, born_light):
+        win.hide()
+    window.apply_theme("dark")
+
+
 def test_pages_one_level_down_lead_back():
     window, _ = _window()
     window.show_page("speech")
@@ -119,6 +180,33 @@ def test_home_shows_the_stats_and_the_dictations_by_day():
     assert not home.hero_keys.isHidden() and home.hero_keys.accessibleName().startswith("Hold Ctrl+Win and talk")
     assert [cap.key_text for cap in home.hero_keys.findChildren(KeyCap)] == ["Ctrl", "Win"]  # drawn as keys
     assert home.orb.state == "ready" and window.status_title.text() == "Ready"
+
+
+def test_the_orb_moves_only_while_listening_or_cleaning_up():
+    """Each orb frame repaints the soft surfaces under it too: a breathing "ready" cost half a core while Home was open."""
+    from sst.ui import Orb
+    window, app = _window()
+    app.speech_in_use = lambda: "parakeet"
+    window.open("home")
+    window.set_status("Ready: hold Ctrl+Win", True)
+    home = window.pages["home"]
+    assert home.orb.state == "ready" and home.orb.isVisible() and not home.orb.animating
+    window.hide()
+    orb = Orb()
+    orb.show()
+    for state in ("ready", "off", "loading", "done"):
+        orb.set_state(state, 0.5)
+        assert not orb.animating, state
+    for state in ("live", "ai"):
+        orb.set_state(state)
+        assert orb.animating, state
+    orb.hide()
+    assert not orb.animating
+    orb.show()
+    assert orb.animating  # still listening when shown again
+    orb.set_state("ready")
+    assert not orb.animating and not orb.grab().isNull()
+    orb.hide()
 
 
 def test_home_explains_what_to_do_before_the_first_dictation():
@@ -200,6 +288,74 @@ def test_settings_apply_at_once_and_keep_the_rest():
     caps = [cap.key_text for cap in page.hotkey_caps.findChildren(KeyCap) if cap.isVisibleTo(page)]
     assert caps == ["Menu"]  # the key, drawn as a key
     assert (s.vocabulary, s.cleanup, s.cleanup_model, s.welcomed) == (["Tamil"], True, "m", True)  # untouched
+
+
+def test_starting_with_the_voice_is_off_until_switched_on_next_to_the_dictation_key():
+    window, app = _window()
+    card = window.pages["settings"].wake
+    assert not card.toggle.isChecked() and card.details.isHidden()
+    card.toggle.setChecked(True)
+    assert ("set_wake_enabled", True) in app.calls and app.settings.wake_enabled and not card.details.isHidden()
+    assert not card.models.isHidden() and card.download.text() == "Download (58 MB)"  # the models come first
+    assert not card.setup.isEnabled() and card.setup.text() == "Set up" and "Not set up yet" in card.keyword.text()
+    card.download.click()
+    assert ("download_wake_models",) in app.calls
+    app._wake = w.WakeState(models="downloading", percent=40, size=57_900_000)
+    card.refresh()
+    assert card.download.isHidden() and not card.cancel.isHidden() and "40%" in card.models_caption.text()
+    assert card.lamp.state == "warn" and "40%" in card.status.text()
+
+
+def test_the_wake_card_says_where_it_listens_and_sets_the_keyword_up_again():
+    window, app = _window(settings=Settings(welcomed=True, wake_enabled=True))
+    app._wake = w.WakeState(keyword="okay type", heard=9, models="ready", listening="Microphone (Realtek)")
+    card = window.pages["settings"].wake
+    card.refresh()
+    assert card.models.isHidden() and card.lamp.state == "ok"
+    assert card.status.text().startswith("Listening for “okay type” on Microphone (Realtek)")
+    assert card.keyword.text() == "“okay type”  ·  heard 9 of 10 in the setup" and card.setup.text() == "Set up again"
+    card.setup.click()
+    assert ("open_wake_setup",) in app.calls
+    app._wake = w.WakeState(keyword="okay type", heard=9, models="ready", note=BLUETOOTH)
+    card.refresh()
+    assert card.lamp.state == "warn" and card.status.text() == BLUETOOTH  # why it doesn't listen
+
+
+def test_the_wake_card_says_which_microphone_and_lets_it_listen_on_the_headset():
+    window, app = _window(settings=Settings(welcomed=True, wake_enabled=True))
+    headset = "Headset (OnePlus Nord Buds 3r)"
+    app._wake = w.WakeState(keyword="karthi", heard=10, said=13, models="ready", listening="Microphone (Realtek)",
+                            instead=headset)
+    card = window.pages["settings"].wake
+    card.refresh()
+    assert card.keyword.text() == "“karthi”  ·  heard 10 of 13 in the setup"  # the takes said again count too
+    assert card.status.text().startswith("Listening for “karthi” on Microphone (Realtek).")
+    assert f"Not on {headset}: turn on “Listen on my Bluetooth headset”" in card.status.text()
+    assert not card.bluetooth.isChecked()
+    card.bluetooth.setChecked(True)
+    assert app.settings.wake_bluetooth
+    app._wake = w.WakeState(keyword="karthi", heard=10, said=13, models="ready", listening=headset)
+    card.refresh()
+    assert card.status.text().startswith(f"Listening for “karthi” on {headset}.") and "Not on" not in card.status.text()
+    assert card.bluetooth.isChecked()
+
+
+def test_end_phrases_are_saved_as_typed_and_done_is_warned_against():
+    window, app = _window(settings=Settings(welcomed=True, wake_enabled=True))
+    card = window.pages["settings"].wake
+    assert card.phrases.text() == "stop it" and "Not “done”" in card.phrases_caption.text()
+    card.phrases.setText(" stop it ,End it, stop it,")
+    card.phrases.editingFinished.emit()
+    assert app.settings.wake_end_phrases == ["stop it", "End it"] and card.phrases.text() == "stop it, End it"
+    card.phrases.setText("stop it, Done.")
+    card.phrases.editingFinished.emit()
+    assert app.settings.wake_end_phrases == ["stop it", "Done."]
+    assert card.phrases_caption.text().startswith("“Done.” ends a dictation whenever you say the word")
+    card.phrases.setText("")
+    card.phrases.editingFinished.emit()
+    assert app.settings.wake_end_phrases == ["stop it"]  # there's always one
+    card.voice.setChecked(False)
+    assert not app.settings.wake_voice_check
 
 
 def test_the_microphone_is_chosen_on_ai_and_models():
@@ -888,6 +1044,7 @@ def test_the_mouse_wheel_never_changes_a_dropdown_anywhere():
     from PySide6.QtGui import QWheelEvent
     from PySide6.QtWidgets import QComboBox
     window, _ = _window()
+    list(window.pages.values())  # every page built (they are built when first shown)
     boxes = window.findChildren(QComboBox)
     assert boxes and all(isinstance(box, w.Choice) for box in boxes)  # every page, every dropdown
     box = window.pages["speech"].in_use.language

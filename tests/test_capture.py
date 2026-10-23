@@ -69,6 +69,51 @@ def test_a_warm_microphone_keeps_the_moment_before_the_key_press(monkeypatch):
     assert np.all(out[:BLOCK] == np.float32(0.2)) and take.seconds == pytest.approx(1.0)  # the lead-in isn't counted
 
 
+def test_long_blocks_keep_the_whole_pre_roll_and_tail(monkeypatch):
+    """The always-on microphone's blocks are BLOCK_SECONDS long (fewer trips into Python): the 2 s pre-roll of the voice
+    pipeline and the tail are still there in full, sample for sample."""
+    block = int(RATE * audio.BLOCK_SECONDS)
+    r = _recorder(monkeypatch, warm_seconds=float("inf"), tail=0.3)
+    r.preroll_seconds = 2.0
+    r.keep_open()
+
+    def feed(seconds, value):
+        for _ in range(int(seconds * RATE / block)):
+            r._on_audio(np.full((block, 1), value, dtype=np.float32), block, None, None)
+    feed(5.0, 0.1)  # waiting for the key
+    r.start()
+    feed(1.0, 0.3)
+    take = r.stop_later()
+    feed(0.5, 0.5)
+    out = take.audio()
+    assert take.done.is_set() and np.sum(out == np.float32(0.1)) >= 2.0 * RATE  # the pre-roll, whole
+    assert np.sum(out == np.float32(0.3)) == RATE and np.sum(out == np.float32(0.5)) == int(0.3 * RATE)
+    assert r._blocksize() == block and audio.BLOCK_SECONDS >= 0.05
+
+
+def test_the_level_is_worked_out_only_when_something_shows_it(monkeypatch):
+    r = _recorder(monkeypatch, warm_seconds=float("inf"))
+    r.keep_open()
+    calls = []
+    real_mean = np.mean
+    monkeypatch.setattr(audio.np, "mean", lambda *a, **k: calls.append(1) or real_mean(*a, **k))
+    _feed(r, 1.0, value=0.25)  # the always-on microphone keeping its pre-roll: no level per block
+    assert calls == []
+    assert r.level == pytest.approx(0.25) and len(calls) == 1  # the pill asked
+    r.start()
+    assert r.level == 0.0  # a new recording starts from silence, as before
+    _feed(r, 0.1, value=0.5)
+    assert r.level == pytest.approx(0.5)
+    r.stop()
+    assert r.level == 0.0
+
+
+def test_a_level_meter_shows_the_latest_block():
+    meter = audio.LevelMeter()
+    meter._on_audio(np.full((BLOCK, 1), 0.2, dtype=np.float32), BLOCK, None, None)
+    assert meter.level == pytest.approx(0.2)
+
+
 def test_the_tail_after_the_release_is_recorded_without_waiting_for_it(monkeypatch):
     r = _recorder(monkeypatch, warm_seconds=300, tail=0.3)
     r.start()
@@ -98,6 +143,21 @@ def test_a_bluetooth_microphone_is_never_kept_open(monkeypatch):
     _feed(r, 0.5)
     r.stop()
     assert not r.warm  # it would keep the headset playing in call quality
+
+
+def test_a_bluetooth_microphone_is_kept_open_when_the_user_asked_for_it(monkeypatch):
+    r = _recorder(monkeypatch, call_quality=True, warm_seconds=float("inf"))
+    r.keep_call_quality = True  # the wake word listening on the headset, as the user chose
+    r.keep_open()
+    assert r.warm
+    r.start()
+    _feed(r, 0.5)
+    r.stop()
+    r.tick(time.monotonic() + 3600)
+    assert r.warm
+    r.keep_call_quality = False  # listening stopped: it closes at the next look, as before
+    r.tick(time.monotonic())
+    assert not r.warm
 
 
 def test_choosing_another_microphone_or_mode_reopens(monkeypatch):
@@ -266,3 +326,35 @@ def test_the_window_lists_windows_microphones_without_restarting_anything(monkey
     windows = _windows(monkeypatch, LAPTOP, HEADSET, default=HEADSET)
     assert audio.input_device_names() == [LAPTOP.name, HEADSET.name] and windows["restarts"] == 0
     assert audio.default_microphone() == HEADSET.name
+
+
+def test_a_tap_hears_every_block_recording_or_not(monkeypatch):
+    r = _recorder(monkeypatch, warm_seconds=float("inf"))
+    heard = []
+    r.tap = lambda block, rate: heard.append((len(block), rate))
+    r.keep_open()
+    _feed(r, 0.1)  # waiting
+    r.start()
+    _feed(r, 0.1)  # recording
+    r.stop()
+    assert heard == [(BLOCK, RATE)] * 20
+
+
+def test_a_tap_that_fails_never_breaks_the_recording(monkeypatch):
+    r = _recorder(monkeypatch)
+    r.tap = lambda block, rate: 1 / 0
+    r.start()
+    _feed(r, 0.5)
+    assert len(r.stop()) == RATE // 2
+
+
+@pytest.mark.parametrize("rate", [48_000, 44_100, 16_000])
+def test_the_stream_resampler_has_no_seams_between_blocks(rate):
+    t = np.arange(rate) / rate
+    tone = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)  # one second
+    resampler = audio.StreamResampler(rate)
+    out = np.concatenate([resampler(tone[i:i + 441]) for i in range(0, len(tone), 441)])  # blocks of any size
+    assert abs(len(out) - RATE) <= 3
+    shift = (round(rate / RATE) - 1) / 2 / rate  # the average's delay: half its width
+    expected = 0.5 * np.sin(2 * np.pi * 440 * (np.arange(len(out)) / RATE - shift))
+    assert np.max(np.abs(out[100:-100] - expected[100:-100])) < 0.02

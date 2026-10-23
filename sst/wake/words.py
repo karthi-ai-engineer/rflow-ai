@@ -7,6 +7,12 @@ its name is written as the word that sounds like it. Such a letter is found thre
 a single letter before a capitalised part ("RFlow", "iPhone"), or a consonant before another that no English word
 starts with ("Rflow": no word starts "rf"). Short capitals ("AI") and words without a vowel ("GPT") are said letter by
 letter. Real words are kept as they are.
+
+Names: the spotter knows ~500 English word pieces, and a name like "karthi" is heard as whatever English spelling the
+voice sounds like, which differs from voice to voice (measured, the same "karthi": Windows' Zira as "karthy" and
+"carthy", Piper's danny as "carfi" and "kathy"; as written, 1 of 3 and 1 of 9). So the setup also tries the spellings
+that sound alike (sounds_like) and the words the model itself heard in the user's tries (same_sound decides which of
+those can stand for the keyword), and keeps the one heard most.
 """
 import re
 from collections.abc import Sequence
@@ -122,6 +128,61 @@ def spellings(text: str) -> list[str]:
     ranked = sorted(product(*(range(len(o)) for o in options)), key=sum)  # the best alternatives together first
     out = list(dict.fromkeys(" ".join(o[i] for o, i in zip(options, pick, strict=True)) for pick in ranked))
     return out[:MAX_SPELLINGS]
+
+
+# Ways an English reader writes the same sound, tried on the words that end in "i" (names like Karthi, Preethi, Ravi;
+# English words rarely do, and "start" mustn't become "stat"): the ending "i" as "y" (Zira's "karthi" was
+# heard as "karthy" 3 of 3, as written 1 of 3), a hard "k" as "c" ("carthi", "carthy"), "ar" before a consonant without
+# its r ("kathi", "kathy": non-rhotic, and Piper's "karthi" was heard as "kathy" 4 of 9). Not "th" as a dental t:
+# "karti" was heard 0 of 12 in both voices; when a voice says it so, the setup learns it from what the model heard.
+_ALIKE = ((r"i\b", "y"), (r"\bk(?=[aou])", "c"), (r"(?<=[a-z])ar(?=[^aeiouy\s])", "a"))
+MAX_ALIKE = 6
+
+
+def sounds_like(text: str) -> list[str]:
+    """`text`'s first spelling and up to MAX_ALIKE - 1 others that sound alike, the fewest changes first:
+    "karthi" -> ["karthi", "karthy", "carthi", "kathi", "carthy", "kathy"]; "okay type" -> ["okay type"]."""
+    base = spellings(text)[0].split()
+    found = {" ".join(base): 0}
+    for subset in range(1, 1 << len(_ALIKE)):
+        words = list(base)
+        for i, (pattern, replacement) in enumerate(_ALIKE):
+            if subset >> i & 1:
+                words = [re.sub(pattern, replacement, w) if len(b) > 2 and b.endswith("i") else w
+                         for w, b in zip(words, base, strict=True)]
+        spelled = " ".join(words)
+        found[spelled] = min(found.get(spelled, len(_ALIKE)), bin(subset).count("1"))
+    return sorted(found, key=found.get)[:MAX_ALIKE]
+
+
+def _sound(text: str) -> str:
+    """Letters as they sound, roughly: "Carthy" and "karti" alike ("karti"), "cardi" too (a d and a t)."""
+    s = re.sub(r"[^a-z ]", "", text.lower())
+    for pattern, replacement in ((r"ph", "f"), (r"th", "t"), (r"ck", "k"), (r"c(?=[aoulr ]|$)", "k"), (r"c", "s"),
+                                 (r"q", "k"), (r"d", "t"), (r"z", "s"), (r"y\b", "i"), (r"ee", "i"), (r"(.)\1", r"\1"),
+                                 (r"(?<=[aeiou])r(?=[^aeiou ])", "")):
+        s = re.sub(pattern, replacement, s)
+    return s.replace(" ", "")
+
+
+def _close(a: str, b: str, ratio: float = 0.6) -> bool:
+    return bool(a) and bool(b) and a[0] == b[0] and SequenceMatcher(None, a, b).ratio() >= ratio
+
+
+def same_sound(heard: str, keyword: str) -> bool:
+    """Could `heard`, the words the spotter's model wrote for a try, stand for `keyword`? Close in sound, each of the
+    keyword's own words (not "okay", "hey", "start") found in its words from the same first sound ("CARTHY", "CARDI" for
+    "karthi"; not "PARTY": a word said in dictation wouldn't start it; "carth is start" for "okay karthi start", never
+    "ok start"), and a keyword that could be chosen on its own (not "the", not one syllable)."""
+    a, b = _sound(heard), _sound(spellings(keyword)[0])
+    own = [word for word in spellings(keyword)[0].split() if word not in COMMON]
+    if check_keyword(heard) is not None or not a or SequenceMatcher(None, a, b).ratio() < 0.6:
+        return False
+    if not own:  # only words like "okay type": the whole of it, from its first sound
+        return _close(a, b)
+    said = heard.lower().split()  # "hey" may go unheard ("carth had please"), but never the name
+    runs = {_sound(" ".join(said[i:j])) for i in range(len(said)) for j in range(i + 1, min(len(said), i + 3) + 1)}
+    return all(any(_close(run, _sound(word), 0.65) for run in runs) for word in own)  # whole words, not "okay guy"
 
 
 def _letters(text: str) -> str:

@@ -660,9 +660,13 @@ class Segmented(Card):
 
 
 class Orb(QWidget):
-    """What Rflow is doing, at a glance: ready (a mint ring, bars breathing), live (coral, the voice's level), ai
+    """What Rflow is doing, at a glance: ready (a mint ring, bars at rest), live (coral, the voice's level), ai
     (violet, cleaning up), loading (an amber arc with the percentage), done (a check), off (paused).
     The raised disc is its host's surface ("orb"); the ring, the core and what's in it are drawn here."""
+
+    # Only these move. Each frame repaints the orb and the soft surfaces under it (18-40 ms): a breathing "ready" kept
+    # half a core busy for as long as Home was open, so the waiting states are drawn once, still.
+    ANIMATED = ("live", "ai")
 
     def __init__(self, size: int = 128, level=lambda: 0.0, parent=None):
         super().__init__(parent)
@@ -672,9 +676,15 @@ class Orb(QWidget):
         surface(self, "orb", size / 2)
         self._timer = QTimer(self, interval=40, timeout=self._tick)
 
+    @property
+    def animating(self) -> bool:
+        return self._timer.isActive()
+
     def set_state(self, state: str, progress: float = 0.0) -> None:
+        if (state, progress) == (self.state, self.progress):
+            return  # the window refreshes often: an unchanged orb isn't painted again
         self.state, self.progress = state, progress
-        animated = state in ("ready", "live", "ai")
+        animated = state in self.ANIMATED
         if animated and not self._timer.isActive() and self.isVisible():
             self._timer.start()
         elif not animated:
@@ -683,7 +693,7 @@ class Orb(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        if self.state in ("ready", "live", "ai"):
+        if self.state in self.ANIMATED:
             self._timer.start()
 
     def hideEvent(self, event):
@@ -746,8 +756,7 @@ class Orb(QWidget):
             if self.state == "live":
                 heights = [4 + 30 * v for v in self._levels]
             elif self.state == "ready":
-                breath = 0.85 + 0.15 * math.sin(self._phase * 2)
-                heights = [h * breath for h in (6, 10, 14, 10, 6)]
+                heights = [6, 10, 14, 10, 6]
             else:
                 heights = [4] * 5
             bar = QColor(colour)
@@ -1122,7 +1131,8 @@ def setting_row(title: str, caption: str = "", *controls, tooltip: str = "") -> 
     words.setSpacing(2)
     title_label = label(title, "rowtitle")
     caption_label = label(caption, "caption", "2")
-    caption_label.setVisible(bool(caption))
+    if not caption:  # never setVisible(True) here: a widget without a parent yet would flash up as its own window
+        caption_label.hide()
     words.addWidget(title_label)
     words.addWidget(caption_label)
     layout.addLayout(words, 1)

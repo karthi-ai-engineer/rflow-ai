@@ -398,3 +398,57 @@ def test_busy_while_recording_or_typing(make):
     assert d.busy
     feed(d, (0.7, "release"))
     assert not d.busy
+
+
+# ---- the wake word's turns (sst.wakeui): started hands-free, ended from outside, the keyword trimmed
+
+def _without_keyword(text: str) -> str:
+    return text.removeprefix("Okay type, ").removesuffix(" Stop it.")
+
+
+def test_a_trim_set_for_one_recording_cuts_the_keyword_before_commands_and_cleanup(make):
+    d, typed, _ = make(text="Okay type, hello there. Stop it.")
+    heard, cleaned = [], []
+    d.cleanup = FakeCleanup()
+    d.cleanup.polish = lambda text: cleaned.append(text) or text
+    d.on_result = lambda h, text, seconds: heard.append(h)
+    d.trim = _without_keyword
+    d.handle("handsfree", 10.0)  # what the wake word does: hands-free, like Ctrl+Win+Space
+    d.trim = None  # the app clears it once the recording has started: it went with this one
+    assert d.recording
+    d.end(keep=True)
+    d.wait()
+    assert typed == ["hello there. "] and cleaned == ["hello there."] and heard == ["hello there."]
+    feed(d, (20.0, "press"), (20.7, "release"))  # the next recording, with the hotkey: as heard
+    assert typed[-1] == "Okay type, hello there. Stop it. "
+
+
+def test_a_command_said_after_the_keyword_is_still_a_command(make):
+    d, typed, states = make(text="Okay type, make it concise.")
+    commands = []
+    d.command = lambda text: "concise" if text == "make it concise." else None
+    d.on_command = commands.append
+    d.trim = _without_keyword
+    d.handle("handsfree", 10.0)
+    d.end(keep=True)
+    d.wait()
+    assert commands == ["concise"] and typed == []
+
+
+def test_a_trim_that_fails_types_the_words_as_heard(make):
+    d, typed, _ = make(text="Okay type, hello.")
+    d.trim = lambda text: 1 / 0
+    d.handle("handsfree", 10.0)
+    d.end(keep=True)
+    d.wait()
+    assert typed == ["Okay type, hello. "]
+
+
+def test_ending_from_outside_keeps_or_drops_quietly(make):
+    d, typed, states = make()
+    d.handle("handsfree", 10.0)
+    d.end(keep=False, quiet=True)  # the voice check failed: nothing typed, no beep, no "Cancelled"
+    d.wait()
+    assert typed == [] and states == ["recording", "idle"] and not d.listener.recording
+    d.end(keep=True)  # nothing recording: nothing happens
+    assert states == ["recording", "idle"]

@@ -234,3 +234,34 @@ def test_trimming_the_history_leaves_no_half_written_file(tmp_path, monkeypatch)
         add_to_history(f"dictation {i}", path=path)
     assert [e["text"] for e in read_history(path)] == ["dictation 9", "dictation 8", "dictation 7"]
     assert len(path.read_text(encoding="utf-8").splitlines()) == 3 and not list(tmp_path.glob("*.tmp"))
+
+
+def test_the_wake_word_is_off_until_chosen_and_ends_with_stop_it(tmp_path):
+    s = Settings()
+    assert not s.wake_enabled and s.wake_end_phrases == ["stop it"] and s.wake_voice_check and not s.wake_bluetooth
+    path = tmp_path / "settings.json"
+    Settings(wake_enabled=True, wake_end_phrases=["stop it", "end it"], wake_voice_check=False, wake_bluetooth=True).save(path)
+    loaded = Settings.load(path)
+    assert loaded.wake_enabled and loaded.wake_end_phrases == ["stop it", "end it"] and not loaded.wake_voice_check
+    assert loaded.wake_bluetooth
+
+
+def test_the_wake_word_setup_is_kept_in_the_profile_and_goes_with_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "CONFIG_DIR", tmp_path)
+    profiles = Profiles()
+    first, rahul = profiles.current, profiles.add("Rahul")
+    assert first.wake_file == tmp_path / "wake.json"
+    assert rahul.wake_file == tmp_path / "profiles" / "rahul" / "wake.json"
+    data = {"keyword": "okay type", "spelling": "okay type", "heard": 9, "voice": {"embedding": [0.1, -0.2]}}
+    settings.write_wake(rahul.wake_file, data)
+    assert settings.read_wake(rahul.wake_file) == data and not list(rahul.folder().glob("*.tmp"))
+    settings.write_wake(rahul.wake_file, None)  # set up again from nothing
+    assert settings.read_wake(rahul.wake_file) is None
+
+
+def test_a_damaged_wake_word_setup_is_ignored(tmp_path):
+    path = tmp_path / "wake.json"
+    path.write_text("{ not json", encoding="utf-8")
+    assert settings.read_wake(path) is None
+    path.write_text("[1, 2]", encoding="utf-8")
+    assert settings.read_wake(path) is None

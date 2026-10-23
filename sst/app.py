@@ -28,16 +28,17 @@ from collections.abc import Callable
 from datetime import date, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QFontMetrics, QGuiApplication, QIcon, QPainter
-from PySide6.QtNetwork import QLocalServer, QLocalSocket
+from PySide6.QtNetwork import QLocalServer
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
-from sst import DOWNLOADS_DIR, __version__, bench, downloads, evaluate, scan, theme, updates
+from sst import DOWNLOADS_DIR, __version__, bench, downloads, instance, scan, theme, updates
 from sst.audio import PREROLL_SECONDS, TAIL_SECONDS, Recorder, default_microphone, input_device_names
 from sst.commands import UNDO, match_command, phrases_for
-from sst.dictate import DEFAULT_HOTKEY, Dictation, already_running, wispr_flow_running
+from sst.dictate import DEFAULT_HOTKEY, Dictation, wispr_flow_running
 from sst.engines import DEFAULT_MODEL, SPEECH_MODELS, load_engine, usable
 from sst.engines.cloud import CLOUD, REMOTE, SERVER, CloudEngine
 from sst.gateway import PROVIDERS, SPEECH_SERVER, GatewayConfig, Polisher
@@ -60,7 +61,16 @@ from sst.pipeline.guard import Guard
 from sst.pipeline.learning import CorrectionEvent, Learner
 from sst.pipeline.polish import GatewayLLM
 from sst.pipeline.session import LazyBackend, Stages, VoicePipeline
-from sst.settings import CONFIG_DIR, LOAD_PROBLEMS, Profiles, Settings, Stats, add_to_history, read_history
+from sst.settings import (
+    CONFIG_DIR,
+    LOAD_PROBLEMS,
+    Profiles,
+    Settings,
+    Stats,
+    add_to_history,
+    read_history,
+    write_wake,
+)
 from sst.snippets import Snippet
 from sst.snippets import load as load_snippets
 from sst.transform import Context as TransformContext
@@ -68,16 +78,19 @@ from sst.transform import Transformer
 from sst.transformui import TransformController
 from sst.translate import Translator, system_language
 from sst.translateui import TranslateController
+from sst.wakeui import WakeController, WakeSetupDialog, WakeState, WakeTools, wake_api
 from sst.window import APP_NAME, ICON_FILE, LOG_DIR, MainWindow, PreviewApp
+
+if TYPE_CHECKING:
+    from sst import evaluate  # imported when a reading test is scored (score_reading), not at every start
 
 UPDATE_DIR = Path(os.environ.get("TEMP", Path.home())) / "Rflow-update"  # downloaded installers
 # The sentence models are tried on (the scan, a cloud or server card's Test): 7.4 s of a LibriVox reading, as in
 # sherpa-onnx's model packages. It comes with Rflow, since Parakeet may not be downloaded.
 SAMPLE_FILE = Path(__file__).resolve().parent / "static" / "sample.wav"
-# Opening Rflow while it runs asks the running copy, through this local pipe, to show its window.
-SERVER_NAME = f"Rflow-window-{os.environ.get('USERNAME', 'user')}"
-ASFW_ANY = -1  # AllowSetForegroundWindow: any process
+SERVER_NAME = instance.SERVER_NAME  # the local pipe a second Rflow asks to show the window (sst/instance.py)
 WARM_SECONDS = 300  # the microphone stays open this long after a dictation (the owner chose 5 minutes)
+TICK_MS = 1000  # dictation's housekeeping: none of it needs to be sooner (Dictation.tick, Recorder.tick)
 DEBUG_DIR = LOG_DIR.parent / "debug"  # each dictation's stages and chunk audio, when Settings asks for them
 
 log = logging.getLogger("sst.app")
@@ -153,7 +166,8 @@ def close_log_files() -> None:
 # transcripts; the last scan) and %LOCALAPPDATA%\sst (logs, reading tests, the installed app's recordings, the debug
 # steps, and the downloaded speech models and voice in "models"). The source code's recordings/ is never touched.
 DATA_DIRS = (CONFIG_DIR, LOG_DIR.parent)
-AFTER = "--after="  # Rflow started again by Start over waits for the one that started it (its process id) to end
+AFTER = instance.AFTER  # Rflow started again by Start over waits for the one that started it (its process id) to end
+wait_for_exit = instance.wait_for_exit
 
 
 def erase_data(folders=DATA_DIRS, keep: tuple[str, ...] = ()) -> list[Path]:
@@ -183,20 +197,7 @@ def restart_command(pid: int) -> list[str]:
     """How to start this Rflow again once process `pid` (this one) has ended: Rflow.exe, or the app from the source."""
     if getattr(sys, "frozen", False):
         return [sys.executable, f"{AFTER}{pid}"]
-    return [sys.executable, "-c", "import sys; from sst.app import main; sys.exit(main())", f"{AFTER}{pid}"]
-
-
-def wait_for_exit(pid: int, seconds: float = 30) -> None:
-    """Wait for the Rflow that started this one to end: until then it holds the mutex that says Rflow runs, and this
-    one would only ask it to show its window."""
-    SYNCHRONIZE = 0x00100000
-    _kernel32.OpenProcess.restype = ctypes.c_void_p
-    _kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
-    _kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-    handle = _kernel32.OpenProcess(SYNCHRONIZE, False, pid)
-    if handle:  # none: it has ended already
-        _kernel32.WaitForSingleObject(handle, int(seconds * 1000))
-        _kernel32.CloseHandle(handle)
+    return [sys.executable, "-c", "import sys; from sst.instance import launch; sys.exit(launch())", f"{AFTER}{pid}"]
 
 
 # ---------------------------------------------------------------- the recording pill
@@ -381,17 +382,7 @@ def release_running_mutex() -> None:
 
 def show_running_window() -> bool:
     """Ask a running Rflow to show its window; False if none answers (e.g. the console `sst dictate` or 1.1 and older)."""
-    socket = QLocalSocket()
-    socket.connectToServer(SERVER_NAME)
-    if not socket.waitForConnected(1500):
-        return False
-    # Windows only lets the process the user just started take the foreground. Pass that on to the running copy,
-    # or its window would only flash in the taskbar.
-    ctypes.windll.user32.AllowSetForegroundWindow(ASFW_ANY)
-    socket.write(b"show\n")
-    socket.waitForBytesWritten(1500)
-    socket.disconnectFromServer()
-    return True
+    return instance.show_running_window(SERVER_NAME)
 
 
 # ---------------------------------------------------------------- the app
@@ -411,8 +402,12 @@ class _Signals(QObject):
     download_done = Signal(str, str)  # (speech model, "" or "cancelled" or why it failed)
     voice_progress = Signal(int)  # percent of live translation's voice downloaded
     voice_done = Signal(str)  # "" or why the voice couldn't be downloaded
+    wake_progress = Signal(int)  # percent of the wake word's models downloaded
+    wake_done = Signal(str)  # "" or "cancelled" or why they couldn't be downloaded
     scan_progress = Signal(str)
     scan_done = Signal(object)  # the scan's result (sst.scan.save), or {"error": why}
+    key = Signal()  # the dictation shortcut's listener queued an event, from the keyboard hook's thread
+    live_key = Signal()  # the same for live translation's shortcut
 
 
 class TrayApp:
@@ -427,6 +422,12 @@ class TrayApp:
         self.recorder = self.new_recorder()
         self._configure_dictation_mic()
         self.dictation: Dictation | None = None
+        # Start with your voice (sst.wakeui): listens once the speech model is loaded, if it's on and set up
+        self.wake = WakeController(self)
+        self.wake.load()
+        self.wake_downloading: int | None = None  # percent, while its models download
+        self.wake_problem = ""  # why they couldn't be downloaded, until tried again
+        self._cancel_wake = threading.Event()
         self.loading_speech = ""  # the speech model being loaded in the background, if any
         self.downloading: tuple[str, int, int] | None = None  # (speech model, bytes done, bytes in all)
         self.scanning = ""  # what the scan is doing now, while it runs
@@ -459,12 +460,17 @@ class TrayApp:
         self.signals.download_done.connect(self._on_download_done)
         self.signals.voice_progress.connect(self._on_voice_progress)
         self.signals.voice_done.connect(self._on_voice_done)
+        self.signals.wake_progress.connect(self._on_wake_progress)
+        self.signals.wake_done.connect(self._on_wake_done)
         self.signals.scan_progress.connect(self._on_scan_progress)
         self.signals.scan_done.connect(self._on_scan_done)
+        self.signals.key.connect(self._pump)  # the keys wake the app up: nothing polls between them
+        self.signals.live_key.connect(self._live_key_pump)
 
         self.icon = QIcon(str(ICON_FILE))
         self.recording_icon = _with_red_dot(self.icon)
-        self.pill = Pill(level=lambda: self.recorder.level)
+        # the microphone recording now: a wake word turn may record on another one (a Bluetooth headset's stand-in)
+        self.pill = Pill(level=lambda: (self.dictation.recorder if self.dictation else self.recorder).level)
         # Text Transform: its own shortcut and keyboard hook (HotkeyListener looked up when used: the tests replace it)
         self.transforms = TransformController(self, listener_factory=lambda key: HotkeyListener(key))
         self.transforms.start(self.settings.transform_shortcut)
@@ -478,9 +484,9 @@ class TrayApp:
         self.live.moved.connect(self._live_moved)
         self.live.speak_toggled.connect(lambda on: self.set_live_speak(on))
         self.live.noted.connect(lambda _: self.window.isVisible() and self.window.refresh())  # the Live page shows it
-        self.live_listener = None  # live translation's shortcut (Ctrl+Alt+L), watched by live_keys
-        self.live_keys = QTimer(interval=30, timeout=self._live_key_pump)
+        self.live_listener = None  # live translation's shortcut (Ctrl+Alt+L)
         self.window = MainWindow(self)
+        self.wake.on_change = self._on_wake_changed
 
         self.tray = QSystemTrayIcon(self.icon)
         menu = QMenu()
@@ -526,9 +532,11 @@ class TrayApp:
         if not self.server.listen(SERVER_NAME):
             log.warning("No window server (%s); opening Rflow again won't show this window", self.server.errorString())
 
-        self.pump = QTimer()
-        self.pump.setInterval(15)
-        self.pump.timeout.connect(self._pump)
+        # Dictation's housekeeping (the 30-minute limit, closing or watching the open microphone), once a second and only
+        # while recording or while the microphone is open; the keys themselves arrive through signals.key.
+        self.ticker = QTimer()
+        self.ticker.setInterval(TICK_MS)
+        self.ticker.timeout.connect(self._tick)
         self._load_speech()
         if getattr(sys, "frozen", False):  # the source checkout is updated with git, not by the app
             # The installer of an update that has finished (it started this version) isn't needed any more.
@@ -624,7 +632,8 @@ class TrayApp:
         self._apply_cleanup()  # also gives the new model Your words, and builds its voice pipeline
         if first:
             self._start_listener()
-            self.pump.start()
+            self.wake.apply()  # the wake word needs a dictation to start (and keeps the microphone open: ticks)
+            self._wake_ticker()
         self.window.refresh()
         if not first:
             return
@@ -660,6 +669,7 @@ class TrayApp:
             log.warning("Bad hotkey %r in the settings (%s); using %s", self.settings.hotkey, e, DEFAULT_HOTKEY)
             key = parse_hotkey(DEFAULT_HOTKEY)
         self.listener = HotkeyListener(key)
+        self.listener.on_event = self.signals.key.emit
         self.listener.start()
         self.dictation.listener = self.listener
         self._update_status()
@@ -753,11 +763,39 @@ class TrayApp:
     # -- running
 
     def _pump(self) -> None:
+        """The dictation shortcut's events, as they come (signals.key)."""
+        if self.listener is None or self.dictation is None:
+            return
         events = self.listener.events
         while not events.empty():
             event, at = events.get_nowait()
             self.dictation.handle(event, at)
-        self.dictation.tick(time.monotonic())
+        self.wake.tick(time.monotonic())  # a turn ended with the keys, or a dictation with the keys pauses it
+        self._wake_ticker()  # a recording may have started, and the microphone opened
+
+    def _tick(self) -> None:
+        now = time.monotonic()
+        if self.dictation is not None:
+            self.dictation.tick(now)
+        self.wake.tick(now)  # a turn ended by the time limit, a pause for live translation or Text Transform
+        if not self._needs_ticks():
+            self.ticker.stop()
+
+    def _needs_ticks(self) -> bool:
+        r = self.recorder
+        # The wake word listens on an open microphone, so its ticks are those of an open microphone: once a second
+        return self.dictation is not None and (self.dictation.recording or r.warm or r.busy or self.wake.wants_ticks)
+
+    def _wake_ticker(self) -> None:
+        if self._needs_ticks() and not self.ticker.isActive():
+            self.ticker.start()
+
+    def _on_wake_changed(self) -> None:
+        """The wake word started or stopped listening, or paused: the ticks it needs, and the Settings card's status."""
+        if hasattr(self, "ticker"):
+            self._wake_ticker()
+        if self.window.isVisible():
+            self.window.show_wake()
 
     def _on_result(self, heard: str, typed: str, seconds: float) -> None:
         self.transforms.note_typed(typed + " ")  # as Dictation pasted it: Text Transform's text where Ctrl+A copies nothing
@@ -845,6 +883,11 @@ class TrayApp:
                 recorder.keep_open()
             except Exception as e:  # no microphone yet: it opens at the first dictation
                 log.warning("Could not keep the microphone open: %s", e)
+        wake = getattr(self, "wake", None)
+        if wake is not None:
+            wake.apply()  # listening keeps a microphone open, with the moment before the keyword
+        if hasattr(self, "ticker"):  # not while starting: the ticks begin with dictation (_on_loaded)
+            self._wake_ticker()
 
     def apply_settings(self, new: Settings) -> None:
         """Save the settings and use them at once (the Settings page and the welcome change them one by one)."""
@@ -1071,6 +1114,126 @@ class TrayApp:
         if self.window.isVisible():
             self.window.refresh()
 
+    # -- Start with your voice (sst.wakeui; the keyword spotting, voice check and turns are sst.wake)
+
+    def wake_state(self) -> WakeState:
+        """What Settings' "Start with your voice" card shows."""
+        wake = self.wake
+        state = WakeState(listening=wake.microphone if wake.listening else "", note=wake.problem or wake.note,
+                          problem=self.wake_problem, instead=wake.instead if wake.listening else "")
+        if wake.setup is not None:
+            state.keyword, state.heard, state.said = wake.setup.keyword, wake.setup.heard, wake.setup.said
+        try:
+            api = wake_api()
+            missing = [m for m in (api.KWS, api.VOICE) if not m.installed()]
+            state.tries, state.size = api.TRIES, sum(m.size for m in missing)
+            state.models = "downloading" if self.wake_downloading is not None else "missing" if missing else "ready"
+            state.percent = self.wake_downloading or 0
+        except Exception as e:  # not in this build
+            state.models, state.problem = "missing", state.problem or f"The wake word isn't available ({e})."
+        return state
+
+    def set_wake_enabled(self, on: bool) -> None:
+        """Switched on or off: saved, and at once; switched on the first time, its models are downloaded."""
+        self.apply_settings(dataclasses.replace(self.settings, wake_enabled=on))
+        if on and self.wake_state().models == "missing":
+            self.download_wake_models()
+
+    def download_wake_models(self) -> None:
+        """The keyword spotter and the voice check (sst.wake.KWS, VOICE), in the background, one after the other."""
+        if self.wake_downloading is not None:
+            return
+        try:
+            api = wake_api()
+        except Exception as e:
+            self.wake_problem = str(e) or type(e).__name__
+            self.window.refresh()
+            return
+        models = [m for m in (api.KWS, api.VOICE) if not m.installed()]
+        if not models:
+            self.wake.apply()
+            return
+        total = sum(m.size for m in models) or 1
+        self.wake_downloading, self.wake_problem = 0, ""
+        self._cancel_wake.clear()
+        done_before, last = [0], [-1]
+
+        def progress(done: int, _total: int) -> None:
+            percent = (done_before[0] + done) * 100 // total
+            if percent != last[0]:  # the window needn't redraw for every megabyte
+                last[0] = percent
+                self.signals.wake_progress.emit(percent)
+
+        def work() -> None:
+            try:
+                for model in models:
+                    downloads.download(model, progress, self._cancel_wake.is_set)
+                    done_before[0] += model.size
+                self.signals.wake_done.emit("")
+            except downloads.Cancelled:
+                self.signals.wake_done.emit("cancelled")
+            except Exception as e:
+                log.exception("Downloading the wake word's models failed")
+                self.signals.wake_done.emit(str(e) or type(e).__name__)
+        threading.Thread(target=work, name="wake-download", daemon=True).start()
+        self.window.refresh()
+
+    def cancel_wake_download(self) -> None:
+        self._cancel_wake.set()  # what is downloaded so far stays for the next try
+
+    def _on_wake_progress(self, percent: int) -> None:
+        self.wake_downloading = percent
+        if self.window.isVisible():
+            self.window.refresh()
+
+    def _on_wake_done(self, error: str) -> None:
+        self.wake_downloading = None
+        if error and error != "cancelled":
+            self.wake_problem = error
+            self._notify(APP_NAME, f"The wake word's models couldn't be downloaded: {error}",
+                         QSystemTrayIcon.MessageIcon.Warning)
+        elif not error:
+            log.info("The wake word's models are downloaded")
+            self.wake.apply()
+        if self.window.isVisible():
+            self.window.refresh()
+
+    def open_wake_setup(self, parent=None) -> None:
+        """The 10-try setup (a dialog): the keyword typed (checked with live translation's voice, when it's downloaded),
+        then said ten ways; kept when heard often enough. It records on the microphone the wake word listens on (a
+        Bluetooth headset's only when the user lets it), in memory only."""
+        try:
+            api = wake_api()
+        except Exception as e:
+            self._notify(APP_NAME, f"The wake word isn't available: {e}", QSystemTrayIcon.MessageIcon.Warning)
+            return
+        _, device, name, problem = self.wake.choose_microphone()
+
+        def new_recorder() -> Recorder:
+            recorder = Recorder(device)
+            recorder.raw = self.settings.raw_audio
+            recorder.keep_call_quality = True  # a headset's only when the wake word listens there: open for the tries
+            return recorder
+        tools = WakeTools(api, lambda: PiperVoice(DANNY) if DANNY.ready() else None)  # English, as the spotter
+        dialog = WakeSetupDialog(parent, microphone=name, problem=problem, check=api.check_keyword,
+                                 enroll=lambda keyword: api.Enrollment(keyword, transcribe=tools.transcribe),
+                                 hearing=tools.hearing, new_recorder=new_recorder, save=self.save_wake_setup,
+                                 tries=api.TRIES, passes=api.PASS, misses=api.MISSES, quiet_db=api.QUIET_DB)
+        self.wake.setting_up = True  # the tries mustn't start a dictation
+        try:
+            dialog.exec()
+        finally:
+            self.wake.setting_up = False
+        if self.window.isVisible():
+            self.window.refresh()
+
+    def save_wake_setup(self, setup) -> None:
+        """A setup that passed: kept in the profile (words and numbers, no audio), and listened for at once."""
+        write_wake(self.profile.wake_file, setup.to_json())
+        self.wake.setup = setup
+        self.wake.apply()
+        log.info("Wake word set up: heard %d of the tries", setup.heard)
+
     def _live_session(self, config: LiveConfig, on_event) -> LiveSession:
         return LiveSession(config, Transcript(self.live_folder(), config), on_event)
 
@@ -1157,13 +1320,12 @@ class TrayApp:
         if self.live_listener is not None:
             self.live_listener.stop()
             self.live_listener = None
-        self.live_keys.stop()
         shortcut, label = self.settings.live_shortcut, ""
         if shortcut and not self.live_shortcut_clash():
             try:
                 self.live_listener = HotkeyListener(parse_hotkey(shortcut))
+                self.live_listener.on_event = self.signals.live_key.emit
                 self.live_listener.start()
-                self.live_keys.start()
                 label = parse_hotkey(shortcut).label
             except (ValueError, OSError) as e:
                 log.warning("Live translation's shortcut %r doesn't work: %s", shortcut, e)
@@ -1295,10 +1457,11 @@ class TrayApp:
         if self.dictation:
             self._apply_speech()  # the speech model listens for the term too
 
-    def score_reading(self, folders: list[Path], progress) -> evaluate.Results:
+    def score_reading(self, folders: list[Path], progress) -> "evaluate.Results":
         """The speech model alone, then with the cleanup model and the backup model, one at a time (the endpoint may be
         small).
         The report goes into the test's folder, or into 'summary' when several tests are scored together."""
+        from sst import evaluate
         if not self.dictation:
             raise RuntimeError("The speech model is still loading; try again in a moment." if self.loading_speech
                                else "Choose a speech model first, on the Speech recognition page.")
@@ -1541,6 +1704,7 @@ class TrayApp:
             self.dictation.close()  # a recording started for the other profile is dropped
         old_hotkey = self.settings.hotkey
         self._load_profile()
+        self.wake.load()  # the other profile's keyword and voice (applied with the microphone, next)
         self._configure_dictation_mic()
         if self.dictation:
             self.dictation.sounds, self.dictation.save = self.settings.sounds, self.settings.save_recordings
@@ -1675,6 +1839,7 @@ class TrayApp:
 
     def _stop_all(self) -> None:
         """Stop the shortcuts' keyboard hooks, live translation and dictation (a recording is dropped), before quitting."""
+        self.wake.stop()
         self.transforms.stop()
         self.translator.stop()
         self.live.stop()
@@ -1699,8 +1864,7 @@ class TrayApp:
         Rflow again: it opens on the welcome, like a new install."""
         log.info("Starting over: the downloaded speech models are %s", "kept" if keep_models else "deleted too")
         self._cancel_download.set()  # a download in progress stops writing into the models folder
-        for timer in (self.pump, self.live_keys):
-            timer.stop()
+        self.ticker.stop()
         self._stop_all()
         self.dictation, self._local = None, None  # the speech models let go of, so their files can be deleted too
         gc.collect()
@@ -1790,6 +1954,8 @@ def self_test() -> int:
     menu = TransformMenu()
     menu.items, menu.source = [("concise", "1", "Concise"), ("undo", "U", "Undo")], "Self-test"
     menu.grab()
+    WakeSetupDialog(microphone="Self-test", problem="", check=lambda text: None, enroll=lambda keyword: None,
+                    new_recorder=lambda: None, save=lambda setup: None).grab()
     _with_red_dot(QIcon(str(ICON_FILE)))
     import ctranslate2  # noqa: F401 (Whisper's runtime: bundled and its DLLs load, without needing the downloaded model)
     import faster_whisper  # noqa: F401
@@ -1809,19 +1975,14 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if "--self-test" in argv:
         return self_test()
-    after = next((a.removeprefix(AFTER) for a in argv if a.startswith(AFTER)), "")
-    if after.isdigit():  # started again by Start over
-        wait_for_exit(int(after))
+    if instance.hand_over(argv):  # asked already by Rflow.exe's entry (instance.launch), before these imports
+        return 0
     log_dir = setup_logging()
     log.info("%s %s starting (%s)", APP_NAME, __version__, scan.machine())  # which kind of computer the log is from
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)  # closing the window keeps Rflow in the tray
     app.setWindowIcon(QIcon(str(ICON_FILE)))
-    if already_running():
-        if "--startup" not in argv and not show_running_window():
-            QMessageBox.information(None, APP_NAME, f"{APP_NAME} is already running. Look for its icon in the tray.")
-        return 0
     hold_running_mutex()
     if not QSystemTrayIcon.isSystemTrayAvailable():
         QMessageBox.critical(None, APP_NAME, "Windows has no notification area (system tray) available.")

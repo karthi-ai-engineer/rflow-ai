@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import numpy as np
 import pytest
 
+from sst import netconnect
 from sst.engines import cloud, load_engine, usable
 from sst.engines.cloud import CloudEngine, CloudError
 from sst.gateway import SPEECH_SERVER, GatewayConfig
@@ -44,6 +45,7 @@ class FakeProvider:
     def __init__(self):
         self.requests, self.connections, self.statuses, self.delay = [], 0, [], 0.0
         self.answer, self.drop = None, False
+        self.bodies = {}  # status -> the error answer to give with it (else {"error": {"message": ...}})
         self.reply = None  # (request) -> the text a Flash or OpenAI-format model answers, or None for the default
         fake = self
 
@@ -78,7 +80,7 @@ class FakeProvider:
                 status = fake.statuses.pop(0) if fake.statuses else 200
                 if status != 200:
                     reason = {401: "Invalid API key", 400: "Unsupported response_format"}.get(status, "Slow down")
-                    return self._reply(status, {"error": {"message": reason}})
+                    return self._reply(status, fake.bodies.get(status) or {"error": {"message": reason}})
                 if "json" in request and "transcribe" in self.path:
                     return self._reply(200, fake.answer or TRANSCRIBED)
                 if fake.reply is not None and (text := fake.reply(request)) is not None:
@@ -129,6 +131,13 @@ def fake():
     provider = FakeProvider()
     yield provider
     provider.server.shutdown()
+
+
+@pytest.fixture(autouse=True)
+def no_refusals():
+    netconnect.forget_refusals()  # what one test's fake provider refused never reaches another test
+    yield
+    netconnect.forget_refusals()
 
 
 class Parakeet:
@@ -219,16 +228,84 @@ def test_a_provider_error_is_typed_by_parakeet_and_said(fake):
     parakeet, loads = Parakeet(), []
     engine = fake.engine(fallback=lambda: loads.append(1) or parakeet)
     engine.words = ["Karthi"]
-    fake.statuses = [401, 401]
+    fake.statuses = [500, 500]
     assert engine.transcribe(AUDIO, RATE) == "hello from parakeet"
-    assert "HTTP 401 Invalid API key" in engine.last_error and engine.last_error.startswith("OpenAI")
+    assert "HTTP 500 Slow down" in engine.last_error and engine.last_error.startswith("OpenAI")
     assert parakeet.words == ["Karthi"]  # Your words go along
     assert engine.transcribe(AUDIO, RATE) == "hello from parakeet" and loads == [1]  # loaded once
     assert engine.transcribe(AUDIO, RATE) == "Hello from OpenAI." and engine.last_error == ""  # the provider is back
 
 
+QUOTA = {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "You exceeded your current quota. Please "
+                   "retry in 41.2s.", "details": [{"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [
+                       {"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]},
+                       {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "41s"}]}}
+
+
+@pytest.mark.parametrize("status, said", [(401, "didn't accept the API key (HTTP 401 Invalid API key)"),
+                                          (402, "no credit left on the account (HTTP 402"),
+                                          (429, "quota is used up (HTTP 429 You exceeded your current quota")])
+def test_a_refusal_is_said_plainly_and_remembered_until_the_key_changes(fake, status, said):
+    parakeet = Parakeet()
+    engine = fake.engine(fallback=lambda: parakeet)
+    fake.statuses, fake.bodies = [status], {429: QUOTA}
+    assert engine.transcribe(AUDIO, RATE) == "hello from parakeet" and said in engine.last_error
+    t0 = time.perf_counter()
+    assert engine.transcribe(AUDIO, RATE) == "hello from parakeet" and "a moment ago" in engine.last_error
+    with pytest.raises(CloudError, match="a moment ago") as error:
+        engine.transcribe_chunk(AUDIO, RATE)
+    assert error.value.permanent and time.perf_counter() - t0 < 0.3 and len(fake.requests) == 1  # not asked again
+    engine.api_key = "a-new-key"  # the user entered another key
+    assert engine.transcribe(AUDIO, RATE) == "Hello from OpenAI." and engine.last_error == ""
+
+
+def test_a_used_up_quota_is_the_models_and_a_short_rate_limit_is_retried(fake):
+    fake.statuses, fake.bodies = [429], {429: QUOTA}
+    with pytest.raises(CloudError):
+        fake.engine(model="whisper-1").transcribe_chunk(AUDIO, RATE)
+    assert fake.engine(model="gpt-transcribe").transcribe_chunk(AUDIO, RATE).text  # another model on the same key
+    fake.statuses, fake.bodies = [429], {429: {"error": {"message": "Rate limit reached. Please try again in 1.5s."}}}
+    with pytest.raises(CloudError) as error:
+        fake.engine(model="gpt-4o-transcribe").transcribe_chunk(AUDIO, RATE)
+    assert not error.value.permanent and error.value.retry_after == 1.5  # worth a retry, after that long
+
+
+def test_the_pipeline_falls_back_at_once_on_a_refusal_and_skips_the_provider_after(fake):
+    from sst.pipeline.asr import ASRScheduler, EngineBackend
+    from sst.pipeline.contracts import AudioChunk, RawTranscript
+
+    class Local:
+        name = "parakeet"
+
+        def transcribe(self, chunk):
+            return RawTranscript("hello from parakeet", backend="parakeet")
+
+    sleeps = []
+    fake.statuses, fake.bodies = [429], {429: QUOTA}
+    engine = fake.engine("gemini", "gemini-3.5-flash-lite", path="/v1beta")
+    with ASRScheduler(EngineBackend(engine), fallback=Local(), sleep=sleeps.append) as scheduler:
+        for n in (1, 2):
+            session = scheduler.open_session(f"s{n}")
+            session.submit(AudioChunk(f"s{n}", 1, AUDIO.copy(), RATE, 0, len(AUDIO), 0, 1.5))
+            session.finish(1)
+            [result] = session.wait(10)
+            assert result.text == "hello from parakeet" and "quota is used up" in result.note
+            assert result.diagnostics["attempts"] == 2  # one try of the provider (none for s2), one of Parakeet
+    assert sleeps == [] and len(fake.requests) == 1  # no backoff, no retry, and the second dictation didn't ask
+
+
+def test_cloud_speech_and_ai_cleanup_on_the_same_key_share_a_refusal(fake):
+    from sst.gateway import Polisher
+    fake.statuses = [402]
+    with pytest.raises(CloudError, match="no credit"):
+        fake.engine("gemini", "gemini-3.5-flash-lite", path="/v1beta").transcribe_chunk(AUDIO, RATE)
+    p = Polisher(GatewayConfig(fake.address + "/v1beta/openai", "test-key", "gemini"), "gemini-3.5-flash-lite")
+    assert p.polish("so this is a test") == "so this is a test" and "no credit" in p.last_error
+    assert len(fake.requests) == 1  # the cleanup knew without asking
+
+
 def test_an_unreachable_provider_is_skipped_for_a_minute(monkeypatch):
-    monkeypatch.setattr(cloud, "CONNECT_TIMEOUT", 0.3)  # Windows takes a while to refuse a connection
+    monkeypatch.setattr(cloud, "CONNECT_BUDGET", 0.3)  # Windows takes a while to refuse a connection
     with socket.socket() as s:  # a port nothing listens on
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
@@ -537,7 +614,7 @@ def test_a_chunk_never_falls_back_on_parakeet_nor_waits_out_a_rate_limit(fake):
 
 
 def test_an_unreachable_provider_fails_the_next_chunks_at_once(monkeypatch):
-    monkeypatch.setattr(cloud, "CONNECT_TIMEOUT", 0.3)
+    monkeypatch.setattr(cloud, "CONNECT_BUDGET", 0.3)
     with socket.socket() as s:  # a port nothing listens on
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]

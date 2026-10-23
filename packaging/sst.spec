@@ -15,8 +15,8 @@ COMMON = dict(
     # CTranslate2 (Whisper, through faster-whisper) brings its own DLLs too.
     binaries=collect_dynamic_libs("sherpa_onnx") + collect_dynamic_libs("ctranslate2"),
     datas=[(os.path.join(ROOT, "sst", "static"), os.path.join("sst", "static"))],
-    # The wake word is imported by name only when it's turned on (importlib), which PyInstaller doesn't follow;
-    # sst.wake's __init__ imports the rest of it.
+    # The wake word is imported when first used (sst.wakeui.wake_api, through importlib), which PyInstaller can't see
+    # by itself; sst.wake's __init__ imports the rest of it.
     hiddenimports=["sst.wake"],
     # onnxruntime: faster-whisper only needs it for its voice detector, which Rflow doesn't use; a second
     # onnxruntime.dll next to sherpa-onnx's could be loaded in its place.
