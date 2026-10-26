@@ -290,6 +290,22 @@ def test_where_the_bar_is_put_is_passed_on_to_remember():
     live.stop()
 
 
+def test_the_copy_button_asks_for_a_copy_and_the_bar_says_what_happened():
+    live, made = live_captions()
+    asked = []
+    live.copy_requested.connect(lambda: asked.append(True))
+    live.start(LiveConfig(target="en"))
+    assert live.transcript_path is None  # nobody has spoken yet
+    live.bar.copy_button.click()
+    assert asked == [True] and not live.bar.copy_button.hasFocus()
+    live.flash("Copied 3 lines")
+    assert live.bar.title.text().endswith("Copied 3 lines")
+    live.bar._flash_timer.timeout.emit()  # a moment later the title is itself again
+    assert "Copied" not in live.bar.title.text()
+    live.stop()
+    live.flash("after it stopped")  # nothing to say it on: no error
+
+
 def test_showing_the_bar_in_screen_shares_applies_at_once():
     live, _ = live_captions()
     live.start(LiveConfig())

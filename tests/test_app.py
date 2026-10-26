@@ -747,6 +747,30 @@ def test_past_sessions_are_listed_newest_first(tray_app):
         (datetime(2026, 10, 5, 14, 3, 12), 2), (datetime(2026, 10, 4, 9, 0, 0), 1)]
 
 
+def test_the_live_transcript_is_copied_from_the_bar_and_the_live_page(tray_app, monkeypatch):
+    app, _, _ = tray_app
+    copied, said = [], []
+    monkeypatch.setattr(sst_app.textaccess, "set_clipboard", copied.append)
+    monkeypatch.setattr(app.live, "flash", said.append)
+    path = app.live_folder() / "2026-10-05 14-03-12 live captions.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("Rflow live translation\n\n[14:03:12] 今日は\n           Today\n\n[14:03:20] Hi\n\n", encoding="utf-8")
+    monkeypatch.setattr(type(app.live), "transcript_path", property(lambda self: None))
+    app._copy_live_from_bar()
+    assert said == ["Nothing to copy yet"] and copied == []
+    monkeypatch.setattr(type(app.live), "transcript_path", property(lambda self: path))
+    app._copy_live_from_bar()
+    assert said[-1] == "Copied 2 lines" and copied[-1] == path.read_text(encoding="utf-8").strip() + "\n"
+    assert app.copy_live_session(path, translation_only=True) == "" and copied[-1].endswith("[14:03:12] Today\n[14:03:20] Hi\n")
+
+    def busy(text):
+        raise OSError("held by another app")
+    monkeypatch.setattr(sst_app.textaccess, "set_clipboard", busy)
+    app._copy_live_from_bar()
+    assert said[-1] == "Another app is using the clipboard: try again"
+    assert app.copy_live_session(path.with_name("gone.txt")) == "The transcript couldn't be read"
+
+
 def test_gemini_speaks_at_once_and_the_laptops_voice_is_downloaded_to_stand_in(tray_app, monkeypatch):
     app, _, _ = tray_app
     from sst.live import voice as voices

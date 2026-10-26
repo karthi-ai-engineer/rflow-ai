@@ -20,6 +20,28 @@ def heading(c: LiveConfig) -> str:
     return f"translated into {into[SYSTEM]}"
 
 
+def for_copy(text: str, translation_only: bool = False) -> str:
+    """A transcript file's text to paste elsewhere: all of it (both languages), or its heading and each line's
+    translation alone, at its time ("[10:02:13] You: ..."; a line already in the target language is its own)."""
+    if not translation_only:
+        return text.strip() + "\n"
+    out, entry = [], ""
+    for line in text.splitlines():
+        if line.startswith("["):  # a line's time, who and the words heard
+            if entry:
+                out.append(entry)
+            entry = line
+        elif line.startswith(" ") and entry:  # its translation, under the words heard
+            time, _, heard = entry.partition("] ")
+            who = "You: " if heard.startswith("You: ") else ""
+            entry = f"{time}] {who}{line.strip()}"
+        elif not entry and line.strip():
+            out.append(line + "\n")  # the heading
+    if entry:
+        out.append(entry)
+    return "\n".join(out) + "\n"
+
+
 class Transcript:
     """`config` says what's listened to and into which languages (the heading); with both, the user's own lines say
     "You:". Set it again when the source changes during a session."""

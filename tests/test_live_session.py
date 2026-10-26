@@ -11,7 +11,7 @@ import sst.live
 from sst.live.contracts import MIC, SYSTEM, Kind, LiveConfig, LiveEvent, already_in, language_name
 from sst.live.session import LiveSession, dbfs
 from sst.live.speaker import Speaker
-from sst.live.transcript import Transcript
+from sst.live.transcript import Transcript, for_copy
 
 
 class FakeCapture:
@@ -271,6 +271,17 @@ def test_with_the_microphone_alone_the_transcript_marks_no_one(tmp_path):
     assert transcript.path.read_text(encoding="utf-8") == (
         "Rflow live translation, 2026-10-05 16:00, the microphone, translated into Japanese\n\n"
         "[16:00:00] The budget is next week.\n           予算は来週です。\n\n")
+
+
+def test_a_transcript_is_copied_whole_or_as_its_translation_alone():
+    text = ("Rflow live translation, 2026-10-05 15:00, translated into English; your own speech into Japanese\n\n"
+            "[15:00:00] ありがとうございます。\n           Thank you.\n\n"
+            "[15:00:04] Let's start.\n\n"
+            "[15:00:09] You: Let's do it next week.\n           来週にしましょう。\n\n")
+    assert for_copy(text) == text.strip() + "\n"
+    assert for_copy(text, translation_only=True) == (
+        "Rflow live translation, 2026-10-05 15:00, translated into English; your own speech into Japanese\n\n"
+        "[15:00:00] Thank you.\n[15:00:04] Let's start.\n[15:00:09] You: 来週にしましょう。\n")
 
 
 def test_language_names():
