@@ -12,6 +12,13 @@ _Last updated: 2026-10-23_
 ## Start here (a new session, or the owner's other laptop)
 
 **Where things stand (2026-10-26):**
+- **Rflow 2.6.3** (2026-10-26) fixes in-app updates that rolled back. The installed Rflow is a PyInstaller program whose
+  bootloader sets the DLL directory to Rflow's folder (SetDllDirectory), and the programs Rflow starts inherit it: VS
+  Code, opened by the Live page's Open, loaded Rflow's VCRUNTIME140.dll and held it, so the silent installer (Restart
+  Manager couldn't close VS Code) aborted and rolled back, three times. Now every file, folder or page Rflow opens goes
+  through `sst.shell.open_url`, which clears the DLL directory meanwhile (proved with a child PowerShell); the installer
+  writes `install.log` next to itself, and the next start says which programs held Rflow's files
+  (`updates.unfinished`) in the banner and a notice.
 - **Rflow 2.6.2** (2026-10-26, the owner's "release faster") = phase 47 (#217), copying the live translation: a copy
   button on the bar puts the session so far on the clipboard (both languages, from the transcript file; the bar never
   takes the keyboard, so its text can't be selected) and says "Copied N lines" in its title; the Live page's sessions
