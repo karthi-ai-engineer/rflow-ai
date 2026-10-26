@@ -747,6 +747,21 @@ def test_past_sessions_are_listed_newest_first(tray_app):
         (datetime(2026, 10, 5, 14, 3, 12), 2), (datetime(2026, 10, 4, 9, 0, 0), 1)]
 
 
+def test_an_update_that_didnt_install_is_said_with_the_next_offer(tray_app, monkeypatch):
+    app, _, _ = tray_app
+    told = []
+    monkeypatch.setattr(app, "_notify", lambda title, message, icon=None: told.append((title, message)))
+    app.install_problem = ("Rflow 9.9.9 didn't install: Visual Studio Code was using Rflow's files. Close it, then click "
+                           "Update now.")
+    app._on_update_found(sst_app.updates.Update("9.9.9", "", "", "", "", 0))
+    assert app.window.banner_text.text() == app.install_problem
+    assert told == [("Rflow 9.9.9 didn't install",
+                     "Visual Studio Code was using Rflow's files. Close it, then click Update now.")]
+    monkeypatch.setattr(sst_app.shell, "open_url", lambda url: True)  # a source checkout shows the release page
+    app.start_update()  # tried again: said again only if it fails again
+    assert app.install_problem == ""
+
+
 def test_the_live_transcript_is_copied_from_the_bar_and_the_live_page(tray_app, monkeypatch):
     app, _, _ = tray_app
     copied, said = [], []
