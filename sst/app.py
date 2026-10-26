@@ -35,7 +35,7 @@ from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QFontMetri
 from PySide6.QtNetwork import QLocalServer
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
-from sst import DOWNLOADS_DIR, __version__, bench, downloads, instance, scan, theme, updates, usage
+from sst import DOWNLOADS_DIR, __version__, bench, downloads, instance, scan, textaccess, theme, updates, usage
 from sst.audio import PREROLL_SECONDS, TAIL_SECONDS, Recorder, default_microphone, input_device_names
 from sst.commands import UNDO, match_command, phrases_for
 from sst.dictate import DEFAULT_HOTKEY, Dictation, wispr_flow_running
@@ -49,7 +49,7 @@ from sst.live.ducking import Ducker, put_back_left
 from sst.live.gemini import GeminiLiveTranslate
 from sst.live.session import LiveSession
 from sst.live.speaker import Speaker
-from sst.live.transcript import Transcript
+from sst.live.transcript import Transcript, for_copy
 from sst.live.voice import LOCAL as LOCAL_VOICE
 from sst.live.voice import PiperVoice, Voice
 from sst.live.voice import install as install_voice
@@ -487,6 +487,7 @@ class TrayApp:
         self.live.changed.connect(self._live_changed)
         self.live.moved.connect(self._live_moved)
         self.live.speak_toggled.connect(lambda on: self.set_live_speak(on))
+        self.live.copy_requested.connect(self._copy_live_from_bar)
         self.live.noted.connect(lambda _: self.window.isVisible() and self.window.refresh())  # the Live page shows it
         self.live_listener = None  # live translation's shortcut (Ctrl+Alt+L)
         self.window = MainWindow(self)
@@ -1032,6 +1033,33 @@ class TrayApp:
 
     def open_live_session(self, path: Path) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def copy_live_session(self, path: Path, translation_only: bool = False) -> str:
+        """A session's transcript onto the clipboard, to paste anywhere: "" or why it couldn't be copied."""
+        return self._copy_live(path, translation_only)[1]
+
+    def _copy_live(self, path: Path, translation_only: bool = False) -> tuple[int, str]:
+        """(how many lines were copied, "" or why nothing was)."""
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as e:
+            log.warning("Couldn't read the live translation transcript: %s", e)
+            return 0, "The transcript couldn't be read"
+        try:
+            textaccess.set_clipboard(for_copy(text, translation_only))
+        except OSError as e:  # another app holds the clipboard
+            log.warning("Couldn't copy the live translation transcript: %s", e)
+            return 0, "Another app is using the clipboard: try again"
+        return text.count("\n["), ""
+
+    def _copy_live_from_bar(self) -> None:
+        """The bar's copy button: the session so far, both languages; the bar says what happened."""
+        path = self.live.transcript_path
+        if path is None:
+            self.live.flash("Nothing to copy yet")
+            return
+        lines, problem = self._copy_live(path)
+        self.live.flash(problem or f"Copied {lines} line{'' if lines == 1 else 's'}")
 
     def live_config(self) -> LiveConfig:
         s = self.settings

@@ -10,7 +10,8 @@ With Both (an online meeting) the microphone's lines are the user's own: marked 
 words heard (the user knows what they said). With the microphone alone, words already in the language they'd be
 translated into are shown as heard, marked "already English" in the small line. A quiet status line at the bottom says
 why nothing shows yet (the session's notes: listening, nothing heard, sound but no speech). The speaker button turns the
-spoken translation on and off.
+spoken translation on and off, and the copy button puts the session so far on the clipboard (the app does it, from the
+transcript: the bar never takes the keyboard, so its text can't be selected).
 """
 import ctypes
 import dataclasses
@@ -69,6 +70,7 @@ class CaptionBar(QWidget):
     closed = Signal()  # the ✕: stop live translation
     moved = Signal(object)  # [x, y, width, height] after a move or a resize, to remember
     speak_toggled = Signal(bool)  # the speaker button: the translation spoken aloud, or not
+    copy_requested = Signal()  # the copy button: the session so far onto the clipboard
 
     def __init__(self, config: LiveConfig | None = None):
         super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
@@ -86,6 +88,9 @@ class CaptionBar(QWidget):
         self.notes: dict[str, str] = {}  # way -> why it shows nothing yet (the status line), until the session clears it
         self.status = "Starting…"
         self.voice_note = ""  # the voice's state in the title while it isn't simply on or off (downloading, loading)
+        self.flash_note = ""  # what a click just did ("Copied 42 lines"), in the title for a moment
+        self._flash_timer = QTimer(self, singleShot=True, interval=2500)
+        self._flash_timer.timeout.connect(lambda: self.flash(""))
         self._drag: tuple[QPoint, QRect, tuple] | None = None  # (where the press was, the geometry then, the edges)
         self._tail_at = 0  # where the finished lines end in the document: what follows is redrawn as words come
 
@@ -99,10 +104,14 @@ class CaptionBar(QWidget):
         self.speak_button = self._head_button("Speak the translation")
         self.speak_button.setCheckable(True)
         self.speak_button.clicked.connect(lambda on: self.speak_toggled.emit(on))
+        self.copy_button = self._head_button("Copy the translation so far (both languages)")
+        self.copy_button.setIcon(QIcon(theme.icon_pixmap("copy", theme.tok("text2", popup=True).name(), 15, 2.0)))
+        self.copy_button.clicked.connect(self.copy_requested.emit)
         self.close_button = self._head_button("Stop live translation")
         self.close_button.setIcon(QIcon(theme.icon_pixmap("close", theme.tok("text2", popup=True).name(), 14, 2.0)))
         self.close_button.clicked.connect(self.closed.emit)
         head.addWidget(self.title, 1)
+        head.addWidget(self.copy_button)
         head.addWidget(self.speak_button)
         head.addWidget(self.close_button)
         outer.addLayout(head)
@@ -152,6 +161,13 @@ class CaptionBar(QWidget):
 
     def set_voice_note(self, note: str) -> None:
         self.voice_note = note
+        self._update_title()
+
+    def flash(self, note: str) -> None:
+        """Say in the title what a click just did, for a moment."""
+        self.flash_note = note
+        if note:
+            self._flash_timer.start()
         self._update_title()
     # -- what's shown
 
@@ -235,6 +251,8 @@ class CaptionBar(QWidget):
             parts.append(self.status)
         if self.voice_note:
             parts.append(self.voice_note)
+        if self.flash_note:
+            parts.append(self.flash_note)
         self.title.setText("  ·  ".join(parts))
 
     def _add_finished(self, lane: str, heard: str, said: str, note: str = "") -> None:
@@ -429,6 +447,7 @@ class LiveCaptions(QObject):
     changed = Signal(bool)  # running or not
     moved = Signal(object)  # the bar's new [x, y, width, height], to remember
     speak_toggled = Signal(bool)  # the bar's speaker button
+    copy_requested = Signal()  # the bar's copy button
     noted = Signal(str)  # the bar's status line changed (the Live page shows it too)
 
     def __init__(self, make_session: Callable, make_lane: Callable, make_speaker: Callable | None = None):
@@ -470,6 +489,7 @@ class LiveCaptions(QObject):
         bar.closed.connect(self.stop)
         bar.moved.connect(self.moved.emit)
         bar.speak_toggled.connect(self.speak_toggled.emit)
+        bar.copy_requested.connect(self.copy_requested.emit)
         for lane, error in failed:
             self._couldnt_start(lane, error)
         self._update_speaker()
@@ -519,6 +539,16 @@ class LiveCaptions(QObject):
         ducker = getattr(self.session.speaker, "ducker", None) if self.session is not None else None
         if ducker is not None:
             ducker.set_depth(depth)
+
+    @property
+    def transcript_path(self):
+        """The running session's transcript file, or None (not running, or nobody has spoken yet)."""
+        transcript = getattr(self.session, "transcript", None)
+        return transcript.path if transcript is not None else None
+
+    def flash(self, note: str) -> None:
+        if self.bar is not None:
+            self.bar.flash(note)
 
     def set_voice_note(self, note: str) -> None:
         """The voice's state in the bar's title (downloading, loading), or "" when it's simply on or off."""
