@@ -4510,8 +4510,30 @@ class LivePage(Page):
             layout.setSpacing(12)
             layout.addWidget(label(f"{began:%a} {began.day} {began:%b}, {began:%H:%M}", wrap=False))
             layout.addWidget(caption(f"{lines} line{'' if lines == 1 else 's'}", "3", wrap=False), 1)
+            for words, only in (("Copy", False), ("Copy translation", True)):
+                copy = button(words, link=True, size="sm", icon="copy")
+                copy.setToolTip("The translation alone, line by line" if only else "Both languages, line by line")
+                copy.clicked.connect(lambda _=False, b=copy, p=path, o=only, w=words: self._copy_session(b, p, o, w))
+                layout.addWidget(copy)
             layout.addWidget(button("Open", lambda _=False, p=path: self.app.open_live_session(p), link=True, size="sm"))
             self.session_rows.addWidget(line)
+
+    def _copy_session(self, copy: Button, path, translation_only: bool, words: str) -> None:
+        """A session's transcript onto the clipboard; the button says "Copied", or why not, for a moment."""
+        problem = self.app.copy_live_session(path, translation_only)
+        if problem:
+            copy.setToolTip(problem)
+        self._show_copied(copy, "Couldn't copy" if problem else "Copied", "warning" if problem else "check")
+        QTimer.singleShot(1500, lambda: self._show_copied(copy, words, "copy"))
+
+    @staticmethod
+    def _show_copied(copy: Button, words: str, icon: str) -> None:
+        try:
+            copy.icon_name = icon
+            copy.setText(words)
+            copy.update()
+        except RuntimeError:  # the page was refreshed meanwhile: a new button stands there
+            pass
 
     def _refresh_voice(self, s, source: str) -> None:
         voice, (state, percent, problem) = self.app.live_voice(), self.app.live_voice_state()
@@ -7383,6 +7405,10 @@ class PreviewApp:
 
     def open_live_session(self, path) -> None:
         self.calls.append(("open_live_session", path))
+
+    def copy_live_session(self, path, translation_only: bool = False) -> str:
+        self.calls.append(("copy_live_session", path, translation_only))
+        return ""
 
     _voice_state: tuple = ("missing", 0, "")  # the voice isn't downloaded in the preview
 

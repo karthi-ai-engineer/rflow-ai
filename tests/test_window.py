@@ -2023,6 +2023,11 @@ def test_past_sessions_are_listed_to_open():
     assert datetime(2026, 10, 5).strftime("%a 5 %b, 14:03") in texts and "23 lines" in texts and "1 line" in texts
     next(b for b in page.findChildren(QPushButton) if b.text() == "Open").click()
     assert ("open_live_session", Path("a.txt")) in app.calls
+    copy = next(b for b in page.findChildren(QPushButton) if b.text() == "Copy")
+    copy.click()
+    assert ("copy_live_session", Path("a.txt"), False) in app.calls and copy.text() == "Copied"
+    next(b for b in page.findChildren(QPushButton) if b.text() == "Copy translation").click()
+    assert ("copy_live_session", Path("a.txt"), True) in app.calls
 
 
 def test_hearing_the_translation_is_switched_on_in_the_section():
