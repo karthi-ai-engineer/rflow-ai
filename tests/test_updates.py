@@ -153,5 +153,36 @@ def test_github_unreachable_is_a_readable_error(monkeypatch):
 def test_install_starts_the_installer_silently_and_asks_it_to_restart_rflow(monkeypatch, tmp_path):
     started = []
     monkeypatch.setattr(updates.subprocess, "Popen", lambda args, **kwargs: started.append(args))
+    (tmp_path / "install.log").write_text("an earlier try", encoding="utf-8")
     updates.install(tmp_path / "Rflow-Setup-1.1.0.exe")
-    assert started == [[str(tmp_path / "Rflow-Setup-1.1.0.exe"), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/UPDATE=1"]]
+    assert started == [[str(tmp_path / "Rflow-Setup-1.1.0.exe"), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/UPDATE=1",
+                        f"/LOG={tmp_path / 'install.log'}"]]
+    assert not (tmp_path / "install.log").exists()  # this try's log only
+
+
+ROLLED_BACK = """2026-10-26 12:08:07.068   RestartManager found an application using one of our files: Visual Studio Code
+2026-10-26 12:08:07.068   RestartManager found an application using one of our files: Visual Studio Code
+2026-10-26 12:08:07.068   RestartManager found an application using one of our files: Console Window and PTY Host (Open Source)
+2026-10-26 12:08:07.068   RestartManager found an application using one of our files: Windows PowerShell
+2026-10-26 12:08:07.290   Some applications could not be shut down.
+2026-10-26 12:08:07.290   User canceled the installation process.
+2026-10-26 12:08:07.290   Rolling back changes.
+"""
+
+
+def test_an_update_that_rolled_back_says_which_programs_held_rflows_files(tmp_path):
+    assert updates.unfinished(tmp_path, current="2.6.2") == ""  # no update tried
+    (tmp_path / "Rflow-Setup-2.6.3.exe").write_bytes(b"")
+    assert updates.unfinished(tmp_path, current="2.6.2") == ""  # no log: an installer before 2.6.3 started it
+    (tmp_path / "install.log").write_text(ROLLED_BACK, encoding="utf-8")
+    assert updates.unfinished(tmp_path, current="2.6.2") == (
+        "Rflow 2.6.3 didn't install: Visual Studio Code and Windows PowerShell were using Rflow's files. "
+        "Close them, then click Update now.")
+    assert updates.unfinished(tmp_path, current="2.6.3") == ""  # it did install: this is the new version
+    (tmp_path / "install.log").write_text(ROLLED_BACK.replace("Windows PowerShell", "Visual Studio Code"), encoding="utf-8")
+    assert updates.unfinished(tmp_path, current="2.6.2").endswith(
+        "Visual Studio Code was using Rflow's files. Close it, then click Update now.")
+    (tmp_path / "install.log").write_text("Setup failed for another reason.\n", encoding="utf-8")
+    assert updates.unfinished(tmp_path, current="2.6.2") == "Rflow 2.6.3 didn't install. Click Update now to try again."
+    (tmp_path / "install.log").write_text("Installation process succeeded.\n", encoding="utf-8")
+    assert updates.unfinished(tmp_path, current="2.6.2") == ""

@@ -101,9 +101,37 @@ def download(update: Update, folder: Path, progress=lambda done, total: None) ->
 
 def install(installer: Path) -> None:
     """Start the installer (small progress window, no questions); it restarts Rflow when done. The caller must quit
-    right after this, and release its "running" mutex first so the installer doesn't stop to ask."""
-    subprocess.Popen([str(installer), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/UPDATE=1"],
+    right after this, and release its "running" mutex first so the installer doesn't stop to ask. It writes its log
+    next to itself, for the next start to tell whether it finished (`unfinished`)."""
+    log_file = installer.parent / INSTALL_LOG
+    log_file.unlink(missing_ok=True)
+    subprocess.Popen([str(installer), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/UPDATE=1", f"/LOG={log_file}"],
                      creationflags=subprocess.DETACHED_PROCESS)
+
+
+INSTALL_LOG = "install.log"
+_HOLDER = re.compile(r"RestartManager found an application using one of our files: (.+)")
+
+
+def unfinished(folder: Path, current: str = __version__) -> str:
+    """Why the last update didn't install ("" if none was tried or it installed), from the installer's log: in silent
+    mode it rolls back when a program it can't close holds Rflow's files (an editor Rflow once opened, say)."""
+    tried = [parse_version(p.stem.removeprefix("Rflow-Setup-")) for p in folder.glob("Rflow-Setup-*.exe")]
+    try:
+        text = (folder / INSTALL_LOG).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    newer = [v for v in tried if v > parse_version(current)]
+    if not newer or "Installation process succeeded" in text:
+        return ""
+    version = ".".join(map(str, max(newer)))
+    # a terminal's console host goes with the terminal: not worth naming
+    holders = list(dict.fromkeys(m.strip() for m in _HOLDER.findall(text) if not m.startswith("Console Window")))
+    if not holders:
+        return f"Rflow {version} didn't install. Click Update now to try again."
+    names = holders[0] if len(holders) == 1 else ", ".join(holders[:-1]) + " and " + holders[-1]
+    return (f"Rflow {version} didn't install: {names} {'was' if len(holders) == 1 else 'were'} using Rflow's files. "
+            f"Close {'it' if len(holders) == 1 else 'them'}, then click Update now.")
 
 
 def _open(url: str, timeout: float = ATTEMPT_TIMEOUT):
