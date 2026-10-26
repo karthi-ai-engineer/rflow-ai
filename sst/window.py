@@ -35,7 +35,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, QSortFilterProxyModel, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QFontMetrics, QGuiApplication, QIcon, QKeySequence, QPainter, QShortcut
+from PySide6.QtGui import QFontMetrics, QGuiApplication, QIcon, QKeySequence, QPainter, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -73,7 +73,7 @@ from PySide6.QtWidgets import (
     QWidgetItem,
 )
 
-from sst import RECORDINGS_DIR, __version__, bench, costs, setups, theme, usage
+from sst import RECORDINGS_DIR, __version__, bench, costs, setups, shell, theme, usage
 from sst.audio import LevelMeter, Take, call_quality, save_wav
 from sst.commands import DEFAULT_PHRASES, UNDO, normalize, parse_phrases, phrases_for
 from sst.engines import DEFAULT_MODEL, SPEECH_MODELS, usable
@@ -598,7 +598,7 @@ def expensive(model: str, estimate: costs.Estimate) -> str:
 
 def open_folder(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
-    QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+    shell.open_url(QUrl.fromLocalFile(str(path)))
 
 
 class _Relay(QObject):
@@ -2180,7 +2180,7 @@ class _CloudCard:
         form = _form()
         self.key = KeyField(app.gateway.key_for(model.key), "Paste your key")
         key_link = button("Get a free key" if model.key == "gemini" else "Get a key",
-                          lambda _=False: QDesktopServices.openUrl(QUrl(provider.key_page)), link=True, size="sm",
+                          lambda _=False: shell.open_url(QUrl(provider.key_page)), link=True, size="sm",
                           icon="external", icon_after=True)
         key_row = row(self.key, key_link)
         key_row.setStretch(0, 1)
@@ -2923,7 +2923,7 @@ class CleanupPage(Page):
         self._show_state()
 
     def _open_key_page(self) -> None:
-        QDesktopServices.openUrl(QUrl(PROVIDERS[self._provider].key_page))
+        shell.open_url(QUrl(PROVIDERS[self._provider].key_page))
 
     def confirm(self, question: str) -> bool:
         return QMessageBox.question(self, APP_NAME, question) == QMessageBox.StandardButton.Yes
@@ -3085,7 +3085,7 @@ class _KeyRow(QWidget):
         form.addWidget(self.address)
         self.key = KeyField("", "Your server's key, only if it needs one" if self.server else "Paste your key")
         self.get_key = button("Get a free key" if name == "gemini" else "Get a key",
-                              lambda _=False: QDesktopServices.openUrl(QUrl(p.key_page)), link=True, size="sm",
+                              lambda _=False: shell.open_url(QUrl(p.key_page)), link=True, size="sm",
                               icon="external", icon_after=True)
         if not (p and p.key_page) or self.server:
             self.get_key.hide()
@@ -3736,7 +3736,7 @@ class _SetupsCard:
     def _open_key_page(self) -> None:
         missing = setups.for_app(self.app, self.selected).needs if self.selected else ""
         if missing:
-            QDesktopServices.openUrl(QUrl(PROVIDERS[missing].key_page))
+            shell.open_url(QUrl(PROVIDERS[missing].key_page))
 
     def _say(self, message: str, tone: str | None = "2") -> None:
         self.result.setText(message)
@@ -5379,7 +5379,7 @@ def version_info() -> str:
 
 
 def open_link(url: str) -> None:
-    QDesktopServices.openUrl(QUrl(url))
+    shell.open_url(QUrl(url))
 
 
 def copy_text(value: str) -> None:
@@ -5740,8 +5740,8 @@ class SettingsPage(Page):
         for title, words, on_click in [
                 ("Profiles", "One setup per person sharing this PC", lambda: go_to("profiles")),
                 ("Logs", "Open the folder with Rflow's logs", lambda: open_folder(LOG_DIR)),
-                ("Website", WEBSITE.removeprefix("https://"), lambda: QDesktopServices.openUrl(QUrl(WEBSITE))),
-                ("Source code", "Free and open source, MIT License", lambda: QDesktopServices.openUrl(QUrl(REPO)))]:
+                ("Website", WEBSITE.removeprefix("https://"), lambda: shell.open_url(QUrl(WEBSITE))),
+                ("Source code", "Free and open source, MIT License", lambda: shell.open_url(QUrl(REPO)))]:
             layout.addWidget(divider())
             layout.addWidget(link_row(title, words, lambda _=False, f=on_click: f()))
         self.advanced_card.hide()
@@ -6170,7 +6170,7 @@ class WelcomePage(QWidget):
     def _open_setup_key_page(self) -> None:
         needs = setups.for_app(self.app, self.setup).needs
         if needs:
-            QDesktopServices.openUrl(QUrl(PROVIDERS[needs].key_page))
+            shell.open_url(QUrl(PROVIDERS[needs].key_page))
 
     def _say_key(self, message: str, tone: str | None = "2") -> None:
         self.key_status.setText(message)
@@ -6458,7 +6458,7 @@ class WelcomePage(QWidget):
         self._show_footer()
 
     def _open_key_page(self) -> None:
-        QDesktopServices.openUrl(QUrl(PROVIDERS[self.provider].key_page))
+        shell.open_url(QUrl(PROVIDERS[self.provider].key_page))
 
     # -- the steps and the footer
 

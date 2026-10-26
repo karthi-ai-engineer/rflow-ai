@@ -31,11 +31,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QFontMetrics, QGuiApplication, QIcon, QPainter
+from PySide6.QtGui import QAction, QColor, QCursor, QFontMetrics, QGuiApplication, QIcon, QPainter
 from PySide6.QtNetwork import QLocalServer
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
-from sst import DOWNLOADS_DIR, __version__, bench, downloads, instance, scan, textaccess, theme, updates, usage
+from sst import DOWNLOADS_DIR, __version__, bench, downloads, instance, scan, shell, textaccess, theme, updates, usage
 from sst.audio import PREROLL_SECONDS, TAIL_SECONDS, Recorder, default_microphone, input_device_names
 from sst.commands import UNDO, match_command, phrases_for
 from sst.dictate import DEFAULT_HOTKEY, Dictation, wispr_flow_running
@@ -447,6 +447,7 @@ class TrayApp:
         self._local_lock = threading.Lock()
         self.update: updates.Update | None = None
         self._update_told = ""  # the version the user was last notified about
+        self.install_problem = ""  # why the last update didn't install (updates.unfinished), said with the next offer
 
         self.signals = _Signals()
         self.signals.state.connect(self._on_state)
@@ -544,6 +545,9 @@ class TrayApp:
         self.ticker.timeout.connect(self._tick)
         self._load_speech()
         if getattr(sys, "frozen", False):  # the source checkout is updated with git, not by the app
+            self.install_problem = updates.unfinished(UPDATE_DIR)
+            if self.install_problem:  # the installer rolled back: this is still the old version
+                log.warning("The update didn't install: %s", self.install_problem)
             # The installer of an update that has finished (it started this version) isn't needed any more.
             QTimer.singleShot(60_000, lambda: shutil.rmtree(UPDATE_DIR, ignore_errors=True))
             QTimer.singleShot(20_000, self.check_for_updates)
@@ -1032,7 +1036,7 @@ class TrayApp:
         return found
 
     def open_live_session(self, path: Path) -> None:
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        shell.open_url(QUrl.fromLocalFile(str(path)))
 
     def copy_live_session(self, path: Path, translation_only: bool = False) -> str:
         """A session's transcript onto the clipboard, to paste anywhere: "" or why it couldn't be copied."""
@@ -1384,7 +1388,7 @@ class TrayApp:
     def open_live_folder(self) -> None:
         folder = self.live_folder()
         folder.mkdir(parents=True, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+        shell.open_url(QUrl.fromLocalFile(str(folder)))
 
     def run_translation(self, text: str, target: str, second: str = ""):
         """`text` translated (sst.translate.Translation); raises when the provider can't be asked."""
@@ -1813,13 +1817,17 @@ class TrayApp:
 
     def _on_update_found(self, update) -> None:
         self.update = update
-        message = f"Rflow {update.version} is available (you have {__version__})."
+        message = self.install_problem or f"Rflow {update.version} is available (you have {__version__})."
         self.window.show_update(message, version=update.version)
         self.window.set_update_status(message)
         self.update_action.setText(f"Update to Rflow {update.version}...")
         self.update_action.setVisible(True)
         log.info("Update available: %s", update.version)
-        if self._update_told != update.version:
+        if self.install_problem:
+            self._notify(f"Rflow {update.version} didn't install", self.install_problem.partition(": ")[2] or
+                         "Click here, then Update now.", QSystemTrayIcon.MessageIcon.Warning)
+            self._update_told = update.version
+        elif self._update_told != update.version:
             self._update_told = update.version
             self._notify(f"Rflow {update.version} is available", "Click here, then Update now.")
 
@@ -1827,8 +1835,9 @@ class TrayApp:
         update = self.update
         if not update:
             return
+        self.install_problem = ""  # tried again: the next start says it again if it fails again
         if not getattr(sys, "frozen", False):
-            QDesktopServices.openUrl(QUrl(update.page))  # a source checkout: just show the release
+            shell.open_url(QUrl(update.page))  # a source checkout: just show the release
             return
         self.window.show_update(f"Downloading Rflow {update.version}...", busy=True)
         last = [-1]
@@ -1894,7 +1903,7 @@ class TrayApp:
 
     def open_release_notes(self) -> None:
         if self.update and self.update.page:
-            QDesktopServices.openUrl(QUrl(self.update.page))
+            shell.open_url(QUrl(self.update.page))
 
     def _stop_all(self) -> None:
         """Stop the shortcuts' keyboard hooks, live translation and dictation (a recording is dropped), before quitting."""
