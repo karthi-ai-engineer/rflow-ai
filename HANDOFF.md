@@ -11,7 +11,11 @@ _Last updated: 2026-10-23_
 
 ## Start here (a new session, or the owner's other laptop)
 
-**Where things stand (2026-10-23):**
+**Where things stand (2026-10-26):**
+- **Rflow 2.6.2** (2026-10-26, the owner's "release faster") = phase 47 (#217), copying the live translation: a copy
+  button on the bar puts the session so far on the clipboard (both languages, from the transcript file; the bar never
+  takes the keyboard, so its text can't be selected) and says "Copied N lines" in its title; the Live page's sessions
+  have Copy and Copy translation (`transcript.for_copy`, `TrayApp.copy_live_session`, through `textaccess.set_clipboard`).
 - **Rflow 2.6.1** (2026-10-23, the owner's "release it") = phases 45, 42 and 46:
   - Phase 45, live translation (#200): `_Checked` keeps comparing process loopback with the whole mix (3 s energy
     window, the start of the call kept); the meeting stays lowered (the owner's #160 choice) and the capture lifts it
