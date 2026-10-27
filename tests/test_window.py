@@ -2242,3 +2242,42 @@ def test_a_past_meeting_with_a_recording_but_no_minutes_can_have_them_written(tm
     window.refresh()
     (busy,) = [b for b in page.findChildren(QPushButton) if b.text() == "Writing the minutes…"]
     assert not busy.isEnabled()
+
+
+# ---- the top bar: the look and Check for updates
+
+def test_the_top_bar_switches_light_and_dark_at_once_and_remembers_it():
+    window, app = _window(settings=Settings(welcomed=True))
+    assert list(window.appearance.buttons) == ["system", "light", "dark"]
+    assert window.appearance.buttons["system"].isChecked() and w.theme.appearance() == "system"
+    window.appearance.buttons["light"].click()
+    assert app.settings.appearance == "light" and w.theme.theme() == "light" and not w.theme.dark_mode()
+    window.appearance.buttons["dark"].click()
+    assert app.settings.appearance == "dark" and w.theme.theme() == "dark"
+    window.show_page("settings")
+    page = window.pages["settings"]
+    assert page.appearance.buttons["dark"].isChecked()
+    page.appearance.buttons["light"].click()  # the same choice in Settings
+    assert app.settings.appearance == "light" and window.appearance.buttons["light"].isChecked()
+    assert w.theme.theme() == "light"
+    again, _ = _window(settings=Settings(welcomed=True, appearance="dark"))  # the next start (or another profile)
+    assert again.appearance.buttons["dark"].isChecked() and w.theme.theme() == "dark"
+    _window(settings=Settings(welcomed=True))  # back to the default for the tests after
+    assert w.theme.appearance() == "system"
+
+
+def test_check_for_updates_in_the_top_bar_says_checking_then_the_answer():
+    window, app = _window(settings=Settings(welcomed=True))
+    assert window.check_button.text() == "Check for updates" and window.check_button.kind == "primary"
+    window.check_button.click()
+    assert ("check_for_updates", True) in app.calls
+    assert window.check_button.text() == "Checking…" and not window.check_button.isEnabled()
+    window.set_update_status("Checking for updates...")
+    assert not window.check_button.isEnabled()
+    window.set_update_status("You have the latest version (2.7.0).")
+    assert window.check_button.isEnabled() and window.check_button.text() == "Check for updates"
+    assert window.toast.text.text() == "You have the latest version (2.7.0)."
+    window.check_button.click()
+    window.show_update("Rflow 2.8.0 is available (you have 2.7.0).", version="2.8.0")  # the banner says it
+    window.set_update_status("Rflow 2.8.0 is available (you have 2.7.0).")
+    assert window.check_button.isEnabled() and not window.banner_holder.isHidden()

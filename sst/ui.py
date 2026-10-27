@@ -632,14 +632,14 @@ class Segmented(Card):
 
     changed = Signal(str)
 
-    def __init__(self, options: list[tuple[str, str]], parent=None):
+    def __init__(self, options: list[tuple[str, str]], parent=None, icons: dict[str, str] | None = None):
         super().__init__("seg", 14, parent)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
         self.buttons: dict[str, Button] = {}
         for key, text in options:
-            b = Button(text, "segment")
+            b = Button(text, "segment", icon=(icons or {}).get(key))
             b.setCheckable(True)
             b.setAutoExclusive(True)
             b.clicked.connect(lambda _=False, k=key: self.changed.emit(k))

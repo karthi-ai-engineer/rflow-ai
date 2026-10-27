@@ -188,6 +188,11 @@ MEETING_REFRESH_MS = 5000  # the meeting's line (time, cost, slides) and the mee
 TRANSLATE_SHORTCUTS = [("Ctrl+C+C (press Ctrl+C twice)", "ctrl+c+c"), ("Ctrl+Alt+L", "ctrl+alt+l"), ("Off", "")]
 TRANSFORM_HOTKEYS = [("Double-tap Ctrl", "double ctrl"), ("Ctrl+Alt+T", "ctrl+alt+t"), ("F8", "f8"), ("Off", "")]
 WHERE_LABELS = {"local": "On this PC", "cloud": "In the cloud", "server": "Your own server"}
+# The top bar's look: as Windows is set, or always light or dark (Settings.appearance)
+APPEARANCE_CHOICES = [("system", "System"), ("light", "Light"), ("dark", "Dark")]
+APPEARANCE_ICONS = {"system": "display", "light": "sun", "dark": "moon"}
+APPEARANCE_TIPS = {"system": "Light or dark, as Windows is set", "light": "Always light (Porcelain)",
+                   "dark": "Always dark (Obsidian)"}
 COMPACT_WIDTH = 900  # below it, the sidebar becomes a rail of icons with their names under them
 
 log = logging.getLogger("sst.window")
@@ -6150,6 +6155,12 @@ class SettingsPage(Page):
         layout.addWidget(setting_row("Start when I sign in", "Rflow waits quietly in the tray" if can_start_with_windows()
                                      else "Available in the installed app", self.start_with_windows)[0])
         layout.addWidget(divider())
+        self.appearance = Segmented(APPEARANCE_CHOICES, icons=APPEARANCE_ICONS)
+        self.appearance.set_current(s.appearance)
+        self.appearance.changed.connect(lambda name: getattr(self.window(), "set_appearance", lambda _: None)(name))
+        layout.addWidget(setting_row("Appearance", "Light or dark, or as Windows is set. Also in the bar at the top.",
+                                     self.appearance)[0])
+        layout.addWidget(divider())
         self.reading = link_row("Reading test", "Read 30 sentences aloud: how many words does Rflow get wrong?",
                                 lambda _=False: go_to("reading"))
         layout.addWidget(self.reading)
@@ -7404,6 +7415,22 @@ class MainWindow(QWidget):
         content = QVBoxLayout(self.content)
         content.setContentsMargins(0, 0, 0, 0)
         content.setSpacing(0)
+        # The bar over every page: the look (as Windows is set, light or dark) and Check for updates, one click each
+        self.topbar = QWidget()
+        top = QHBoxLayout(self.topbar)
+        top.setContentsMargins(32, 16, 32, 0)
+        top.setSpacing(12)
+        top.addStretch()
+        self.appearance = Segmented(APPEARANCE_CHOICES, icons=APPEARANCE_ICONS)
+        for key, b in self.appearance.buttons.items():
+            b.setToolTip(APPEARANCE_TIPS[key])
+        self.appearance.set_current(theme.APPEARANCES[0])
+        self.appearance.changed.connect(self.set_appearance)
+        top.addWidget(self.appearance, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.check_button = button("Check for updates", self._check_for_updates, primary=True, size="sm", icon="update")
+        top.addWidget(self.check_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._checking = False  # the top bar's check is waiting for its answer (a toast says it)
+        content.addWidget(self.topbar)
         self.banner_holder = QWidget()
         banner_holder = QVBoxLayout(self.banner_holder)
         banner_holder.setContentsMargins(24, 20, 24, 0)
@@ -7418,6 +7445,8 @@ class MainWindow(QWidget):
         layout.addWidget(self.content, 1)
         self.toast = Toast(self)
 
+        theme.set_appearance(app.settings.appearance)
+        self.appearance.set_current(app.settings.appearance)
         self.apply_theme()
         QGuiApplication.styleHints().colorSchemeChanged.connect(self.apply_theme)
         self._set_compact(False)
@@ -7441,6 +7470,34 @@ class MainWindow(QWidget):
             widget.update()
         self.update()
         self.refresh()
+
+    def set_appearance(self, name: str) -> None:
+        """The look chosen in the top bar or in Settings: saved in the profile, used at once."""
+        name = name if name in theme.APPEARANCES else "system"
+        if self.app.settings.appearance != name:
+            self.app.apply_settings(dataclasses.replace(self.app.settings, appearance=name))
+        theme.set_appearance(name)
+        self.appearance.set_current(name)
+        if "settings" in self.pages.built:
+            self.pages["settings"].appearance.set_current(name)
+        self.apply_theme()
+
+    def _check_for_updates(self) -> None:
+        """The top bar's button: it says Checking… until the answer, which a toast then gives (or the update banner)."""
+        self._checking = True
+        self.check_button.setText("Checking…")
+        self.check_button.setEnabled(False)
+        self.app.check_for_updates(manual=True)
+
+    def _checked(self, message: str = "") -> None:
+        if not self._checking:
+            return
+        self._checking = False
+        self.check_button.setText("Check for updates")
+        self.check_button.setEnabled(True)
+        if message:
+            latest = message.startswith("You have the latest")
+            self.toast.show_message(message, "check" if latest else "warning", "ok" if latest else "warn")
 
     def _page_built(self, key: str, page: QWidget) -> None:
         """A page built on first use: the window's present state, as it would have had from the start."""
@@ -7597,6 +7654,10 @@ class MainWindow(QWidget):
 
     def refresh(self) -> None:
         """New dictation, words, settings or profile name: update what is on screen."""
+        wanted = self.app.settings.appearance
+        if wanted in theme.APPEARANCES and wanted != theme.appearance():  # e.g. another profile's look
+            self.set_appearance(wanted)
+            return  # apply_theme refreshes
         self._show_profile()
         self._show_status()
         current = self.current_page()
@@ -7646,6 +7707,7 @@ class MainWindow(QWidget):
         self.mark.set_state(state)
 
     def show_update(self, message: str, busy: bool = False, version: str = "") -> None:
+        self._checked()
         self.banner_text.setText(message)
         self.update_button.setEnabled(not busy)
         self.banner.show()
@@ -7662,6 +7724,8 @@ class MainWindow(QWidget):
 
     def set_update_status(self, message: str) -> None:
         self._update_status = message
+        if not message.startswith("Checking"):
+            self._checked("" if self.banner.isVisible() else message)  # an update found: the banner says it
         if "settings" in self.pages.built:
             self.pages["settings"].update_status.setText(message)
 

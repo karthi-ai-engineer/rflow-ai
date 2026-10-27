@@ -62,6 +62,7 @@ class Settings:
     room_minutes: bool = True  # after it, from that recording (needs it)
     meeting_place: str = "online"  # the Meeting mode tab last open: "online" or "room" (in person)
     meeting_told: bool = False  # the notice (people should know it's recorded; audio and frames go to Google) accepted once
+    appearance: str = "system"  # the window's look: "system" (as Windows is set), "light" (Porcelain) or "dark" (Obsidian)
     # The Gemini key is on Google's free tier: the cost card says "$0 billed (would cost $X)". No key can tell its tier,
     # and nothing sets it yet (TODO: the owner decides how it is asked or found out).
     gemini_free_tier: bool = False
