@@ -20,6 +20,14 @@ _Last updated: 2026-10-23_
     spoken. This makes it the room's live transcript.
   - The minutes use `ROOM_WORDS`: every voice on the one track is a "Speaker N", never "You".
   - Its switches are `Settings.room_translate`, `room_record` and `room_minutes`.
+  - Online has a **Spoken translation** row (#233, `Settings.meeting_speak`, off by default, needs Live translation):
+    `TrayApp.meeting_live_config()` is the Live page's config with speak set by it alone (the Live page's speed and
+    ducking). It applies at once while the meeting runs, and the bar's speaker button on a meeting's bar
+    (`set_bar_speak`) is this switch. In person nothing turns speaking on (#234). `_MeetingLive` stops and counts only
+    the LiveSession it started (#235). Includes #228 (the spoken-translation stall, #227).
+  - `tests/test_live_paths.py` runs live translation end to end in virtual time (#236): an engine answering like Gemini
+    (its voice 1 s later, silence for silence), each source, speaking on/off, the cost saver, a reconnect, the whole mix
+    (Bluetooth), 40 sentences in a row. Without #228 the whole-mix and speakers cases stall.
   - A bar over every page has **System / Light / Dark** (`Settings.appearance`; `theme.set_appearance`, which
     `dark_mode()` follows; also in Settings) and a purple **Check for updates**, which shows "Checking…" and then a
     toast.

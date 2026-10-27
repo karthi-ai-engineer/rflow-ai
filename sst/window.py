@@ -163,6 +163,9 @@ MEETING_SHORTCUTS = [("Ctrl+Alt+M", "ctrl+alt+m"), ("Ctrl+Shift+M", "ctrl+shift+
 # Meeting mode's parts (Settings.meeting_<part>): its title and what it does, one line each
 MEETING_PARTS = [
     ("translate", "Live translation", "The translation bar runs during the meeting, as set on Live translation."),
+    ("speak", "Spoken translation", "The translation read aloud too, in Gemini's voice, the other apps lowered as set on "
+                                    "Live translation. Off: silent captions. It costs nothing more. Needs Live "
+                                    "translation."),
     ("record", "Record", "The others (what the laptop plays) and you (the microphone), saved as sound files on this laptop."),
     ("minutes", "Minutes", "After the meeting: who said what, a summary, the decisions, and the action items with owners "
                            "and dates. Needs Record."),
@@ -5196,14 +5199,17 @@ class MeetingPage(Page):
             on = {part: getattr(s, f"{kind}_{part}", False) for part, *_ in MEETING_PARTS}
             works = {"translate": on["translate"], "record": on["record"], "minutes": on["minutes"] and on["record"]}
             works["screen"] = on["screen"] and works["minutes"]
+            works["speak"] = on["speak"] and on["translate"]
             for part, toggle in toggles.items():
                 toggle.blockSignals(True)
                 toggle.setChecked(works[part])
                 toggle.blockSignals(False)
-                # a running meeting keeps the parts it started with; the minutes need the sound, the slides the minutes
-                needs = {"minutes": on["record"], "screen": works["minutes"]}.get(part, True)
-                toggle.setEnabled(not running and needs)
-                rows[part].setToolTip("" if needs else "Needs Record" if part == "minutes" else "Needs the minutes")
+                # a running meeting keeps the parts it started with (speaking changes at once, as on the bar's button);
+                # the minutes need the sound, the slides the minutes, speaking the translation
+                needs = {"minutes": on["record"], "screen": works["minutes"], "speak": on["translate"]}.get(part, True)
+                toggle.setEnabled((not running or part == "speak") and needs)
+                rows[part].setToolTip("" if needs else {"minutes": "Needs Record", "speak": "Needs Live translation"}.get(
+                    part, "Needs the minutes"))
 
     def _refresh_past(self) -> None:
         clear(self.meeting_rows)

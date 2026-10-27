@@ -2213,7 +2213,8 @@ def test_meeting_mode_is_a_section_after_live_translation_and_finds_the_meeting_
     assert page.chosen.app == "Microsoft Teams" and page.picker.isHidden() and not page.app_line.isHidden()
     assert page.app_name.text() == "Microsoft Teams" and page.start_button.isEnabled() and page.connect_card.isHidden()
     assert page.state.text() == "Off" and page.doing.text() == "Ready for your meeting in Microsoft Teams"
-    assert [t.isChecked() for t in page.parts.values()] == [True, True, True, True]
+    assert {p: t.isChecked() for p, t in page.parts.items()} == {"translate": True, "speak": False, "record": True,
+                                                                 "minutes": True, "screen": True}  # silent captions
 
 
 def test_the_in_person_tab_needs_no_meeting_app_and_has_its_own_switches():
@@ -2262,7 +2263,8 @@ def test_a_meeting_starts_records_with_its_cost_then_shows_its_minutes():
     window.refresh()
     assert page.state.text() == "Recording" and page.light.state == "live" and page.light.blinking
     assert page.doing.text() == "Microsoft Teams · 14 min · $0.12 so far · 6 slides"
-    assert not any(t.isEnabled() for t in page.parts.values())  # a running meeting keeps the parts it started with
+    # a running meeting keeps the parts it started with; speaking changes at once, like the bar's speaker button
+    assert [p for p, t in page.parts.items() if t.isEnabled()] == ["speak"]
     page.start_button.click()
     assert ("stop_meeting",) in app.calls and page.state.text() == "Writing the minutes…" and page.light.blinking
     assert not page.start_button.isEnabled()  # one meeting's minutes at a time
@@ -2297,6 +2299,20 @@ def test_the_parts_switch_for_the_next_meeting_and_follow_each_other():
     assert "Switch on live translation or Record" in page.connect_words.text() and not page.start_button.isEnabled()
     page.parts["record"].click()
     assert page.parts["minutes"].isChecked() and page.parts["screen"].isEnabled() and page.start_button.isEnabled()
+
+
+def test_spoken_translation_is_its_own_row_that_needs_live_translation():
+    window, app, page = _meeting_window([("Zoom", "Zoom Meeting", 102)], live_speak=True)
+    keys = list(page.parts)
+    assert keys.index("speak") == keys.index("translate") + 1 and "speak" not in page.room_parts  # never in the room
+    assert not page.parts["speak"].isChecked() and page.parts["speak"].isEnabled()  # the Live page's speaking aside
+    page.parts["speak"].click()
+    assert ("set_meeting_option", "speak", True) in app.calls and app.settings.meeting_speak
+    page.parts["translate"].click()
+    assert not page.parts["speak"].isChecked() and not page.parts["speak"].isEnabled()
+    assert page.part_rows["speak"].toolTip() == "Needs Live translation" and app.settings.meeting_speak  # kept
+    page.parts["translate"].click()
+    assert page.parts["speak"].isChecked() and page.part_rows["speak"].toolTip() == ""
 
 
 def test_without_a_gemini_key_only_recording_can_start():

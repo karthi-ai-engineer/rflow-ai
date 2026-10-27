@@ -193,9 +193,9 @@ class LiveSession:
             log.info("The voice said %d sentences (%d skipped to keep up); the voice skipped a repeat %d times", old.said,
                      old.skipped, old.repeats)
             if getattr(old, "sound_s", 0) or getattr(old, "voiced", 0):
-                log.info("Gemini's own voice: %.0f s played (%.0f s left out to keep up), %d sentences said by it, %d by "
-                         "the laptop's voice in its place, %d by neither", old.sound_s, old.sound_skipped_s, old.voiced,
-                         old.said, old.unvoiced)
+                log.info("Gemini's own voice: %.0f s played (%.0f s left out to keep up, %.0f s of silence after it), %d "
+                         "sentences said by it, %d by the laptop's voice in its place, %d by neither", old.sound_s,
+                         old.sound_skipped_s, getattr(old, "quiet_s", 0.0), old.voiced, old.said, old.unvoiced)
         if speaker is not None:
             speaker.start()
 

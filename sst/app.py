@@ -426,25 +426,35 @@ MEETING_NOTICE = (
 class _MeetingLive:
     """Live translation as a meeting's part (MeetingSession's `live`): its bar started with the meeting and stopped with
     it, unless it was already running (then it's left as it was). stop() may come on the meeting's watcher thread (the
-    meeting window closed): the bar is stopped on the app's thread."""
+    meeting window closed): the bar is stopped on the app's thread. Only the session it started is its own: once that
+    bar is gone (closed, or the cost saver's stop), a live translation started meanwhile is neither stopped nor
+    counted (#235)."""
 
     def __init__(self, app: "TrayApp", in_person: bool = False):
         self.app, self.started, self.in_person = app, False, in_person
+        self.session = None  # the LiveSession it started: its spend() still adds up once stopped
 
     def start(self) -> None:
         if self.app.live.running:
             return
-        problem = self.app.start_live(self.app.room_live_config() if self.in_person else None)
+        problem = self.app.start_live(self.app.room_live_config() if self.in_person else self.app.meeting_live_config())
         if problem:
             raise RuntimeError(problem)
-        self.started = True
+        self.started, self.session = True, self.app.live.session
+
+    @property
+    def owns_bar(self) -> bool:
+        """The bar running now is the one this meeting started."""
+        return self.started and self.session is not None and self.app.live.session is self.session
 
     def stop(self) -> None:
         if self.started:
             self.started = False
-            self.app.signals.meeting_live_stop.emit()
+            self.app.signals.meeting_live_stop.emit(self.session)
 
     def spend(self):
+        if self.session is not None:
+            return self.session.spend()
         return self.app.live.spend()
 
 
@@ -472,7 +482,7 @@ class _Signals(QObject):
     meeting_key = Signal()  # the same for Meeting mode's shortcut
     meeting = Signal()  # the meeting's state or result changed (MeetingSession.on_change, from any thread)
     minutes_written = Signal(object, object, str)  # (folder, MinutesResult or None, why not), a past meeting's minutes
-    meeting_live_stop = Signal()  # the meeting stopped (perhaps on its watcher thread): its live bar stops on this one
+    meeting_live_stop = Signal(object)  # the meeting stopped (perhaps on its watcher thread): the LiveSession it started
     usage = Signal()  # a Gemini call was counted (sst.usage), from the thread that made it
 
 
@@ -536,7 +546,7 @@ class TrayApp:
         self.signals.meeting_key.connect(self._meeting_key_pump)
         self.signals.meeting.connect(self._meeting_changed)
         self.signals.minutes_written.connect(self._minutes_written)
-        self.signals.meeting_live_stop.connect(lambda: self.stop_live())
+        self.signals.meeting_live_stop.connect(self._stop_meeting_live)
         self.signals.usage.connect(self._on_usage)
 
         self.icon = QIcon(str(ICON_FILE))
@@ -554,7 +564,7 @@ class TrayApp:
                                  lambda config: self._live_speaker(config))
         self.live.changed.connect(self._live_changed)
         self.live.moved.connect(self._live_moved)
-        self.live.speak_toggled.connect(lambda on: self.set_live_speak(on))
+        self.live.speak_toggled.connect(lambda on: self.set_bar_speak(on))
         self.live.copy_requested.connect(self._copy_live_from_bar)
         self.live.save_toggled.connect(lambda on: self.set_live_save(on))
         self.live.quiet_stop.connect(lambda why: self._notify(APP_NAME, f"Live translation stopped: {why}."))
@@ -1161,6 +1171,23 @@ class TrayApp:
         return dataclasses.replace(self.live_config(), source="microphone", mic_target=self.settings.live_target,
                                    speak=False, duck=False)
 
+    def meeting_live_config(self) -> LiveConfig:
+        """Live translation in an online meeting: as set on Live translation, but spoken aloud only with the meeting's
+        own Spoken translation switch (Settings.meeting_speak), whatever the Live page's is; speed and ducking are
+        the Live page's."""
+        return dataclasses.replace(self.live_config(), speak=self.settings.meeting_speak)
+
+    def _meeting_bar(self):
+        """The running meeting's _MeetingLive while the bar is the one it started, else None."""
+        m = self.meeting
+        live = getattr(m, "live", None) if m is not None and m.options.translate else None
+        return live if isinstance(live, _MeetingLive) and live.owns_bar else None
+
+    def _stop_meeting_live(self, session) -> None:
+        """A meeting stopped: its bar stops, unless that bar is gone and another session runs now (#235)."""
+        if session is None or self.live.session is session:
+            self.stop_live()
+
     # -- the spoken translation (sst.live.voice, sst.live.speaker)
 
     def live_voice(self) -> Voice:
@@ -1192,7 +1219,32 @@ class TrayApp:
         self.apply_settings(dataclasses.replace(self.settings, live_speak=on))
         if on and not LOCAL_VOICE.ready():
             self.download_live_voice()
-        self.live.set_speak(on)
+        if self._meeting_bar() is None:  # a meeting's bar speaks by the meeting's switch (#234)
+            self.live.set_speak(on)
+        if self.window.isVisible():
+            self.window.refresh()
+
+    def set_bar_speak(self, on: bool) -> None:
+        """The bar's speaker button: the running translation spoken or not. On a meeting's bar it's the meeting's
+        Spoken translation switch; in person it stays silent, never read aloud in the room (#234)."""
+        meeting = self._meeting_bar()
+        if meeting is None:
+            self.set_live_speak(on)
+        elif meeting.in_person:
+            self.live.set_speak(False)  # the button back to off
+            self.live.flash("Not spoken aloud in a meeting in person")
+        else:
+            self.set_meeting_speak(on)
+
+    def set_meeting_speak(self, on: bool) -> None:
+        """Meeting mode's Spoken translation: saved, and at once on a running online meeting's bar; the laptop's voice is
+        downloaded the first time, as on the Live page."""
+        self.apply_settings(dataclasses.replace(self.settings, meeting_speak=on))
+        if on and not LOCAL_VOICE.ready():
+            self.download_live_voice()
+        meeting = self._meeting_bar()
+        if meeting is not None and not meeting.in_person:
+            self.live.set_speak(on)
         if self.window.isVisible():
             self.window.refresh()
 
@@ -1261,7 +1313,9 @@ class TrayApp:
             self._notify(APP_NAME, f"The voice couldn't be downloaded: {error}", QSystemTrayIcon.MessageIcon.Warning)
         else:
             log.info("The voice %s is ready", LOCAL_VOICE.name)
-            self.live.set_speak(self.settings.live_speak)  # here now: it speaks if speaking is still wanted
+            # here now: it speaks if speaking is still wanted, by the running bar's own setting (a meeting's, never the
+            # room's: #234), else the Live page's
+            self.live.set_speak(self.live.config.speak if self.live.running else self.settings.live_speak)
         if self.window.isVisible():
             self.window.refresh()
 
@@ -1418,10 +1472,11 @@ class TrayApp:
             if answer != QMessageBox.StandardButton.Yes:
                 return "Not started."
             self.apply_settings(dataclasses.replace(s, live_told=True))
-        if s.live_speak and not self.voice_problem and not LOCAL_VOICE.ready():
+        config = config or self.live_config()
+        if config.speak and not self.voice_problem and not LOCAL_VOICE.ready():
             self.download_live_voice()  # e.g. an older Rflow's Danny here: Ryan comes in the background, once a run
         try:
-            self.live.start(config or self.live_config(), geometry=list(self.settings.live_bar) or None)
+            self.live.start(config, geometry=list(self.settings.live_bar) or None)
         except Exception as e:  # e.g. no output device or microphone to listen to
             log.warning("Live translation didn't start: %s", e)
             return f"Live translation couldn't start: {e}"
@@ -1528,7 +1583,11 @@ class TrayApp:
         return MeetingOptions(**{part: getattr(s, f"meeting_{part}") for part in MEETING_PARTS})
 
     def set_meeting_option(self, name: str, on: bool, in_person: bool = False) -> None:
-        """A part switched on or off: for the next meeting (a running one keeps what it started with)."""
+        """A part switched on or off: for the next meeting (a running one keeps what it started with). "speak" (online
+        only) is the Spoken translation switch, at once on a running meeting's bar."""
+        if name == "speak" and not in_person:
+            self.set_meeting_speak(on)
+            return
         if name not in (ROOM_PARTS if in_person else MEETING_PARTS):
             raise ValueError(f"No meeting part {name!r}")
         self.apply_settings(dataclasses.replace(self.settings, **{f"{'room' if in_person else 'meeting'}_{name}": on}))
