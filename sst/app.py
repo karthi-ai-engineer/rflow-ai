@@ -64,6 +64,7 @@ from sst.pipeline.guard import Guard
 from sst.pipeline.learning import CorrectionEvent, Learner
 from sst.pipeline.polish import GatewayLLM
 from sst.pipeline.session import LazyBackend, Stages, VoicePipeline
+from sst.screen.control import ScreenControl
 from sst.settings import (
     CONFIG_DIR,
     LOAD_PROBLEMS,
@@ -594,6 +595,10 @@ class TrayApp:
         menu.addAction("Words", lambda: self.window.open("dictionary"))
         menu.addAction("Text Transform", lambda: self.window.open("transform"))
         menu.addAction("Translate", lambda: self.window.open("translate"))
+        # Screen translator (sst.screen): the frame and its threads are made only when it starts
+        self.screen = ScreenControl(self, QAction("Screen translator", menu, checkable=True))
+        menu.addAction(self.screen.action)
+        self.screen.start_shortcut()
         self.live_action = QAction("Live translation", menu, checkable=True)
         self.live_action.triggered.connect(lambda: self.toggle_live())
         menu.addAction(self.live_action)
@@ -1024,6 +1029,10 @@ class TrayApp:
         shortcuts = ("meeting_shortcut", "live_shortcut", "translate_shortcut", "transform_shortcut")
         if any(getattr(new, k) != getattr(old, k) for k in shortcuts) and hasattr(self, "meeting_action"):
             self._start_meeting_shortcut()
+        shortcuts = ("screen_shortcut", "meeting_shortcut", "live_shortcut", "translate_shortcut", "transform_shortcut",
+                     "hotkey")
+        if any(getattr(new, k) != getattr(old, k) for k in shortcuts) and hasattr(self, "screen"):
+            self.screen.start_shortcut()
         if new.speech_model != old.speech_model:
             self._load_speech()
         self.window.refresh()
@@ -2367,6 +2376,7 @@ class TrayApp:
         self.transforms.stop()
         self.translator.stop()
         self.stop_meeting()  # the recording is kept; minutes still being written are lost with Rflow
+        self.screen.quit()
         self.live.stop()
         for listener in (self.live_listener, self.meeting_listener):
             if listener is not None:
