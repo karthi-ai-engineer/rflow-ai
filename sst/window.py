@@ -5241,6 +5241,7 @@ class TransformPage(Page):
                                            "names, dates and your “maybe” stay.")
         self.app = app
         s = app.settings
+        self.trying = False  # a try on the page is with the model
         self.ai = AiNeeded(go_to, "Text Transform")
         self.model, self.setup = self.ai.words, self.ai.setup
         self.add(self.ai)
@@ -5410,8 +5411,8 @@ class TransformPage(Page):
         self.reset.setVisible(bool(s.command_phrases))
         self._check_phrases(phrases)
         self.ai.show_model(model)
-        for b in self.try_buttons.values():
-            b.setEnabled(bool(model))
+        for b in self.try_buttons.values():  # not while a try runs: a second one's answer would land on the first's
+            b.setEnabled(bool(model) and not self.trying)
         self.switch_words.setText("On: rewrite text by voice or from a menu, in any app. Here's how:" if on else
                                   "Off. Turn it on to rewrite text by voice or from a menu, in any app.")
         self.steps.setVisible(on)
@@ -5527,20 +5528,26 @@ class TransformPage(Page):
             return
         for b in self.try_buttons.values():
             b.setEnabled(False)
-        self._say(f"{TRANSFORMS[key].name}...")
+        self.trying = True
+        self.result.hide()  # the last try's result isn't this one's: it went on showing under an error
+        self._say(f"{TRANSFORMS[key].name}..." + (f" ({len(sample.split()):,} words: this takes a little longer)"
+                                                    if len(sample.split()) > 300 else ""))
 
         def done(result, error) -> None:
+            self.trying = False
             self.refresh()
             if error:
                 self._say(f"Didn't work: {error}")
             elif not result.accepted:
-                self.result.hide()
                 self._say("Kept the text: " + "; ".join(result.reasons))
             else:
                 self.result.setHtml(result.html or html.escape(result.plain))
                 self.result.show()
-                self._say(f"{TRANSFORMS[key].name} in {result.seconds:.1f} s" +
-                          (f" (checked and fixed once: {result.attempts} answers)" if result.attempts > 1 else ""))
+                parts = getattr(result, "parts", 1)
+                self._say(f"{TRANSFORMS[key].name} in {result.seconds:.1f} s"
+                          + (f", in {parts} parts" if parts > 1 else "")
+                          + (f" (checked and fixed: {result.attempts} answers)" if result.attempts > parts else "")
+                          + "".join(f". {k[0].upper()}{k[1:]}" for k in getattr(result, "kept", [])))
         run_in_background(self, lambda: usage.within("tests", self.app.run_transform, sample, key), done)
 
 
