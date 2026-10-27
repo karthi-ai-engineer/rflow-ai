@@ -1178,6 +1178,28 @@ clipboard tool can rewrite it).
   (ctrl+c+c), the page, the app, settings, `tests/test_textaccess.py` (clipboard_text).
 - **Not yet tried:** real apps and the owner's model.
 
+## Screen translation (phase 51, the owner's screen translator of 2026-10-09, brought in on 2026-10-27)
+
+The owner's own app (`kaipulla`, "Screen Translator") as a feature of Rflow: a hollow frame put over any app, whose
+Japanese is covered by English stickers in the same place and colours; the inside is click-through. Start and stop:
+**Ctrl+Alt+S** (`Settings.screen_shortcut`; Win+Alt+S or Off on the Translate page's new card; it gives way to any other
+tool's shortcut), the tray's "Screen translation", or the frame's ✕. From the shortcut the frame covers the window you
+were in (a browser's page area); otherwise it opens where it was left (`screen_lens`). A notice once (`screen_told`).
+- Its own package, `sst/screen/` (never `sst.pipeline`, `sst.dictate`, `sst.audio`: `tests/test_screen_lens.py`).
+  Ported: capture → change detector → OCR → line fixes → paragraph merge → tracked stickers → painting, the UI glossary,
+  era years, the sanity check, the pacing (light on battery), raw input to hide stickers before a scroll, the
+  capture-exclusion self-test.
+- **No new dependency**: Windows OCR through ctypes (`winocr.py`, WinRT by vtable; checked on this laptop: 11-30 ms for a
+  900x260 image, Japanese read right at 15-28 px), GDI BitBlt in place of mss, numpy in place of OpenCV (template
+  matching by FFT, `tracker.match_template`), Qt for the 2x upscale.
+- Dropped: Google's free unofficial endpoint (Gemini only, the profile's key), Credential Manager keys (`creds.py`), the
+  tray, installer, single instance, launcher, its global Ctrl+Alt+P/T/R/S/Q/F (the toolbar has pause, original, fit,
+  read again, ✕), the debug snapshots.
+- Cost: Gemini 3.5 Flash-Lite, minimal thinking, one call per new screen's strings (cached), about $0.0006 a new screen
+  (`translate.estimate()`); counted as "Screen translation" on the cost card (`usage.FEATURES["screen"]`).
+- Not yet tried on a real screen: the frame and stickers over a live app (alignment at 125-150% scaling, scrolling, the
+  click-through), raw input in Rflow's process, and a real Gemini answer.
+
 ## Snippets (phase 21, the owner's idea of 2026-10-02)
 
 Like Wispr Flow's snippets: say a short phrase, get your own text typed ("my email" → xyz@gmail.com, "my signature" →
