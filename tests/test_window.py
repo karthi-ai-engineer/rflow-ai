@@ -1266,13 +1266,21 @@ def test_the_formatting_examples_are_what_the_real_stage_types():
     assert list(expected) == w.FORMAT_EXAMPLES
     for said, typed in expected.items():
         assert w.formatted(said)[0] == typed
+    assert list(w.FORMAT_KEPT_WHY) == w.FORMAT_KEPT
     for said in w.FORMAT_KEPT:
         assert w.formatted(said)[0] == said  # prose stays as said
+        assert w.FORMAT_KEPT_WHY[said][0] != said  # what a blind formatter would type differs: worth striking out
     window, _ = _window()
     page = window.pages["formatting"]
     page.refresh()
     shown = _shown(page.changed_box)
     assert all(w.formatted(said)[1] in shown for said in expected) and "25%</span>" in shown  # its changes in Iris
+    # What stays: one well, each phrase once with a check, why, and the wrong version struck out (not two equal columns)
+    kept = _shown(page.kept_box)
+    assert "YOU SAY" not in kept and "TYPED AS YOU SAID IT" in kept
+    for said, (wrong, why) in w.FORMAT_KEPT_WHY.items():
+        assert kept.count(said) == 1 and f"<s>{wrong}</s>" in kept and why in kept
+    assert len(page.kept_box.checks) == len(w.FORMAT_KEPT) and all(not c.pixmap().isNull() for c in page.kept_box.checks)
 
 
 def test_formatting_says_when_the_voice_pipeline_is_off_and_turns_it_on():

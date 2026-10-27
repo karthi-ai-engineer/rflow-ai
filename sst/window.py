@@ -5726,6 +5726,11 @@ FORMAT_EXAMPLES = ["sales went up twenty five percent this quarter", "the budget
                    "the launch is on october first twenty twenty six", "we need twenty five hundred copies",
                    "send it to john dot smith at gmail dot com"]
 FORMAT_KEPT = ["we have two options", "meet me at five", "the first time"]  # prose, or unclear: stays as said
+# For each: what a formatter that turned every number word into digits would type, and why Rflow doesn't. The page shows
+# it struck out, so a phrase typed exactly as said reads as a choice, not as nothing happening (the owner's question).
+FORMAT_KEPT_WHY = {"we have two options": ("we have 2 options", "A small number in a sentence reads better as a word."),
+                   "meet me at five": ("meet me at 5:00", "Five what? 5 AM, 5 PM or five minutes: Rflow won't guess."),
+                   "the first time": ("the 1st time", "An everyday word, not a date or a list.")}
 
 
 def formatted(said: str) -> tuple[str, str]:
@@ -5772,9 +5777,9 @@ class FormattingPage(Page):
         layout.addWidget(self.changed_box)
         layout.addSpacing(4)
         layout.addWidget(label("What stays as you said it", "heading"))
-        layout.addWidget(caption("Small numbers in a sentence, and anything that could be read two ways: a wrong "
-                                 "number would change what you meant.", "2"))
-        self.kept_box = self._table(FORMAT_KEPT)
+        layout.addWidget(caption("Rflow leaves these alone on purpose. Turning every number word into digits would type "
+                                 "what's struck out, and change how it reads or what you meant.", "2"))
+        self.kept_box = self._kept(FORMAT_KEPT)
         layout.addWidget(self.kept_box)
         self.add(changes)
 
@@ -5816,6 +5821,39 @@ class FormattingPage(Page):
         grid.setColumnStretch(2, 1)
         return box
 
+    def _kept(self, phrases: list[str]) -> Card:
+        """Phrases Rflow types as said, one well: each with a check, why it's kept, and the wrong version struck out."""
+        box = Card("well", 14)
+        grid = QGridLayout(box)
+        grid.setContentsMargins(16, 12, 16, 14)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(0)
+        grid.addWidget(_caps_label("Typed as you said it"), 0, 1)
+        grid.addWidget(_caps_label("Not this"), 0, 2)
+        grid.setRowMinimumHeight(1, 8)
+        box.arrows, box.checks = [], []  # arrows: none here; refresh() colours both kinds of box alike
+        for i, said in enumerate(phrases):
+            wrong, why = FORMAT_KEPT_WHY[said]
+            at = 2 + 3 * i
+            if i:
+                grid.setRowMinimumHeight(at - 1, 12)
+            check = QLabel()
+            box.checks.append(check)
+            grid.addWidget(check, at, 0, Qt.AlignmentFlag.AlignVCenter)
+            typed = label(formatted(said)[1])
+            typed.setTextFormat(Qt.TextFormat.RichText)
+            typed.setObjectName("typed")
+            typed.said = said
+            grid.addWidget(typed, at, 1)
+            naive = label(f"<s>{html.escape(wrong)}</s>", tone="3")
+            naive.setTextFormat(Qt.TextFormat.RichText)
+            naive.setObjectName("naive")
+            grid.addWidget(naive, at, 2)
+            grid.addWidget(caption(why, "3"), at + 1, 1, 1, 2)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)
+        return box
+
     def refresh(self) -> None:
         s = self.app.settings
         self.format_text.blockSignals(True)
@@ -5828,6 +5866,8 @@ class FormattingPage(Page):
         for box in (self.changed_box, self.kept_box):  # the theme's colours: the arrows, the changes in Iris
             for arrow in box.arrows:
                 arrow.setPixmap(theme.icon_pixmap("arrow-right", tok("text3").name(), 14, self.devicePixelRatioF()))
+            for check in getattr(box, "checks", []):
+                check.setPixmap(theme.icon_pixmap("check", tok("ok").name(), 16, self.devicePixelRatioF()))
             for typed in box.findChildren(QLabel, "typed"):
                 typed.setText(formatted(typed.said)[1])
         self._try()
