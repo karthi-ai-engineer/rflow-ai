@@ -10,7 +10,11 @@ piece by piece as it comes; the laptop's voice (sst.live.voice) only stands in f
 say: one with none of the engine's audio from OWN_RECENT seconds before it was whole to AUDIO_WAIT after (the audio
 comes before its transcript). The window leans towards "said": a sentence said twice is worse than one not said when
 Gemini's audio stops in the middle of a turn. Gemini's audio is played at its own pace (the speed setting is the
-laptop's voice's); when it falls behind, its long pauses are shortened, and audio older than STALE is skipped.
+laptop's voice's); when it falls behind, its long pauses are shortened, and audio older than STALE is skipped. Gemini's
+voice comes back as long as what it's sent, silence for silence: a stretch of it that is all pause (below PAUSE_LEVEL)
+once the voice has ended isn't played and never makes it `speaking`. Else a way that gets silence while the voice
+speaks (the whole mix, a microphone near speakers) sends silence, Gemini answers it with silence, played as voice, and
+that way stays silenced for good: nothing after the first sentence is translated.
 
 A sentence is spoken once the translation goes on past it, when its line ends, or when it ends with a full stop and
 nothing has come for SETTLE seconds: so "It costs 3." isn't said before ".5 million" arrives, and the last sentence
@@ -123,6 +127,19 @@ def shorten_pauses(samples: np.ndarray, rate: int, keep: float = PAUSE_S) -> np.
     return np.concatenate(kept)
 
 
+def heard_for(samples: np.ndarray, rate: int) -> float:
+    """Seconds from the start of `samples` to the end of their last sound (a 20 ms block at PAUSE_LEVEL or louder); 0
+    when they're a pause all through."""
+    block = max(1, rate // 50)
+    n = -(-len(samples) // block)
+    if not n:
+        return 0.0
+    padded = np.zeros(n * block, np.float32)
+    padded[:len(samples)] = samples
+    loud = np.flatnonzero(np.sqrt(np.mean(padded.reshape(n, block) ** 2, axis=1)) >= PAUSE_LEVEL)
+    return min(len(samples), (int(loud[-1]) + 1) * block) / rate if len(loud) else 0.0
+
+
 @dataclass
 class _Sound:
     """A piece of the engine's own voice: float samples at `rate`."""
@@ -173,6 +190,7 @@ class Speaker:
         self.said = self.skipped = self.repeats = 0  # repeats: sentences that came again and weren't said again
         self.voiced = 0  # sentences the engine's own voice said (the laptop's didn't)
         self.sound_s = self.sound_skipped_s = 0.0  # seconds of the engine's voice played, and left out to keep up
+        self.quiet_s = 0.0  # seconds of the engine's voice not played: silence after it ended
         self.unvoiced = 0  # sentences no voice said: the engine's didn't, the laptop's isn't downloaded
 
     @property
@@ -378,6 +396,10 @@ class Speaker:
                 try:
                     if isinstance(what, _Sound):
                         samples, rate = what.samples, what.rate
+                        heard = heard_for(samples, rate)
+                        if not heard and not self.speaking:  # Gemini's answer to the silence sent: never voice
+                            self.quiet_s += len(samples) / rate
+                            continue
                     else:
                         voice = self._local()
                         if voice is None:
@@ -385,11 +407,15 @@ class Speaker:
                             continue
                         speed = min(self.speed * (1 + CATCH_UP * waiting), max(MAX_SPEED, self.speed))
                         samples, rate = voice.synthesize(what, speed), voice.rate
+                        heard = len(samples) / rate
                     if self.muted or self._stop.is_set():
                         continue
-                    self._audible_until = self._clock() + len(samples) / rate + 0.25  # + Windows' buffer
+                    after = len(samples) / rate - heard  # the pause at its end: nobody hears it
+                    if heard:  # a pause between words is played but makes nothing `speaking` (TAIL covers it)
+                        self._audible_until = self._clock() + heard + 0.25  # + Windows' buffer
                     left = self.player.play(samples, rate)
-                    self._audible_until = self._clock() + left
+                    if heard:
+                        self._audible_until = self._clock() + max(0.0, left - after)
                     if isinstance(what, _Sound):
                         self.sound_s += len(samples) / rate
                     else:

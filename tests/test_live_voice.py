@@ -597,7 +597,7 @@ def test_never_two_voices_at_once():
 
     def gemini():
         for n in range(20):
-            speaker.hear_audio(SYSTEM, pcm(100 + n, seconds=0.05), 24000)
+            speaker.hear_audio(SYSTEM, pcm(1000 + n, seconds=0.05), 24000)
             time.sleep(0.003)
     thread = threading.Thread(target=gemini)
     thread.start()
@@ -619,12 +619,12 @@ def test_muting_and_stopping_silence_geminis_voice():
     assert wait_until(lambda: player.started == 1)
     speaker.set_muted(True)  # the bar's speaker button: what's queued goes, what plays stops
     gate.set()
-    speaker.hear_audio(SYSTEM, pcm(5), 24000)
+    speaker.hear_audio(SYSTEM, pcm(1005), 24000)
     time.sleep(0.2)
     assert len(player.pieces) == 1 and player.interrupted
     speaker.set_muted(False)
     speaker.stop()
-    speaker.hear_audio(SYSTEM, pcm(6), 24000)
+    speaker.hear_audio(SYSTEM, pcm(1006), 24000)
     time.sleep(0.1)
     assert len(player.pieces) == 1 and player.closed
 
@@ -633,11 +633,11 @@ def test_only_the_ways_spoken_get_geminis_voice():
     player = RecordingPlayer()
     speaker, _ = speaker_with(player=player, own=(SYSTEM,))
     speaker.start()
-    speaker.hear_audio(MIC, pcm(10), 24000)  # with Both, the user's own words are for the others
+    speaker.hear_audio(MIC, pcm(1000), 24000)  # with Both, the user's own words are for the others
     time.sleep(0.2)
     assert player.pieces == []
     speaker.set_lanes([], own=[MIC])
-    speaker.hear_audio(MIC, pcm(10), 24000)
+    speaker.hear_audio(MIC, pcm(1000), 24000)
     assert wait_until(lambda: len(player.pieces) == 1)
     speaker.stop()
 
@@ -657,6 +657,73 @@ def test_falling_behind_geminis_voice_skips_what_is_stale():
     assert [int(round(p[0] * 32768)) for p in player.pieces] == [1000, 3000]
     assert speaker.sound_skipped_s == pytest.approx(0.5)
     speaker.stop()
+
+
+class EchoEngine:
+    """Like Gemini Live Translate: its voice comes back as long as what it's fed, silence for silence."""
+
+    def __init__(self, on_event):
+        self.on_event, self.frames, self.on_audio = on_event, [], None
+
+    def start(self):
+        pass
+
+    def feed(self, frame):
+        self.frames.append(frame)
+        level = int(np.abs(np.frombuffer(frame, "<i2")).max())
+        self.on_audio(pcm(level, seconds=0.1), 24000)
+
+    def stop(self):
+        pass
+
+
+def test_geminis_silence_doesnt_keep_the_way_that_hears_the_voice_silenced():
+    """The whole mix (Rflow's voice in it) gets silence while the voice speaks, and Gemini answers silence with
+    silence: played as voice, it kept the way silenced for good, and nothing more was translated after the first
+    sentence."""
+    from sst.live.session import LiveSession
+    from tests.test_live_session import FakeCapture
+    clock, player = Clock(), RecordingPlayer()
+    session = LiveSession(LiveConfig(speak=True))
+    capture = FakeCapture()
+    capture.hears_self = True
+    session.add(SYSTEM, capture, EchoEngine)
+    echo = session.lanes[SYSTEM][1]
+    speaker = Speaker(lambda: None, player, [], clock=clock, own=(SYSTEM,))
+    session.set_speaker(speaker)
+    talk = np.full(1600, 3000, dtype="<i2").tobytes()  # the meeting goes on, 100 ms at a time
+    for _ in range(30):
+        capture.on_frame(talk)
+        assert wait_until(lambda: not speaker._queue)
+        time.sleep(0.01)  # what was taken off the queue is played
+        clock.now += 0.1
+    heard = [frame for frame in echo.frames[1:] if any(frame)]
+    session.stop()
+    assert heard  # after the voice said the first, the meeting's words reach Gemini again
+
+
+def test_geminis_silence_after_its_voice_isnt_played_and_isnt_speaking():
+    clock, player = Clock(), RecordingPlayer()
+    speaker = Speaker(lambda: None, player, [], clock=clock, own=(SYSTEM,))
+    speaker.start()
+    speaker.hear_audio(SYSTEM, pcm(0, seconds=0.5), 24000)  # silence, the voice quiet: left out
+    assert wait_until(lambda: speaker.quiet_s == pytest.approx(0.5))
+    assert player.pieces == [] and not speaker.speaking
+    speaker.hear_audio(SYSTEM, pcm(3000, seconds=0.2), 24000)
+    assert wait_until(lambda: len(player.pieces) == 1)
+    speaker.hear_audio(SYSTEM, pcm(0, seconds=0.2), 24000)  # a pause between its words: played, as it is
+    assert wait_until(lambda: len(player.pieces) == 2)
+    clock.now += speakers.TAIL + 0.01
+    assert not speaker.speaking  # the pause didn't make it last
+    speaker.stop()
+
+
+def test_how_long_a_sound_is_heard():
+    rate = 24000
+    loud, quiet = np.full(rate // 10, 0.3, np.float32), np.zeros(rate // 2, np.float32)
+    assert speakers.heard_for(np.concatenate([loud, quiet]), rate) == pytest.approx(0.1)
+    assert speakers.heard_for(quiet, rate) == 0.0 and speakers.heard_for(np.zeros(0, np.float32), rate) == 0.0
+    assert speakers.heard_for(loud[:1000], rate) == pytest.approx(1000 / rate)  # a last block shorter than 20 ms
 
 
 def test_pauses_are_shortened_to_catch_up_and_the_words_kept_whole():
