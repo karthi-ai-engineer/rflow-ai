@@ -5479,6 +5479,62 @@ TRANSLATE_EXAMPLES = [
 ]
 
 
+SCREEN_SHORTCUTS = [("Ctrl+Alt+S", "ctrl+alt+s"), ("Win+Alt+S", "win+alt+s"), ("Off", "")]
+
+
+class ScreenCard:
+    """Translate's Screen translation card (sst.screen; the card itself: .widget): what it does and costs, Start or
+    Stop, and its shortcut."""
+
+    def __init__(self, app):
+        from sst.screen.translate import estimate
+        self.app = app
+        self.widget, layout = card(10, (20, 18, 20, 18))
+        layout.addWidget(label("Screen translation", "heading"))
+        layout.addWidget(caption(
+            "Put a frame over any app: its Japanese is covered with English, in the same place and colours, and the "
+            "app still takes your clicks. Windows reads the screen on this laptop; only the text it reads goes to "
+            f"Gemini, about ${estimate():.4f} for each new screen (a screen read again is free).", "2"))
+        self.start_button = button("Start", self._toggle, primary=True, size="sm")
+        self.shortcut = Choice(small=True)
+        for label_text, value in SCREEN_SHORTCUTS:
+            self.shortcut.addItem(label_text, value)
+        self.shortcut.setMinimumWidth(160)
+        self.shortcut.currentIndexChanged.connect(self._apply)
+        layout.addLayout(row(self.start_button, caption("Shortcut", "3", wrap=False), self.shortcut, stretch_at=1))
+        self.note = caption("", "3")
+        layout.addWidget(self.note)
+
+    def refresh(self) -> None:
+        s, screen = self.app.settings, getattr(self.app, "screen", None)
+        if self.shortcut.findData(s.screen_shortcut) < 0:  # a shortcut set by hand
+            self.shortcut.insertItem(self.shortcut.count() - 1, s.screen_shortcut, s.screen_shortcut)
+        self.shortcut.blockSignals(True)
+        self.shortcut.setCurrentIndex(max(0, self.shortcut.findData(s.screen_shortcut)))
+        self.shortcut.blockSignals(False)
+        running = bool(screen and screen.running)
+        self.start_button.setText("Stop" if running else "Start")
+        clash = screen.clash() if screen else ""
+        problem = screen.problem() if screen else ""
+        if clash:
+            note = f"{key_names(parse_hotkey(s.screen_shortcut).label)} is {clash}'s shortcut: choose another."
+        elif s.screen_shortcut:
+            note = (f"Press {key_names(parse_hotkey(s.screen_shortcut).label)} in the app to translate: the frame "
+                    "covers its window. Press it again, or the frame's ✕, to stop.")
+        else:
+            note = "No shortcut: start it here or from the tray."
+        self.note.setText(f"{problem} {note}" if problem else note)
+
+    def _toggle(self) -> None:
+        if (screen := getattr(self.app, "screen", None)) is not None:
+            screen.toggle()
+        self.refresh()
+
+    def _apply(self, *_) -> None:
+        self.app.apply_settings(dataclasses.replace(self.app.settings, screen_shortcut=self.shortcut.currentData()))
+        self.refresh()
+
+
 class TranslatePage(Page):
     """Translate (sst.translateui): on or off, how it's used (select, the shortcut, the popup's keys), examples, the
     shortcut and the languages, and a box to try it in."""
@@ -5556,6 +5612,8 @@ class TranslatePage(Page):
         self.note.hide()
         layout.addWidget(self.note)
         self.add(trial)
+        self.screen_card = ScreenCard(app)
+        self.add(self.screen_card.widget)
         self.body.addStretch()
 
     def _second(self) -> str:
@@ -5590,6 +5648,7 @@ class TranslatePage(Page):
             self.examples.addWidget(Example(before, html.escape(after), "You select", "The window shows"))
         self.ai.show_model(model)
         self.try_button.setEnabled(bool(model))
+        self.screen_card.refresh()
 
     def _steps(self, second: str) -> list:
         """How to use it, with the user's own shortcut and languages."""
