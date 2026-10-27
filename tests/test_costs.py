@@ -112,3 +112,12 @@ def test_a_total_adds_its_parts_up():
 def test_the_cheapest_known_model_of_a_list():
     assert costs.cheapest_known("openai", ["gpt-4o", "gpt-4o-mini", "gpt-4.1-mini", "o3"]) == "gpt-4o-mini"
     assert costs.cheapest_known("groq", ["canopylabs/orpheus-v1-english", "allam-2-7b"]) == ""
+
+
+def test_live_translation_is_priced_by_the_second_each_way():
+    second_in, second_out = costs.live_rates("gemini-3.5-live-translate-preview")
+    assert (second_in, second_out) == pytest.approx((3.50 * 25 / 1e6, 21.00 * 25 / 1e6))
+    assert 60 * (second_in + second_out) == pytest.approx(0.0368, abs=1e-4)  # Google's "approximately $0.0368 per minute"
+    assert costs.live_rates("models/gemini-3.5-live-translate-preview", "2026-10-23") == (second_in, second_out)
+    assert costs.live_rates("my-own-model") == (0.0, 0.0)
+    assert costs.live_rates("whisper-1") == (0.0, 0.0)

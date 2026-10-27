@@ -312,7 +312,7 @@ def test_a_stream_is_counted_once_by_its_seconds_and_googles_count_of_the_text(l
     assert stream.final() == "Hello there."
     stream.close()
     assert _entries(ledger) == {f"live_dictation|{LIVE}": {"audio_in": 10, "text_in": 0, "out": 4, "thoughts": 0,
-                                                           "audio_out": 0, "seconds": 0.4, "calls": 1}}
+                                                           "audio_out": 0, "seconds": 0.4, "calls": 1, "unsent": 0}}
 
 
 def test_a_failed_stream_is_counted_once_and_one_that_sent_nothing_not_at_all(live, ledger):

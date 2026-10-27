@@ -8,6 +8,8 @@ OAuth), so Rflow counts what it sends and gets back and prices it at Google's li
   Translate)                                                    out (Gemini leaves the thinking out of completion_tokens)
   the Live API (Transcribe Live, Live Translate)                seconds of audio sent and received, 25 tokens a second
                                                                 (sst.costs.LIVE_AUDIO); its usageMetadata is logged only
+Live translation's cost saver also counts the seconds it didn't send ("unsent", never billed): the card shows them and
+what they would have cost each way (sst.costs.live_rates), since Gemini's voice comes back 1:1 with what's sent.
 Tokens and seconds are kept, not dollars, so a day is priced as it was billed (a price changing on a known day:
 sst.costs.TEXT_FROM) and a corrected price reprices everything. Only Gemini is counted: own servers and this PC's
 models cost nothing. Nothing said or written is kept, only numbers.
@@ -15,7 +17,8 @@ models cost nothing. Nothing said or written is kept, only numbers.
 Each call is recorded once where it is made (a retry, a backup model and the hint-echo check are calls of their own),
 with the feature its caller names (`feature()`), else the call site's own. The profile's file (Profile.usage_file):
     {"2026-10-23": {"dictation|gemini-3.5-transcribe": {"audio_in": 812, "text_in": 0, "out": 61, "thoughts": 0,
-                                                        "audio_out": 0, "seconds": 32.5, "calls": 4}, ...}, ...}
+                                                        "audio_out": 0, "seconds": 32.5, "calls": 4, "unsent": 0},
+                   ...}, ...}  (a file from before the cost saver has no "unsent": it loads as 0)
 Saved off the UI thread, a few seconds after a change (save_after), and at once by flush(). Standard library and
 sst.costs only: live translation (sst.live) records here too, and never imports dictation's modules.
 """
@@ -40,7 +43,7 @@ FEATURES = {  # key -> what the card calls it, and whether its amount is minutes
     "live_translation": ("Live translation", True),
     "tests": ("Tests and the Reading test", False),
 }
-COUNTS = ("audio_in", "text_in", "out", "thoughts", "audio_out", "seconds", "calls")
+COUNTS = ("audio_in", "text_in", "out", "thoughts", "audio_out", "seconds", "calls", "unsent")  # unsent: s, not billed
 SAVE_AFTER = 5.0  # seconds after a change: a dictation's few calls are one write
 KEEP_DAYS = 400  # older days are dropped when the file is saved: this month and last year's are what matter
 BILLING = "https://aistudio.google.com/billing"  # Google's own figures (AI Studio's Billing page, the Gemini API docs)
@@ -140,12 +143,14 @@ def _int(value) -> int:
 
 @dataclass
 class Line:
-    """A feature's month: what it cost, its minutes of audio or its calls."""
+    """A feature's month: what it cost, its minutes of audio or its calls, and what the cost saver didn't send."""
 
     feature: str
     cost: float = 0.0
     seconds: float = 0.0
     calls: int = 0
+    unsent: float = 0.0  # seconds live translation's cost saver didn't send
+    saved: float = 0.0  # USD: those seconds at the Live API's prices in and out
 
     @property
     def title(self) -> str:
@@ -153,11 +158,16 @@ class Line:
 
     @property
     def amount(self) -> str:
-        """"12 min" for audio, "34 calls" for the rest."""
+        """"12 min" for audio ("72 min · 30 min not sent" with the cost saver), "34 calls" for the rest."""
         if FEATURES.get(self.feature, ("", False))[1]:
-            minutes = self.seconds / 60
-            return "under 1 min" if 0 < minutes < 1 else f"{minutes:,.0f} min"
+            heard = _minutes(self.seconds)
+            return f"{heard} · {_minutes(self.unsent)} not sent" if self.unsent > 0 else heard
         return f"{self.calls:,} call" + ("" if self.calls == 1 else "s")
+
+
+def _minutes(seconds: float) -> str:
+    minutes = seconds / 60
+    return "under 1 min" if 0 < minutes < 1 else f"{minutes:,.0f} min"
 
 
 @dataclass
@@ -166,6 +176,7 @@ class Summary:
     month: float = 0.0
     lines: list[Line] = field(default_factory=list)  # this month's, in FEATURES' order; only those used
     unpriced: int = 0  # calls this month to a model Rflow has no price for (left out of the sums)
+    saved: float = 0.0  # USD this month: what live translation's cost saver didn't send
 
     @property
     def used(self) -> bool:
@@ -206,14 +217,15 @@ class Ledger:
         return days
 
     def record(self, feature_: str, model: str, *, audio_in: float = 0, text_in: float = 0, out: float = 0,
-               thoughts: float = 0, audio_out: float = 0, seconds: float = 0.0, calls: int = 1) -> None:
-        """One call (or a stretch of a live session: calls=0) to a Gemini model, for a feature."""
+               thoughts: float = 0, audio_out: float = 0, seconds: float = 0.0, calls: int = 1, unsent: float = 0) -> None:
+        """One call (or a stretch of a live session: calls=0) to a Gemini model, for a feature; unsent: seconds the cost
+        saver didn't send in it."""
         day = self._today().isoformat()
         key = f"{feature_}|{model.strip().removeprefix('models/')}"
         with self._lock:
             entry = self.days.setdefault(day, {}).setdefault(key, dict.fromkeys(COUNTS, 0.0))
             for name, value in (("audio_in", audio_in), ("text_in", text_in), ("out", out), ("thoughts", thoughts),
-                                ("audio_out", audio_out), ("seconds", seconds), ("calls", calls)):
+                                ("audio_out", audio_out), ("seconds", seconds), ("calls", calls), ("unsent", unsent)):
                 entry[name] = entry.get(name, 0.0) + max(0.0, float(value or 0))
             self._dirty = True
             if self.path is not None and self._timer is None:
@@ -239,6 +251,11 @@ class Ledger:
                 line = lines.setdefault(name, Line(name))
                 line.seconds += counts.get("seconds", 0.0)
                 line.calls += int(counts.get("calls", 0))
+                if unsent := counts.get("unsent", 0.0):  # priced as it would have been billed that day, in and out
+                    saved = unsent * sum(costs.live_rates(model, d))
+                    line.unsent += unsent
+                    line.saved += saved
+                    out.saved += saved
                 price = cost(model, d, counts)
                 if price is None:
                     out.unpriced += int(counts.get("calls", 0)) or 1

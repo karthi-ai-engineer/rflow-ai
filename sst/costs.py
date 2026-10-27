@@ -9,7 +9,8 @@ research notes "Rflow model costs and setups"), corrected on 2026-10-23 (gpt-4.1
 gemini-3.5-flash and gemini-flash-latest now answered by 3.6 Flash, Gemini 4 Argon). They change: Gemini 3.6 and 3.8
 Flash double on 2027-01-01, Gemini 4 Argon on 2026-12-01, and OpenAI's gpt-5.6-sol price is a promotion. A model not in
 the table has no estimate ("price unknown"), never a red mark. Rflow offers Gemini only for now (sst.gateway.OFFERED);
-the other providers' prices stay for when they come back.
+the other providers' prices stay for when they come back. Live translation is priced by the second of audio each way
+(live_rates): what a session costs, and what its cost saver kept from being sent.
 
   Google Gemini  https://ai.google.dev/gemini-api/docs/pricing (models, thinking: .../docs/models, .../docs/thinking)
   OpenAI         https://developers.openai.com/api/docs/pricing (deprecations: .../api/docs/deprecations)
@@ -180,7 +181,7 @@ SPEECH: dict[tuple[str, str], SpeechPrice] = {
     # gemini-flash-lite-latest: Google documents no target for it any more, so no price
 }
 
-LIVE_AUDIO = 25  # tokens per second of audio on the Live API, in and out (Transcribe Live, Live Translate)
+LIVE_AUDIO = 25  # tokens per second of audio on the Live API, in and out (Transcribe Live, Live Translate; live_rates)
 
 # Prices that change on a known day: (provider, model) -> [(the first day, the price from then on)], latest last. The
 # tables above are today's; a day's use is priced as it was that day (text_price_on, speech_price_on), which is why the
@@ -296,6 +297,16 @@ def text_price_on(provider: str, model: str, day: str) -> TextPrice | None:
 
 def speech_price_on(provider: str, model: str, day: str) -> SpeechPrice | None:
     return _on(SPEECH, SPEECH_FROM, provider, model, day)
+
+
+def live_rates(model: str, day: str = "") -> tuple[float, float]:
+    """USD a second of audio in and out on the Live API (the 1M-token prices at LIVE_AUDIO tokens a second), today's or a
+    day's; (0.0, 0.0) for a model with no price. Live translation's cost saver prices what it didn't send with both:
+    Gemini's voice comes back 1:1 with what's sent, silence included."""
+    price = speech_price_on("gemini", model, day) if day else _find(SPEECH, "gemini", model)
+    if price is None or price.per_minute:
+        return 0.0, 0.0
+    return price.audio * LIVE_AUDIO / 1e6, price.audio_out * LIVE_AUDIO / 1e6
 
 
 def text_monthly(price: TextPrice, usage: Usage = TYPICAL) -> float:
