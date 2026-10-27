@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QCursor, QFontMetrics, QGuiApplication, QIcon, QPainter
+from PySide6.QtGui import QAction, QColor, QCursor, QFont, QFontMetrics, QGuiApplication, QIcon, QPainter
 from PySide6.QtNetwork import QLocalServer
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
@@ -208,13 +208,18 @@ def restart_command(pid: int) -> list[str]:
 class Pill(QWidget):
     """A small capsule near the bottom of the screen, in the design's popup look (always Obsidian): a coral waveform and
     the time while listening, violet dots while the AI cleans up, a mint check when typed. It never takes keyboard focus
-    and ignores the mouse, so the dictated text still goes to the app you were typing in."""
+    and ignores the mouse, so the dictated text still goes to the app you were typing in. Kept small, about two thirds of
+    its first 40 x 176 px (the owner's wish of 2026-10-27: it hid what was under it); Qt scales it with the DPI."""
 
-    HEIGHT = 40
-    MIN_WIDTH = 176
+    HEIGHT = 28
+    MIN_WIDTH = 104
     MAX_WIDTH = 640  # a longer message is cut short with "…" (Text Transform says it in a notification too: fits())
-    MARGIN = 24  # transparent room around the capsule for its soft shadow
-    BARS = 16
+    PAD = 12  # inside the capsule, on each side of its content
+    GAP = 7  # between the waveform, dots or icon and the words
+    MARGIN = 24  # transparent room around the capsule for its soft shadow (the "float" shadow reaches about 20 px)
+    BARS, BAR_STEP, BAR_WIDTH = 16, 3.5, 2.0
+    DOTS, DOT_STEP = 3, 8.0
+    ICON = 12
 
     def __init__(self, level=lambda: 0.0):
         super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
@@ -229,8 +234,8 @@ class Pill(QWidget):
         self._animation = QTimer(self, interval=33, timeout=self._animate)
         self._hide_timer = QTimer(self, singleShot=True, timeout=self.hide)
         theme.load_fonts()
-        self._font = theme.font(13, 500)
-        self._mono = theme.font(12, 500, mono=True)
+        self._font = theme.font(11, 500)
+        self._mono = theme.font(11, 500, mono=True)
 
     def show_state(self, state: str, message: str = "") -> None:
         """recording, transcribing, typed, typed_raw, typed_local, cancelled, ignored, warning, error, or idle/hidden to
@@ -245,8 +250,7 @@ class Pill(QWidget):
         self.state, self.message = state, message
         if state == "recording":
             self._levels.extend([0.0] * self.BARS)
-        self.resize(self._width() + 2 * self.MARGIN, self.HEIGHT + 2 * self.MARGIN)
-        self._place()
+        self._fit()
         if not self.isVisible():
             self.show()
             _no_activate(int(self.winId()))
@@ -263,21 +267,44 @@ class Pill(QWidget):
 
     def fits(self, message: str) -> bool:
         """Whether a warning shows whole in the pill, not cut short."""
-        return 16 + 10 + QFontMetrics(self._font).horizontalAdvance(message) + 36 <= self.MAX_WIDTH
+        return self.ICON + self.GAP + QFontMetrics(self._font).horizontalAdvance(message) + 2 * self.PAD <= self.MAX_WIDTH
 
     def hideEvent(self, event):
         self._animation.stop()
         super().hideEvent(event)
 
+    def _fit(self) -> None:
+        self.resize(self._width() + 2 * self.MARGIN, self.HEIGHT + 2 * self.MARGIN)
+        self._place()
+
+    def _timer(self) -> str:
+        """The time since the recording started: 0:07, 27:41, 1:02:05 (a dictation has no length limit to speak of)."""
+        seconds = int(time.monotonic() - self._started)
+        hours, minutes = divmod(seconds // 60, 60)
+        return f"{hours}:{minutes:02}:{seconds % 60:02}" if hours else f"{minutes}:{seconds % 60:02}"
+
+    def _lead(self) -> float:
+        """The width of what comes before the words: the waveform, the dots or the icon."""
+        if self.state == "recording":
+            return self.BARS * self.BAR_STEP - (self.BAR_STEP - self.BAR_WIDTH)
+        if self.state in ("transcribing", "transforming"):
+            return (self.DOTS - 1) * self.DOT_STEP + 5
+        return self.ICON
+
+    def _words(self) -> tuple[str, QFont]:
+        if self.state == "recording":
+            return self._timer(), self._mono
+        room = int(self.MAX_WIDTH - 2 * self.PAD - self._lead() - self.GAP)
+        return QFontMetrics(self._font).elidedText(self._text(), Qt.TextElideMode.ElideRight, room), self._font
+
+    def _content(self) -> float:
+        words, font = self._words()
+        return self._lead() + self.GAP + QFontMetrics(font).horizontalAdvance(words)
+
     def _width(self) -> int:
         """The capsule's width (the window has MARGIN more on each side)."""
-        if self.state == "recording":
-            content = self.BARS * 5 - 2 + 10 + QFontMetrics(self._mono).horizontalAdvance("0:00")
-        elif self.state in ("transcribing", "transforming"):
-            content = 34 + 10 + QFontMetrics(self._font).horizontalAdvance(self._text())
-        else:
-            content = 16 + 10 + QFontMetrics(self._font).horizontalAdvance(self._text())
-        return min(self.MAX_WIDTH, max(self.MIN_WIDTH, content + 36))  # wider, it ran off both sides of a small screen
+        # at most MAX_WIDTH: wider, a long error ran off both sides of a small screen (_words() cuts it short)
+        return min(self.MAX_WIDTH, max(self.MIN_WIDTH, math.ceil(self._content()) + 2 * self.PAD))
 
     def _text(self) -> str:
         return {"typed": "Typed", "typed_raw": "Typed as heard · AI offline",
@@ -288,7 +315,7 @@ class Pill(QWidget):
     def _place(self) -> None:
         screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
         area = screen.availableGeometry()
-        self.move(area.center().x() - self.width() // 2, area.bottom() - self.HEIGHT - 28 - self.MARGIN)
+        self.move(area.center().x() - self.width() // 2, area.bottom() - self.HEIGHT - 20 - self.MARGIN)
 
     def _animate(self) -> None:
         self._phase += 0.033
@@ -296,6 +323,8 @@ class Pill(QWidget):
             rms = self._level()
             db = 20 * math.log10(rms + 1e-6)  # speech is roughly -45..-15 dBFS
             self._levels.append(min(1.0, max(0.0, (db + 55) / 40)))
+            if self._width() != self.width() - 2 * self.MARGIN:  # the time gained a digit (10:00, 1:00:00)
+                self._fit()
         self.update()
 
     def paintEvent(self, event):
@@ -305,52 +334,38 @@ class Pill(QWidget):
         theme.paint_surface(p, "float", body, self.HEIGHT / 2, popup=True, dpr=self.devicePixelRatioF())
         cy = body.center().y()
         dpr = self.devicePixelRatioF()
+        x = body.center().x() - self._content() / 2
+        text = QRectF(x + self._lead() + self.GAP, body.top(), body.width(), body.height())
+        words, font = self._words()
         p.setPen(Qt.PenStyle.NoPen)
         if self.state == "recording":
-            seconds = int(time.monotonic() - self._started)
-            timer = f"{seconds // 60}:{seconds % 60:02}"
-            width = self.BARS * 5 - 2 + 10 + QFontMetrics(self._mono).horizontalAdvance(timer)
-            x = body.center().x() - width / 2
             p.setBrush(theme.tok("live", popup=True))
             for i, level in enumerate(self._levels):
-                h = 4 + level * 18
-                p.drawRoundedRect(QRectF(x + i * 5, cy - h / 2, 3, h), 1.5, 1.5)
+                h = 3 + level * 13
+                p.drawRoundedRect(QRectF(x + i * self.BAR_STEP, cy - h / 2, self.BAR_WIDTH, h), 1, 1)
             p.setPen(theme.tok("text", popup=True))
-            p.setFont(self._mono)
-            p.drawText(QRectF(x + self.BARS * 5 + 8, body.top(), 60, body.height()), Qt.AlignmentFlag.AlignVCenter, timer)
         elif self.state in ("transcribing", "transforming"):
-            violet = self.ai or self.state == "transforming"
-            colour = theme.tok("violet" if violet else "text2", popup=True)
-            words = self._text()
-            width = 34 + 10 + QFontMetrics(self._font).horizontalAdvance(words)
-            x = body.center().x() - width / 2
-            for i in range(3):
+            colour = theme.tok("violet" if self.ai or self.state == "transforming" else "text2", popup=True)
+            for i in range(self.DOTS):
                 dot = QColor(colour)
                 dot.setAlphaF(0.35 + 0.65 * max(0.0, math.sin(self._phase * 7 - i * 0.9)))
                 p.setBrush(dot)
-                p.drawEllipse(QPointF(x + 5 + i * 12, cy), 2.6, 2.6)
-            p.setPen(colour if violet else theme.tok("text2", popup=True))
-            p.setFont(self._font)
-            p.drawText(QRectF(x + 44, body.top(), width, body.height()), Qt.AlignmentFlag.AlignVCenter, words)
+                p.drawEllipse(QPointF(x + 2.5 + i * self.DOT_STEP, cy), 2, 2)
+            p.setPen(colour)
         else:
-            room = self.width() - 2 * self.MARGIN - 36 - 26
-            words = QFontMetrics(self._font).elidedText(self._text(), Qt.TextElideMode.ElideRight, room)
-            width = 16 + 10 + QFontMetrics(self._font).horizontalAdvance(words)
-            x = body.center().x() - width / 2
-            if self.state in ("typed", "transformed"):
-                p.drawPixmap(QPointF(x, cy - 8), theme.icon_pixmap("check", theme.tok("ok", popup=True).name(), 16, dpr))
-            elif self.state in ("cancelled", "ignored"):
-                p.drawPixmap(QPointF(x, cy - 8), theme.icon_pixmap("minus", theme.tok("text2", popup=True).name(), 16,
-                                                                   dpr))
+            half = self.ICON / 2
+            if self.state in ("typed", "transformed", "cancelled", "ignored"):
+                icon, colour = ("check", "ok") if self.state in ("typed", "transformed") else ("minus", "text2")
+                p.drawPixmap(QPointF(x, cy - half), theme.icon_pixmap(icon, theme.tok(colour, popup=True).name(), self.ICON,
+                                                                       dpr))
             else:  # a lamp: amber for a warning or a fallback, rose for an error
-                colour = theme.tok("err" if self.state == "error" else "warn", popup=True)
                 p.setBrush(theme.tok("well", popup=True))
-                p.drawEllipse(QPointF(x + 8, cy), 6, 6)
-                p.setBrush(colour)
-                p.drawEllipse(QPointF(x + 8, cy), 3, 3)
+                p.drawEllipse(QPointF(x + half, cy), 4.5, 4.5)
+                p.setBrush(theme.tok("err" if self.state == "error" else "warn", popup=True))
+                p.drawEllipse(QPointF(x + half, cy), 2.3, 2.3)
             p.setPen(theme.tok("text2" if self.state in ("cancelled", "ignored") else "text", popup=True))
-            p.setFont(self._font)
-            p.drawText(QRectF(x + 26, body.top(), width, body.height()), Qt.AlignmentFlag.AlignVCenter, words)
+        p.setFont(font)
+        p.drawText(text, Qt.AlignmentFlag.AlignVCenter, words)
         p.end()
 
 

@@ -366,7 +366,8 @@ laptop (useful for phase 13's local AI cleanup); check with `ollama list` on the
   text is kept out of Win+V history. Pasting was chosen over simulated typing because it is instant and editors don't
   auto-close brackets partway through.
 - **Long audio is split at pauses into pieces of up to 30 s.** Parakeet crashed in onnxruntime on a 514 s recording.
-- **Recordings stop by themselves after 3 minutes** (the owner's choice). 3 minutes transcribes in about 23 s.
+- **Recordings stop by themselves only after an hour** (`dictate.MAX_SECONDS`; 3 minutes until 2026-10-27, when the
+  owner asked for no limit: the take is kept whole in memory, 230 MB an hour at 16 kHz). 3 minutes transcribes in about 23 s.
 - **Recordings are kept** as `.wav` + `.txt` in `recordings/` (git-ignored) to compare engines later. `--no-save` turns
   this off.
 
@@ -520,7 +521,7 @@ laptop (useful for phase 13's local AI cleanup); check with `ollama list` on the
   | Fallback (switched-off `qwen3` chosen) | 1.17 s via model 1 | | |
 
   "STD dictation" → "SST Dictation", "pr's" → "PRs", and fillers were removed.
-- `MAX_PIECE_SECONDS` is 180: a whole dictation (max 3 min) is transcribed in one piece.
+- `MAX_PIECE_SECONDS` is 180: a whole recording up to 3 min is transcribed in one piece, a longer one in 3-minute pieces.
 - Tests: 94. `tests/test_gateway.py` runs a fake gateway on localhost (good, error, slow, unreachable, implausible
   answers, keep-alive, fallback).
 
@@ -963,7 +964,9 @@ laptop (useful for phase 13's local AI cleanup); check with `ollama list` on the
   | Groq | the same, at `api.groq.com/openai/v1` | whisper-large-v3-turbo, whisper-large-v3 |
   | Google Gemini | `POST /v1beta/models/<model>:generateContent`, `x-goog-api-key`, the WAV inline (base64) with an instruction to write down exactly what is said | gemini-flash-lite-latest, gemini-flash-latest, gemini-3.5-flash-lite, gemini-3.6-flash |
 
-  - The recording goes as a 16 kHz 16-bit WAV (32 KB a second; 3 minutes is 5.8 MB, under every provider's limit).
+  - The recording goes as a 16 kHz 16-bit WAV (32 KB a second); a whole recording goes in pieces of
+    `cloud.WHOLE_PIECE_SECONDS` (5 min, 9.6 MB, under every provider's limit), and a long text to the AI cleanup in
+    pieces of `polish.PIECE_WORDS` (600 words), each after the ones before it.
   - Hints: the chosen language (OpenAI's `language`, or named in Gemini's instruction) and Your words (OpenAI's
     `prompt`, or in Gemini's instruction). Gemini's thinking parts are left out of the text.
   - The connection opens while the user speaks (`prepare()`), with a 1.5 s connect timeout and 3 tries (the

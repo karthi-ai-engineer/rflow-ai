@@ -46,12 +46,25 @@ def test_pill_grows_to_fit_long_messages():
     assert pill.width() > short
 
 
+def test_the_pill_is_small_and_its_time_grows_with_a_long_dictation(monkeypatch):
+    pill = sst_app.Pill()
+    pill.show_state("recording")
+    assert pill.HEIGHT <= 28 and pill._width() <= 120  # about two thirds of the 40 x 176 px it was: it hid things
+    monkeypatch.setattr(sst_app.time, "monotonic", lambda: pill._started + 62 * 60 + 5)
+    assert pill._timer() == "1:02:05"
+    short = pill.width()
+    pill._animate()  # the time gained digits: the capsule widens to keep it inside
+    assert pill.width() > short and pill.width() - 2 * pill.MARGIN >= pill._content() + 2 * pill.PAD - 1
+    pill.show_state("idle")
+
+
 def test_a_very_long_message_stays_inside_the_pill_and_longer_on_screen():
     """A provider's error ran the pill off both sides of the screen, and vanished in 4 s before it could be read."""
     pill = sst_app.Pill()
     message = "Text Transform didn't work: Gemini: quota used up (HTTP 429 " + "x" * 200 + ")"
     pill.show_state("warning", message)
-    assert pill.width() == pill.MAX_WIDTH + 2 * pill.MARGIN and not pill.grab().isNull() and not pill.fits(message)
+    assert pill.MAX_WIDTH - 8 <= pill.width() - 2 * pill.MARGIN <= pill.MAX_WIDTH  # cut short with "…" at the limit
+    assert not pill.grab().isNull() and not pill.fits(message)
     assert pill._hide_timer.interval() == 10000
     pill.show_state("warning", "Almost silent.")
     assert pill.fits("Almost silent.") and pill._hide_timer.interval() == 4000

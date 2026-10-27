@@ -40,7 +40,7 @@ from urllib.parse import urlsplit
 import numpy as np
 
 from sst import netconnect, usage
-from sst.audio import TARGET_RATE, condition, resample
+from sst.audio import TARGET_RATE, condition, resample, split_at_pauses
 from sst.engines.whisper import LANGUAGES
 from sst.modelrules import gemini_takes_temperature, gemini_thinking
 from sst.pipeline.contracts import RawTranscript, WordInfo
@@ -54,8 +54,12 @@ RATE_LIMIT_WAITS = (10, 20, 30, 60)  # seconds; scoring reading tests waits out 
 IDLE_RECONNECT = 30.0  # servers drop idle connections; an older one is replaced, not used
 POOL_SIZE = 4  # idle connections kept: the pipeline sends 2-3 chunks at once (ASRConfig.max_in_flight)
 # A WAV up to this size goes inside the request (Gemini takes 20 MB, and base64 adds a third); a bigger one through the
-# Files API. A 20 s chunk is 640 KB: only a recording of over 7 minutes transcribed whole is uploaded.
+# Files API. A 20 s chunk is 640 KB, a WHOLE_PIECE_SECONDS piece 9.6 MB: both go inline.
 INLINE_LIMIT = 14_000_000
+# A whole recording (the classic way, the pipeline's last resort) goes in pieces of at most this long, cut at pauses:
+# OpenAI and Groq take 25 MB a request (13 minutes), gpt-transcribe writes at most 2,000 tokens, and a long answer is
+# slow and may be cut off. 5 minutes is about 1,000 tokens of text.
+WHOLE_PIECE_SECONDS = 300
 VOCABULARY_LIMIT = 100  # Your words given to Gemini Transcribe as custom vocabulary
 FILE_POLL = 0.5  # seconds between looks at an uploaded file Google is still processing (audio is normally ready at once)
 
@@ -236,7 +240,9 @@ class CloudEngine:
                 raise CloudError("it couldn't be reached a moment ago")
             if self._fallback_loader is not None and (refused := self._refused()):  # scoring asks anyway, and waits
                 raise CloudError(refused)
-            return self._ask_patiently(wav_bytes(audio16, TARGET_RATE), len(audio16) / TARGET_RATE)
+            texts = [self._ask_patiently(wav_bytes(piece, TARGET_RATE), len(piece) / TARGET_RATE)
+                     for piece in split_at_pauses(audio16, TARGET_RATE, WHOLE_PIECE_SECONDS)]
+            return " ".join(text for text in texts if text)  # a piece that failed sends it all to Parakeet: never a hole
         except TimeoutError:
             reason = "no answer in time"
         except Unreachable as e:

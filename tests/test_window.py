@@ -184,6 +184,50 @@ def test_home_shows_the_stats_and_the_dictations_by_day():
     assert home.orb.state == "ready" and window.status_title.text() == "Ready"
 
 
+def test_home_shows_this_months_usage_beside_the_hero_or_under_it():
+    window, app = _window()
+    app.usage.record("dictation", "gemini-3.5-transcribe", audio_in=500_000, seconds=1500)  # $1.00, 25 minutes
+    app.usage.record("cleanup", "gemini-3.5-flash-lite", text_in=100_000, out=20_000)  # $0.08
+    app.usage.record("live_translation", "gemini-3.5-live-translate-preview", seconds=600, calls=0, unsent=600)
+    window.resize(1200, 760)
+    window.show_page("home")
+    home = window.pages["home"]
+    assert not window.grab().isNull()  # laid out as shown (a resize waits for that), off the screen
+    column = home.usage
+    assert column.month.text() == "$1.08" and column.today.text() == "$1.08 today"  # the cost card's figures
+    shown = _shown(column.frame)
+    assert shown.index("Dictation | 25 min | $1.00") < shown.index("AI cleanup | 1 call | $0.08")  # the costliest first
+    assert "not sent" not in shown and "saved by the cost saver" in column.foot.text()  # the detail is in Details
+    assert column.beside and home.top.direction() == w.QBoxLayout.Direction.LeftToRight
+    window.resize(1000, 700)  # the default window: under the hero, the features two a row
+    assert not window.grab().isNull()  # laid out as shown (a resize waits for that), off the screen
+    assert not column.beside and home.top.direction() == w.QBoxLayout.Direction.TopToBottom
+    window.resize(860, 700)  # the rail
+    assert not window.grab().isNull()  # laid out as shown (a resize waits for that), off the screen
+    assert window.compact and not column.beside
+    _button(column.frame, "Details").click()
+    assert window.current_page() == "models"
+    # Counted while Home is shown: the column follows
+    window.show_page("home")
+    app.usage.record("translate", "gemini-3.5-flash-lite", text_in=1_000_000, calls=3)
+    window.usage_changed()
+    assert "Translate | 3 calls | $0.30" in _shown(column.frame)
+
+
+def test_home_says_nothing_is_counted_yet_and_greets_in_the_top_bar():
+    window, app = _window()
+    app.profiles.current.name = "Alex"
+    window.show_page("home")
+    column = window.pages["home"].usage
+    assert column.month.text() == "$0.00" and not column.empty.isHidden() and "Nothing counted yet" in column.empty.text()
+    assert window.greeting.isVisibleTo(window) and window.greeting_text.text().endswith(", Alex")
+    window.show_page("formatting")
+    assert not window.greeting.isVisibleTo(window)  # Home only: the other pages have their title
+    assert w.greeting(datetime(2026, 10, 27, 9)) == "Good morning"
+    assert w.greeting(datetime(2026, 10, 27, 14), " Alex ") == "Good afternoon, Alex"
+    assert w.greeting(datetime(2026, 10, 27, 21), "Alex") == "Good evening, Alex"
+
+
 def test_the_orb_moves_only_while_listening_or_cleaning_up():
     """Each orb frame repaints the soft surfaces under it too: a breathing "ready" cost half a core while Home was open."""
     from sst.ui import Orb
@@ -1267,13 +1311,21 @@ def test_the_formatting_examples_are_what_the_real_stage_types():
     assert list(expected) == w.FORMAT_EXAMPLES
     for said, typed in expected.items():
         assert w.formatted(said)[0] == typed
+    assert list(w.FORMAT_KEPT_WHY) == w.FORMAT_KEPT
     for said in w.FORMAT_KEPT:
         assert w.formatted(said)[0] == said  # prose stays as said
+        assert w.FORMAT_KEPT_WHY[said][0] != said  # what a blind formatter would type differs: worth striking out
     window, _ = _window()
     page = window.pages["formatting"]
     page.refresh()
     shown = _shown(page.changed_box)
     assert all(w.formatted(said)[1] in shown for said in expected) and "25%</span>" in shown  # its changes in Iris
+    # What stays: one well, each phrase once with a check, why, and the wrong version struck out (not two equal columns)
+    kept = _shown(page.kept_box)
+    assert "YOU SAY" not in kept and "TYPED AS YOU SAID IT" in kept
+    for said, (wrong, why) in w.FORMAT_KEPT_WHY.items():
+        assert kept.count(said) == 1 and f"<s>{wrong}</s>" in kept and why in kept
+    assert len(page.kept_box.checks) == len(w.FORMAT_KEPT) and all(not c.pixmap().isNull() for c in page.kept_box.checks)
 
 
 def test_formatting_says_when_the_voice_pipeline_is_off_and_turns_it_on():
