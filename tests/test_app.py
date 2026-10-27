@@ -1385,3 +1385,155 @@ def test_switching_on_downloads_the_models_once_with_their_progress(tray_app, wa
     assert fetched == [wake.KWS.folder, wake.VOICE.folder] and 100 in shown and app.wake_problem == ""
     assert app.wake.problem == "Set up your keyword to start."  # downloaded: the setup is next
 
+
+
+# ---- Meeting mode (phase 49): every part faked, nothing recorded, looked at or sent
+
+class FakeMeetingPart:
+    """A recorder or a window's frames: started and stopped, nothing opened."""
+
+    def __init__(self, folder, log):
+        self.folder, self.log, self.seconds, self.frames = folder, log, 0.0, []
+
+    def start(self):
+        self.log.append(("start", type(self).__name__))
+
+    def stop(self):
+        self.log.append(("stop", type(self).__name__))
+        self.seconds = 125.0
+
+
+@pytest.fixture
+def meeting_app(tray_app, monkeypatch):
+    """The tray app with a meeting in Teams to be found, its parts faked and Gemini's minutes written at once."""
+    from sst.meeting import apps
+    from sst.meeting.minutes import MinutesResult
+    app, _, _ = tray_app
+    app.gateway = GatewayConfig(provider="gemini", api_key="AIza-test")
+    teams = apps.MeetingWindow("Microsoft Teams", "Weekly sync | Microsoft Teams", 101, 7)
+    monkeypatch.setattr(apps, "find", lambda: [teams])
+    monkeypatch.setattr(apps, "alive", lambda window: True)  # the meeting window stays open
+    log, shown, opened = [], [], []
+    monkeypatch.setattr(app, "_meeting_recorder", lambda folder: FakeMeetingPart(folder, log))
+    monkeypatch.setattr(app, "_meeting_frames", lambda window, folder: FakeMeetingPart(folder, log))
+
+    def summarise(folder):
+        log.append(("summarise", folder))
+        (folder / "minutes.md").write_text("# Weekly sync\n\n- [ ] Send the slides (Priya)\n", encoding="utf-8")
+        return MinutesResult("Weekly sync: the release moves to Friday", "We met.")
+    monkeypatch.setattr(app, "_summarise_meeting", summarise)
+    monkeypatch.setattr(app.tray, "showMessage", lambda title, message, *_: shown.append(message))
+    monkeypatch.setattr(sst_app.shell, "open_url", lambda url: opened.append(sst_app.Path(url.toLocalFile())))
+    monkeypatch.setattr(app, "start_live", lambda: log.append(("start", "live")) or "")
+    monkeypatch.setattr(app, "stop_live", lambda: log.append(("stop", "live")))
+    return SimpleNamespace(app=app, teams=teams, log=log, shown=shown, opened=opened)
+
+
+def test_a_meeting_asks_once_records_translates_then_writes_its_minutes(meeting_app, monkeypatch):
+    from PySide6.QtTest import QTest
+    m, asked = meeting_app, []
+    app = m.app
+    assert app.meeting_windows() == [m.teams] and app.meeting is None and app.meeting_cost() is None
+    monkeypatch.setattr(sst_app.QMessageBox, "question", lambda *args: asked.append(args) or
+                        sst_app.QMessageBox.StandardButton.No)
+    assert app.start_meeting(m.teams) == "Not started." and not app.settings.meeting_told and not m.log
+    assert "Tell the people in the meeting that it is recorded" in asked[0][2]
+    monkeypatch.setattr(sst_app.QMessageBox, "question", lambda *args: asked.append(args) or
+                        sst_app.QMessageBox.StandardButton.Yes)
+    assert app.start_meeting(m.teams) == "" and app.settings.meeting_told and app.settings.live_told
+    session = app.meeting
+    assert session.folder.parent == app.profile.folder() / "meetings" and session.folder.name.endswith(" Microsoft Teams")
+    assert m.log == [("start", "FakeMeetingPart"), ("start", "FakeMeetingPart"), ("start", "live")]
+    assert app.meeting_action.isChecked() and app.tray.toolTip() == "Rflow: recording the meeting"
+    assert m.shown[-1] == "Recording the meeting in Microsoft Teams."
+    assert app.meeting_cost().seconds >= 0 and app.past_meetings() == []  # the one recording isn't a past one yet
+    app.stop_meeting()
+    session.wait(5)
+    assert _wait_for(lambda: app.meeting_status()[0] == "done", QTest.qWait)
+    QTest.qWait(20)  # the queued change reaches the tray
+    assert ("stop", "live") in m.log and ("summarise", session.folder) in m.log and app.meeting is None
+    assert not app.meeting_action.isChecked() and app.tray.toolTip() != "Rflow: recording the meeting"
+    assert m.shown[-1] == "Minutes ready: Weekly sync: the release moves to Friday"
+    app._message_clicked()  # the notification clicked: the minutes open
+    assert m.opened == [session.folder / "minutes.md"]
+    assert [f for f, *_ in app.past_meetings()] == [session.folder]
+    assert app.start_meeting(m.teams) == "" and len(asked) == 2  # told once: not asked again
+    assert app.meeting.folder != session.folder  # a second one in the same minute: a folder of its own
+    app.stop_meeting()
+    app.last_meeting.wait(5)
+
+
+def test_past_meetings_are_listed_newest_first_and_their_minutes_open_and_copy(meeting_app, monkeypatch):
+    app = meeting_app.app
+    root = app.meetings_folder()
+    for name, meta, minutes in (("2026-10-24 1530 Zoom", {"app": "Zoom", "seconds": 2710.0}, True),
+                                ("2026-10-27 0900 Google Meet", {"app": "Google Meet", "seconds": 60}, False),
+                                ("not a meeting", {}, False)):
+        (root / name).mkdir(parents=True)
+        (root / name / "meeting.json").write_text(sst_app.json.dumps(meta), encoding="utf-8")
+        if minutes:
+            (root / name / "minutes.md").write_text("# Planning\n", encoding="utf-8")
+    found = app.past_meetings()
+    assert [(f.name, started.day, name, seconds, has) for f, started, name, seconds, has in found] == [
+        ("2026-10-27 0900 Google Meet", 27, "Google Meet", 60.0, False), ("2026-10-24 1530 Zoom", 24, "Zoom", 2710.0, True)]
+    copied = []
+    monkeypatch.setattr(sst_app.textaccess, "set_clipboard", lambda text: copied.append(text))
+    assert app.copy_minutes(found[1][0]) == "" and copied == ["# Planning\n"]
+    assert app.copy_minutes(found[0][0]) == "The minutes couldn't be read"
+    app.open_meeting(found[1][0])
+    app.open_meeting(found[0][0])  # no minutes yet: its folder
+    app.open_meeting_folder()
+    assert meeting_app.opened == [root / "2026-10-24 1530 Zoom" / "minutes.md", root / "2026-10-27 0900 Google Meet", root]
+
+
+def test_a_past_meetings_minutes_are_written_again_from_its_recording(meeting_app, monkeypatch):
+    from PySide6.QtTest import QTest
+
+    from sst.meeting.minutes import MinutesError
+    app, m = meeting_app.app, meeting_app
+    folder = app.meetings_folder() / "2026-10-27 0900 Google Meet"
+    folder.mkdir(parents=True)
+    app.write_minutes(folder)
+    app.write_minutes(folder)  # a second click while it's written: nothing more
+    assert _wait_for(lambda: not app.writing_minutes, QTest.qWait)
+    assert m.log.count(("summarise", folder)) == 1 and m.shown[-1] == "Minutes ready: Weekly sync: the release moves to Friday"
+    monkeypatch.setattr(app, "_summarise_meeting", lambda f: (_ for _ in ()).throw(MinutesError("Gemini didn't answer in time.")))
+    app.write_minutes(folder)
+    assert _wait_for(lambda: not app.writing_minutes, QTest.qWait)
+    assert m.shown[-1] == "The minutes couldn't be written: Gemini didn't answer in time. The recording is kept."
+
+
+def test_a_meeting_needs_a_part_and_a_gemini_key_for_translation_and_minutes(meeting_app):
+    app = meeting_app.app
+    app.settings = dataclasses.replace(app.settings, meeting_told=True)
+    app.gateway = GatewayConfig()
+    assert "add a Gemini key" in app.start_meeting(meeting_app.teams)
+    for part in ("translate", "minutes"):
+        app.set_meeting_option(part, False)
+    assert app.meeting_problem() == "" and not app.settings.meeting_minutes  # recording alone needs no key
+    app.set_meeting_option("record", False)
+    assert "Switch on live translation or Record" in app.start_meeting(meeting_app.teams)
+    assert app.start_meeting(None).startswith("Start a meeting first")
+    with pytest.raises(ValueError):
+        app.set_meeting_option("everything", True)
+
+
+def test_ctrl_alt_m_starts_and_stops_the_meeting_found_from_any_app(meeting_app, monkeypatch):
+    from sst.meeting import apps
+    app = meeting_app.app
+    listener = app.meeting_listener
+    assert listener is not None and listener.running and listener.hotkey.label == "Ctrl+Alt+M"
+    assert app.meeting_action.text() == "Meeting mode\tCtrl+Alt+M"
+    started = []
+    monkeypatch.setattr(app, "start_meeting", lambda window: started.append(window) or "")
+    listener.send("press")
+    listener.send("release")
+    assert started == [meeting_app.teams]  # once per press, in the one meeting found
+    opened = []
+    monkeypatch.setattr(app.window, "open", lambda page=None: opened.append(page))
+    monkeypatch.setattr(apps, "find", lambda: [])
+    app.toggle_meeting()
+    assert opened == ["meeting"] and meeting_app.shown[-1].startswith("Start a meeting first")
+    app.apply_settings(dataclasses.replace(app.settings, live_shortcut="ctrl+alt+m"))  # live translation's keys now
+    assert app.meeting_listener is None and not listener.running and app.meeting_shortcut_clash() == "Live translation"
+    assert app.meeting_action.text() == "Meeting mode"
