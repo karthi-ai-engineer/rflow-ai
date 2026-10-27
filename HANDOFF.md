@@ -12,6 +12,17 @@ _Last updated: 2026-10-23_
 ## Start here (a new session, or the owner's other laptop)
 
 **Where things stand (2026-10-27):**
+- **Phase 50** (#225, #226; not released yet). Meeting mode has two tabs, **Online** and **In person**
+  (`Settings.meeting_place`, which the shortcut and tray also follow).
+  - In person, the window is `sst.meeting.apps.IN_PERSON`: no app, no frames, and the meeting never stops by itself.
+  - The microphone alone records `room.wav` (`Recorder(room=True)`).
+  - Live translation runs with `TrayApp.room_live_config()`: source microphone, translated into `live_target`, never
+    spoken. This makes it the room's live transcript.
+  - The minutes use `ROOM_WORDS`: every voice on the one track is a "Speaker N", never "You".
+  - Its switches are `Settings.room_translate`, `room_record` and `room_minutes`.
+  - A bar over every page has **System / Light / Dark** (`Settings.appearance`; `theme.set_appearance`, which
+    `dark_mode()` follows; also in Settings) and a purple **Check for updates**, which shows "Checking…" and then a
+    toast.
 - **Rflow 2.7.0** (phase 49, #223) adds **Meeting mode** (its own page after Live translation; Ctrl+Alt+M), a package
   of its own, `sst/meeting/`, which may use `sst.live` but never `sst.pipeline`, `sst.dictate` or `sst.audio`:
   `apps.py` finds the meeting window (Teams, Zoom, Google Meet in a browser, Webex; one found is chosen, several are
