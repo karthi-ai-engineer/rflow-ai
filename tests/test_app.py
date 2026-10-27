@@ -1448,7 +1448,8 @@ def test_a_meeting_asks_once_records_translates_then_writes_its_minutes(meeting_
     assert app.start_meeting(m.teams) == "" and app.settings.meeting_told and app.settings.live_told
     session = app.meeting
     assert session.folder.parent == app.profile.folder() / "meetings" and session.folder.name.endswith(" Microsoft Teams")
-    assert m.log == [("start", "FakeMeetingPart"), ("start", "FakeMeetingPart"), ("start", "live")]
+    assert m.log[:2] == [("start", "FakeMeetingPart"), ("start", "FakeMeetingPart")] and m.log[2][:2] == ("start", "live")
+    assert m.log[2][2] == app.meeting_live_config() and not m.log[2][2].speak  # silent captions unless switched on
     assert app.meeting_action.isChecked() and app.tray.toolTip() == "Rflow: recording the meeting"
     assert m.shown[-1] == "Recording the meeting in Microsoft Teams."
     assert app.meeting_cost().seconds >= 0 and app.past_meetings() == []  # the one recording isn't a past one yet
@@ -1583,3 +1584,205 @@ def test_ctrl_alt_m_starts_and_stops_the_meeting_found_from_any_app(meeting_app,
     app.apply_settings(dataclasses.replace(app.settings, live_shortcut="ctrl+alt+m"))  # live translation's keys now
     assert app.meeting_listener is None and not listener.running and app.meeting_shortcut_clash() == "Live translation"
     assert app.meeting_action.text() == "Meeting mode"
+
+
+# ---- Meeting mode's live translation, its own bar: spoken by the meeting's switch, never in person (#233-#236)
+
+class MeetingSpeaker:
+    """The voice (a Speaker's surface), faked: nothing is played, nothing is ducked."""
+    language, said, skipped, repeats, private, speaking = "en", 0, 0, 0, False, False
+
+    def __init__(self, config):
+        self.config, self.started, self.stopped, self.lanes, self.own, self.speed = config, False, False, set(), set(), 1.0
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def hear(self, event):
+        pass
+
+    def set_lanes(self, lanes, own=None):
+        self.lanes, self.own = set(lanes), set(own or ())
+
+    def set_speed(self, speed):
+        self.speed = speed
+
+
+@pytest.fixture
+def live_meeting(meeting_app, monkeypatch):
+    """meeting_app with live translation's real bar and LiveSession; each way a fake capture and engine (no device,
+    no Google), each engine having spent a minute more than the last; the voice faked; nothing downloaded."""
+    from tests.test_live_session import FakeCapture, SpendingEngine
+    app = meeting_app.app
+    monkeypatch.setattr(app, "start_live", sst_app.TrayApp.start_live.__get__(app))  # the fixture's fakes undone
+    monkeypatch.setattr(app, "stop_live", sst_app.TrayApp.stop_live.__get__(app))
+    app.settings = dataclasses.replace(app.settings, live_told=True, meeting_told=True, live_duck=0.3,
+                                       live_speak_speed=1.15)
+    lanes, speakers, downloads = [], [], []
+
+    def lane(name, config):
+        capture = FakeCapture()
+        lanes.append((name, config, capture))
+        spent = (60.0 * len(lanes), 60.0, 0.0)
+        return capture, lambda emit: SpendingEngine(emit, spent)
+    monkeypatch.setattr(app, "_live_lane", lane)
+    monkeypatch.setattr(app, "_live_speaker", lambda config: speakers.append(MeetingSpeaker(config)) or speakers[-1])
+    monkeypatch.setattr(app, "download_live_voice", lambda: downloads.append(True))
+    monkeypatch.setattr(sst_app.Voice, "ready", lambda self, root=None: False)
+    monkeypatch.setattr(sst_app.QMessageBox, "question", lambda *args: sst_app.QMessageBox.StandardButton.Yes)
+    meeting_app.lanes, meeting_app.speakers, meeting_app.downloads = lanes, speakers, downloads
+    yield meeting_app
+    if app.meeting is not None:
+        app.stop_meeting()
+        app.last_meeting.wait(5)
+    app.stop_live()
+
+
+def test_an_online_meeting_speaks_by_its_own_switch_whatever_the_live_page_says(live_meeting):
+    m = live_meeting
+    app = m.app
+    app.apply_settings(dataclasses.replace(app.settings, live_speak=True, meeting_speak=False))
+    assert app.start_meeting(m.teams) == "" and app.live.running
+    assert not app.live.config.speak and app.live.session.speaker is None and not m.speakers  # silent captions
+    assert not app.live.bar.speak_button.isChecked() and m.downloads == []  # nothing to download for it
+    app.set_meeting_option("speak", True)  # the page's row: at once on the meeting's bar
+    assert app.settings.meeting_speak and app.settings.live_speak and m.downloads == [True]
+    speaker = app.live.session.speaker
+    assert speaker is m.speakers[-1] and speaker.started and app.live.bar.speak_button.isChecked()
+    assert speaker.config.duck == 0.3 and speaker.speed == 1.15  # ducked and paced as set on Live translation
+    app.set_live_speak(False)  # the Live page's switch: saved for Live translation, the meeting's bar keeps speaking
+    assert not app.settings.live_speak and app.live.session.speaker is speaker and app.settings.meeting_speak
+    app.live.bar.speak_button.click()  # the bar's button on a meeting's bar: the meeting's switch
+    assert not app.settings.meeting_speak and app.live.session.speaker is None and speaker.stopped
+    assert not app.settings.live_speak
+    app.stop_meeting()
+    assert not app.live.running
+    app.last_meeting.wait(5)
+    app.apply_settings(dataclasses.replace(app.settings, meeting_speak=True))
+    assert app.start_meeting(m.teams) == "" and app.live.config.speak and app.live.session.speaker is m.speakers[-1]
+    app.stop_meeting()
+    app.last_meeting.wait(5)
+    assert app.start_live() == "" and not app.live.config.speak  # Live translation itself: its own switch
+    app.stop_live()
+
+
+def test_a_meeting_in_person_is_never_spoken_aloud(live_meeting):
+    from sst.meeting import apps
+    m = live_meeting
+    app = m.app
+    app.apply_settings(dataclasses.replace(app.settings, live_speak=True, meeting_speak=True))
+    assert app.start_meeting(apps.IN_PERSON) == "" and app.live.running
+    assert app.live.config.source == "microphone" and not app.live.config.speak and m.downloads == []
+    flashed = []
+    app.live.flash = flashed.append
+    app.live.bar.speak_button.click()  # the bar's button
+    assert app.live.session.speaker is None and not app.live.bar.speak_button.isChecked()
+    assert flashed == ["Not spoken aloud in a meeting in person"] and app.settings.meeting_speak
+    app.set_live_speak(True)  # the Live page's switch
+    app._on_voice_done("")  # the voice downloaded meanwhile: it re-applies the bar's own setting
+    assert app.live.session.speaker is None and not m.speakers
+
+
+def test_a_meeting_stops_and_counts_only_the_live_translation_it_started(live_meeting):
+    m = live_meeting
+    app = m.app
+    assert app.start_meeting(m.teams) == ""
+    mine = app.live.session
+    app.live.stop()  # its bar closed with the X (or the cost saver stopped it)
+    assert app.start_live() == "" and app.live.session is not mine  # Live translation started again by hand
+    app.stop_meeting()
+    assert app.live.running  # not the meeting's: left running
+    app.last_meeting.wait(5)
+    assert app.meeting_cost().translation == pytest.approx(mine.spend().cost) and mine.spend().cost > 0
+    assert app.meeting_cost().translation < app.live.spend().cost  # the second session costs more: not counted
+
+
+def test_a_meeting_in_person_end_to_end_from_the_tab_and_from_the_shortcut(live_meeting, monkeypatch):
+    """The In person tab's Start: the microphone alone records room.wav, live translation runs as the room's
+    transcript (into the user's language, never spoken), Stop writes the minutes from room.wav with every voice a
+    Speaker; then the same from Ctrl+Alt+M."""
+    import json
+    import wave
+
+    from PySide6.QtTest import QTest
+
+    from sst.live.contracts import MIC, Kind, LiveEvent
+    from sst.meeting import minutes as mm
+    from sst.meeting.recorder import Recorder
+    from tests.test_live_session import FakeCapture
+    from tests.test_meeting_minutes import Gemini
+    m = live_meeting
+    app = m.app
+    app.gateway = GatewayConfig(provider="gemini", api_key="test-key")
+    mics = []
+
+    def microphone():
+        mics.append(FakeCapture())
+        return mics[-1]
+
+    def speakers():
+        raise AssertionError("in person the laptop's sound isn't recorded")
+    monkeypatch.setattr(app, "_meeting_recorder", lambda folder, room=False: Recorder(
+        folder, speakers=speakers, microphone=microphone, room=room))
+    gemini = Gemini(transcripts=[{"language": "ja", "names": [], "lines": [
+        {"time": "00:01", "speaker": "Speaker 1", "text": "おはようございます。"},
+        {"time": "00:02", "speaker": "Speaker 2", "text": "Good morning."}]}])
+    monkeypatch.setattr(app, "_summarise_meeting", lambda folder: mm.summarise(
+        folder, app.gateway.key_for("gemini"), post=gemini.post, upload=gemini.upload))
+    app.apply_settings(dataclasses.replace(app.settings, live_target="en", live_mic_target="ja", live_source="both",
+                                           live_speak=True, meeting_speak=True))
+    page = app.window.pages["meeting"]
+    page.refresh()
+    page.tabs.buttons["room"].click()
+    assert app.settings.meeting_place == "room" and page.start_button.isEnabled()
+    page.start_button.click()
+    session = app.meeting
+    assert session is not None and session.in_person and page.start_button.text() == "Stop"
+    assert [name for name, *_ in m.lanes] == [MIC]  # the live transcript: the microphone alone
+    config = m.lanes[0][1]
+    assert config.mic_target == "en" and not config.speak and app.live.session.speaker is None
+    room, live_mic = mics[0], m.lanes[0][2]
+    talk = np.full(1600, 2000, dtype="<i2").tobytes()
+    for _ in range(25):  # 2.5 s of the room, heard by both
+        room.on_frame(talk)
+        live_mic.on_frame(talk)
+    engine = app.live.session.lanes[MIC][1]
+    assert len(engine.frames) == 25 and all(any(frame) for frame in engine.frames)  # never silenced: nothing spoken
+    engine.on_event(LiveEvent(Kind.LINE, "Good morning.", source="おはようございます。", language="ja", lane=MIC))
+    engine.on_event(LiveEvent(Kind.LINE, "", source="Good morning.", language="en", lane=MIC))  # in English already
+    QTest.qWait(20)
+    assert "Good morning." in app.live.bar.text()
+    session.check(now=1e9)
+    session.check(now=2e9)
+    assert app.meeting is session  # no window: it doesn't stop by itself
+    transcript = app.live.transcript_path
+    page.start_button.click()  # Stop
+    assert not app.live.running and room.stopped
+    assert _wait_for(lambda: app.meeting_status()[0] == "done", QTest.qWait)
+    folder = session.folder
+    with wave.open(str(folder / "room.wav")) as w:
+        assert (w.getframerate(), w.getnframes()) == (16000, 25 * 1600)
+    assert not (folder / "others.wav").exists() and not (folder / "you.wav").exists()
+    meta = json.loads((folder / "meeting.json").read_text(encoding="utf-8"))
+    assert meta["in_person"] and meta["app"] == "In person" and not meta["options"]["screen"]
+    prompt = gemini.transcript_requests()[0]["contents"][0]["parts"][-1]["text"]
+    assert len(gemini.uploads) == 1 and 'never use "You"' in prompt
+    assert "Speaker 1" in (folder / "minutes.md").read_text(encoding="utf-8")
+    assert "Good morning." in transcript.read_text(encoding="utf-8")
+    cost = app.meeting_cost()
+    assert cost.translation > 0 and cost.minutes_estimate > 0
+    page.refresh()  # what the app does when its window is open
+    assert page.state.text() == "Minutes ready"
+    # the shortcut, the In person tab last open: a meeting in the room, and pressed again it stops
+    m.lanes.clear()
+    app.meeting_listener.send("press")
+    assert app.meeting is not None and app.meeting.in_person and [name for name, *_ in m.lanes] == [MIC]
+    assert not m.lanes[0][1].speak and app.live.running
+    mics[-1].on_frame(talk)
+    app.meeting_listener.send("press")
+    assert app.meeting is None and not app.live.running
+    app.last_meeting.wait(5)
+    assert _wait_for(lambda: app.meeting_status()[0] == "done", QTest.qWait)

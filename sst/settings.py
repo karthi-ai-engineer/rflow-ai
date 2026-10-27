@@ -53,6 +53,7 @@ class Settings:
     live_told: bool = False  # the notice (audio goes to Google, the cost) was accepted once
     # Meeting mode (sst.meeting): one switch per part, all started and stopped with the meeting
     meeting_translate: bool = True  # live translation's bar runs during the meeting
+    meeting_speak: bool = False  # its translation read aloud (as Live translation speaks it); off: silent captions
     meeting_record: bool = True  # the others (what the laptop plays) and you (the microphone), saved on this laptop
     meeting_minutes: bool = True  # after it: transcript with speakers, minutes, decisions, action items (needs the recording)
     meeting_screen: bool = True  # the meeting window's changed frames (slides) given to the minutes
