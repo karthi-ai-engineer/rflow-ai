@@ -8,7 +8,7 @@ from pathlib import Path
 # (onnxruntime, CTranslate2) bring their own thread pools. Set before anything imports numpy: this module runs first.
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
-__version__ = "2.7.0"  # the one place to change it; the installer and release tags follow it
+__version__ = "2.8.0"  # the one place to change it; the installer and release tags follow it
 
 if getattr(sys, "frozen", False):  # the installed app (Rflow.exe / rflow-cli.exe, built by build_installer.cmd)
     MODELS_DIR = Path(sys.executable).parent / "models"

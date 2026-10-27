@@ -12,7 +12,7 @@ _Last updated: 2026-10-23_
 ## Start here (a new session, or the owner's other laptop)
 
 **Where things stand (2026-10-27):**
-- **Phase 50** (#225, #226; not released yet). Meeting mode has two tabs, **Online** and **In person**
+- **Rflow 2.8.0** (2026-10-27) = phase 50 (#225, #226), phase 51 Screen translator (#231, Ctrl+Alt+S, `sst/screen/`), the spoken-translation stall fix (#227), long dictation up to 1 h and a smaller pill (#239, #240), long Text Transform (#243-#248), the Home usage card and Formatting examples (#237, #238), and Meeting mode's Spoken translation (#233-#235). Phase 50: Meeting mode has two tabs, **Online** and **In person**
   (`Settings.meeting_place`, which the shortcut and tray also follow).
   - In person, the window is `sst.meeting.apps.IN_PERSON`: no app, no frames, and the meeting never stops by itself.
   - The microphone alone records `room.wav` (`Recorder(room=True)`).
