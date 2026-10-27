@@ -36,6 +36,25 @@ CONTINUE_PROMPT = (
     "sentence, the new text finishes that sentence, so its first word gets a capital letter only if it is a name or "
     "\"I\".\n<before>{before}</before>")
 CONTEXT_CHARS = 1500  # of the cleaned beginning, at most: what came just before is what matters
+# A longer text is cleaned in pieces of about this many words, cut at sentence ends, each after the ones before it
+# (polish_continued's way). A 30-minute dictation is ~4,500 words: in one request it would need ~14,000 tokens of answer,
+# more than many models may write (an answer cut off is never used), and minutes of waiting. 600 words is ~1,900 tokens.
+PIECE_WORDS = 600
+
+
+def pieces(text: str, size: int = PIECE_WORDS) -> list[str]:
+    """The text in pieces of at most about `size` words, cut after a sentence's end (a sentence longer than that, as
+    when nothing was punctuated, is cut between words). Joined with spaces, they are the text again."""
+    out: list[str] = []
+    words: list[str] = []
+    for word in text.split():
+        words.append(word)
+        if len(words) >= size and (re.search(r"[.!?…。？！]['\")\]]*$", word) or len(words) >= 2 * size):
+            out.append(" ".join(words))
+            words = []
+    if words:
+        out.append(" ".join(words))
+    return out
 
 
 def continuation(before: str) -> str:
@@ -91,11 +110,17 @@ class GatewayLLM:
         self.polisher.prepare()
 
     def polish(self, text: str, protected_terms: Sequence[str] = ()) -> str:
-        return self._polish(text, protected_terms, "")
+        return self.polish_continued(text, "", protected_terms)
 
     def polish_continued(self, text: str, before: str, protected_terms: Sequence[str] = ()) -> str:
-        """The rest of a dictation, cleaned after its beginning (`before`, cleaned already), which isn't sent back."""
-        return self._polish(text, protected_terms, continuation(before) if before.strip() else "")
+        """The rest of a dictation, cleaned after its beginning (`before`, cleaned already), which isn't sent back. A
+        long text goes in pieces, each after the ones before it; one that fails fails it all (LLMError): the pipeline
+        then types the text as formatted, never one with a piece missing."""
+        done: list[str] = []
+        for piece in pieces(text) if len(text.split()) > PIECE_WORDS else [text]:
+            context = " ".join([before, *done]).strip()
+            done.append(self._polish(piece, protected_terms, continuation(context) if context else ""))
+        return " ".join(done)
 
     def _polish(self, text: str, protected_terms: Sequence[str], extra: str) -> str:
         if not text.strip():

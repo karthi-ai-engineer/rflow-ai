@@ -18,7 +18,8 @@ Never loses words: the stream is a shortcut, not the only way. The voice pipelin
 (sst.pipeline.streaming); when the stream can't connect, breaks, runs out of time or has no final text soon after the
 release, the chunks go to the batch model (gemini-3.5-transcribe, the live model's twin) as they always did. Batch
 requests (a retry, the reading test, sst eval, the Test button) always use the twin. A session lasts 10 minutes at most
-and a dictation 3; Tamil isn't one of the live model's languages, so Tamil goes the batch way. The key is never logged.
+(SESSION_LIMIT): a longer dictation goes on with the batch model from there, its held chunks first. Tamil isn't one of
+the live model's languages, so Tamil goes the batch way. The key is never logged.
 """
 import base64
 import contextlib

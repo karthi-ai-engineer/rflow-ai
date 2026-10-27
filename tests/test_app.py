@@ -46,6 +46,18 @@ def test_pill_grows_to_fit_long_messages():
     assert pill.width() > short
 
 
+def test_the_pill_is_small_and_its_time_grows_with_a_long_dictation(monkeypatch):
+    pill = sst_app.Pill()
+    pill.show_state("recording")
+    assert pill.HEIGHT <= 28 and pill._width() <= 120  # about two thirds of the 40 x 176 px it was: it hid things
+    monkeypatch.setattr(sst_app.time, "monotonic", lambda: pill._started + 62 * 60 + 5)
+    assert pill._timer() == "1:02:05"
+    short = pill.width()
+    pill._animate()  # the time gained digits: the capsule widens to keep it inside
+    assert pill.width() > short and pill.width() - 2 * pill.MARGIN >= pill._content() + 2 * pill.PAD - 1
+    pill.show_state("idle")
+
+
 def test_only_the_pill_lets_clicks_through_and_nothing_takes_the_focus(monkeypatch):
     import ctypes
     styles = {}
