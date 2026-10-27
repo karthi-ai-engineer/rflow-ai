@@ -122,7 +122,7 @@ def test_pages_are_built_when_first_wanted_as_the_window_is_then(monkeypatch):
     early = born_light.pages["settings"]  # built in light (the theme is global: before the next window sets dark)
     monkeypatch.setattr(w, "dark_mode", lambda: True)
     window, app = _window()
-    assert set(window.pages.built) == {"home"} and len(window.pages) == 15 and "settings" in window.pages
+    assert set(window.pages.built) == {"home"} and len(window.pages) == 16 and "settings" in window.pages
     assert list(window.pages)[:3] == ["home", "dictionary", "snippets"]
     for win in (window, born_light):
         win.open("home")
@@ -1741,9 +1741,9 @@ def test_the_smallest_window_folds_the_sidebar_into_a_rail():
     assert window.nav["models"].text() == "AI & models"
 
 
-def test_the_sidebar_has_the_ten_sections_in_order():
+def test_the_sidebar_has_the_eleven_sections_in_order():
     window, _ = _window()
-    assert [key for key, _ in w.NAV] == ["home", "live", "words", "snippets", "transform", "translate", "formatting",
+    assert [key for key, _ in w.NAV] == ["home", "live", "meeting", "words", "snippets", "transform", "translate", "formatting",
                                          "models", "settings", "report"]
     assert all(key in w.NAV_ICONS and w.NAV_ICONS[key] in w.theme.ICONS for key in window.nav)
 
@@ -2098,3 +2098,126 @@ def test_the_section_says_when_the_voice_cant_speak_the_language_chosen():
     words = window.pages["live"].speak_caption.text()
     assert words.startswith("Gemini says the translation in its own voice")
     assert "Ryan, the voice on this laptop, speaks only English" in words
+
+
+# ---- Meeting mode (phase 49)
+
+def _meeting_window(found=(), **settings):
+    from sst.meeting.apps import MeetingWindow
+    window, app = _live_window(**settings)
+    app._meeting_windows = tuple(MeetingWindow(name, title, hwnd, 7) for name, title, hwnd in found)
+    window.show_page("meeting")
+    return window, app, window.pages["meeting"]
+
+
+def test_meeting_mode_is_a_section_after_live_translation_and_finds_the_meeting_by_itself():
+    window, app, page = _meeting_window([("Microsoft Teams", "Weekly sync | Microsoft Teams", 101)])
+    keys = [key for key, _ in w.NAV]
+    assert keys.index("meeting") == keys.index("live") + 1 and w.RAIL_NAMES["meeting"] == "Meeting"
+    assert window.nav["meeting"].isChecked() and w.NAV_ICONS["meeting"] in w.theme.ICONS
+    assert page.chosen.app == "Microsoft Teams" and page.picker.isHidden() and not page.app_line.isHidden()
+    assert page.app_name.text() == "Microsoft Teams" and page.start_button.isEnabled() and page.connect_card.isHidden()
+    assert page.state.text() == "Off" and page.doing.text() == "Ready for your meeting in Microsoft Teams"
+    assert [t.isChecked() for t in page.parts.values()] == [True, True, True, True]
+
+
+def test_several_meetings_are_picked_from_and_none_says_start_one_first():
+    window, app, page = _meeting_window([("Microsoft Teams", "Sync", 101), ("Zoom", "Zoom Meeting", 102)])
+    assert page.chosen is None and not page.picker.isHidden() and not page.start_button.isEnabled()
+    assert page.doing.text() == "Pick your meeting below" and page.picker.count() == 3
+    page.picker.setCurrentIndex(2)
+    assert page.chosen.app == "Zoom" and page.start_button.isEnabled()
+    app._meeting_windows = app._meeting_windows[1:]  # Teams closed: Look again
+    page._scan()
+    assert page.chosen.app == "Zoom" and page.picker.isHidden()
+    app._meeting_windows = ()
+    page._scan()
+    assert page.chosen is None and not page.start_button.isEnabled() and page.doing.text() == "Start a meeting first"
+    assert "Start a meeting first" in page.app_words.text()
+
+
+def test_a_meeting_starts_records_with_its_cost_then_shows_its_minutes():
+    from sst.meeting.minutes import MinutesResult
+    from sst.meeting.session import MeetingCost
+    window, app, page = _meeting_window([("Microsoft Teams", "Weekly sync", 101)])
+    page.start_button.click()
+    assert ("start_meeting", "Microsoft Teams") in app.calls and page.start_button.text() == "Stop"
+    app._meeting_cost = MeetingCost(total=0.12, translation=0.0, minutes_estimate=0.12, seconds=840.0, frames=6)
+    window.refresh()
+    assert page.state.text() == "Recording" and page.light.state == "live" and page.light.blinking
+    assert page.doing.text() == "Microsoft Teams · 14 min · $0.12 so far · 6 slides"
+    assert not any(t.isEnabled() for t in page.parts.values())  # a running meeting keeps the parts it started with
+    page.start_button.click()
+    assert ("stop_meeting",) in app.calls and page.state.text() == "Writing the minutes…" and page.light.blinking
+    assert not page.start_button.isEnabled()  # one meeting's minutes at a time
+    state, meeting, folder, _, _ = app._meeting
+    app._meeting = ("done", meeting, folder, MinutesResult("Weekly sync: the release moves to Friday", "…"), "")
+    window.refresh()  # what the TrayApp does when the minutes are written
+    assert page.state.text() == "Minutes ready" and page.doing.text() == "Weekly sync: the release moves to Friday"
+    assert not page.done_row.isHidden() and not page.open_minutes.isHidden() and page.open_last_folder.isHidden()
+    page.open_minutes.click()
+    page.copy_last.click()
+    assert ("open_meeting", folder) in app.calls and ("copy_minutes", folder) in app.calls
+    assert page.copy_last.text() == "Copied" and page.start_button.isEnabled()
+
+
+def test_failed_minutes_keep_the_recording_and_open_its_folder():
+    window, app, page = _meeting_window([("Zoom", "Zoom Meeting", 102)])
+    app._meeting = ("failed", app._meeting_windows[0], w.Path("m"), None, "Google didn't answer")
+    window.refresh()
+    assert page.state.text() == "The minutes failed" and "The recording is kept" in page.doing.text()
+    assert page.open_minutes.isHidden() and not page.open_last_folder.isHidden()
+    page.open_last_folder.click()
+    assert ("open_meeting_folder", w.Path("m")) in app.calls
+
+
+def test_the_parts_switch_for_the_next_meeting_and_follow_each_other():
+    window, app, page = _meeting_window([("Zoom", "Zoom Meeting", 102)])
+    page.parts["record"].click()
+    assert ("set_meeting_option", "record", False) in app.calls and not app.settings.meeting_record
+    assert not page.parts["minutes"].isChecked() and not page.parts["minutes"].isEnabled()  # no sound, no minutes
+    assert not page.parts["screen"].isEnabled() and app.settings.meeting_minutes  # kept for when Record is on again
+    page.parts["translate"].click()
+    assert "Switch on live translation or Record" in page.connect_words.text() and not page.start_button.isEnabled()
+    page.parts["record"].click()
+    assert page.parts["minutes"].isChecked() and page.parts["screen"].isEnabled() and page.start_button.isEnabled()
+
+
+def test_without_a_gemini_key_only_recording_can_start():
+    window, app = _window(settings=Settings(welcomed=True))
+    window.show_page("meeting")
+    page = window.pages["meeting"]
+    assert not page.connect_card.isHidden() and "Gemini key" in page.connect_words.text()
+    for part in ("translate", "minutes"):
+        page.parts[part].click()
+    assert page.connect_card.isHidden() and app.meeting_problem() == ""
+
+
+def test_past_meetings_open_and_copy_their_minutes_and_the_shortcut_can_change():
+    window, app, page = _meeting_window()
+    app._past_meetings = ((w.Path("a"), datetime(2026, 10, 24, 15, 30), "Zoom", 2710.0, True),
+                          (w.Path("b"), datetime(2026, 10, 22, 9, 0), "Google Meet", 1260.0, False))
+    window.refresh()
+    texts = [b.text() for b in page.findChildren(QPushButton) if b.isVisibleTo(page)]
+    assert texts.count("Copy minutes") == 1 and texts.count("Open minutes") == 1 and texts.count("Open folder") == 2
+    labels = [x.text() for x in page.findChildren(QLabel)]
+    assert "Zoom · 45 min" in labels and "Google Meet · 21 min · no minutes" in labels
+    assert "Write minutes" not in texts  # no recording in "b" either: nothing to write them from
+    page.shortcut.setCurrentIndex(page.shortcut.findData(""))
+    assert app.settings.meeting_shortcut == "" and "tray menu" in page.how.itemAt(0).widget().text()
+    window, app, page = _meeting_window(meeting_shortcut="ctrl+alt+l")
+    assert app.meeting_shortcut_clash() == "Live translation" and "stays with Live translation" in page.shortcut_caption.text()
+
+
+def test_a_past_meeting_with_a_recording_but_no_minutes_can_have_them_written(tmp_path):
+    window, app, page = _meeting_window()
+    (tmp_path / "others.wav").write_bytes(b"RIFF")
+    app._past_meetings = ((tmp_path, datetime(2026, 10, 22, 9, 0), "Google Meet", 1260.0, False),)
+    window.refresh()
+    (write,) = [b for b in page.findChildren(QPushButton) if b.text() == "Write minutes"]
+    write.click()
+    assert app.calls[-1] == ("write_minutes", tmp_path)
+    app.writing_minutes = {tmp_path}
+    window.refresh()
+    (busy,) = [b for b in page.findChildren(QPushButton) if b.text() == "Writing the minutes…"]
+    assert not busy.isEnabled()

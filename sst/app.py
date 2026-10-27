@@ -14,6 +14,7 @@ import ctypes
 import dataclasses
 import faulthandler
 import gc
+import json
 import logging
 import math
 import os
@@ -389,6 +390,41 @@ def show_running_window() -> bool:
 
 # ---------------------------------------------------------------- the app
 
+MEETING_PARTS = ("translate", "record", "minutes", "screen")  # Settings.meeting_<part>, MeetingOptions' switches
+MEETING_NOTICE = (
+    "Meeting mode records the meeting's sound on this laptop: the others (what your laptop plays) and you (your "
+    "microphone). Tell the people in the meeting that it is recorded.\n\n"
+    "For the minutes, the recording and the meeting window's changed slides go to Google, which writes the transcript, "
+    "the decisions and the action items with Gemini: about $0.25 an hour. Live translation, when on, costs as on its "
+    "page. With a free Gemini key Google may use them to improve its products. Everything stays on this laptop "
+    "afterwards; turn parts off on the Meeting mode page.\n\nStart?")
+
+
+class _MeetingLive:
+    """Live translation as a meeting's part (MeetingSession's `live`): its bar started with the meeting and stopped with
+    it, unless it was already running (then it's left as it was). stop() may come on the meeting's watcher thread (the
+    meeting window closed): the bar is stopped on the app's thread."""
+
+    def __init__(self, app: "TrayApp"):
+        self.app, self.started = app, False
+
+    def start(self) -> None:
+        if self.app.live.running:
+            return
+        problem = self.app.start_live()
+        if problem:
+            raise RuntimeError(problem)
+        self.started = True
+
+    def stop(self) -> None:
+        if self.started:
+            self.started = False
+            self.app.signals.meeting_live_stop.emit()
+
+    def spend(self):
+        return self.app.live.spend()
+
+
 class _Signals(QObject):
     state = Signal(str, str)  # from Dictation, possibly on its worker thread
     result = Signal(str, str, float)  # (heard, typed, seconds of audio), from Dictation's worker thread
@@ -410,6 +446,10 @@ class _Signals(QObject):
     scan_done = Signal(object)  # the scan's result (sst.scan.save), or {"error": why}
     key = Signal()  # the dictation shortcut's listener queued an event, from the keyboard hook's thread
     live_key = Signal()  # the same for live translation's shortcut
+    meeting_key = Signal()  # the same for Meeting mode's shortcut
+    meeting = Signal()  # the meeting's state or result changed (MeetingSession.on_change, from any thread)
+    minutes_written = Signal(object, object, str)  # (folder, MinutesResult or None, why not), a past meeting's minutes
+    meeting_live_stop = Signal()  # the meeting stopped (perhaps on its watcher thread): its live bar stops on this one
     usage = Signal()  # a Gemini call was counted (sst.usage), from the thread that made it
 
 
@@ -470,6 +510,10 @@ class TrayApp:
         self.signals.scan_done.connect(self._on_scan_done)
         self.signals.key.connect(self._pump)  # the keys wake the app up: nothing polls between them
         self.signals.live_key.connect(self._live_key_pump)
+        self.signals.meeting_key.connect(self._meeting_key_pump)
+        self.signals.meeting.connect(self._meeting_changed)
+        self.signals.minutes_written.connect(self._minutes_written)
+        self.signals.meeting_live_stop.connect(lambda: self.stop_live())
         self.signals.usage.connect(self._on_usage)
 
         self.icon = QIcon(str(ICON_FILE))
@@ -494,6 +538,12 @@ class TrayApp:
         self.live.spent.connect(lambda: self.window.isVisible() and self.window.refresh())  # the Live page shows the cost
         self.live.noted.connect(lambda _: self.window.isVisible() and self.window.refresh())  # the Live page shows it
         self.live_listener = None  # live translation's shortcut (Ctrl+Alt+L)
+        # Meeting mode (sst.meeting, imported when a meeting is first looked for: start-up stays fast)
+        self.last_meeting = None  # this run's latest MeetingSession: recording, writing its minutes, done or failed
+        self._meeting_state = ""  # its state as last told (a notification once per change)
+        self.writing_minutes: set[Path] = set()  # past meetings whose minutes are being written again (write_minutes)
+        self.meeting_listener = None  # Meeting mode's shortcut (Ctrl+Alt+M)
+        self._on_message = None  # what clicking the last notification does, if not opening the window
         self.window = MainWindow(self)
         self.wake.on_change = self._on_wake_changed
 
@@ -515,6 +565,10 @@ class TrayApp:
         self.live_action.triggered.connect(lambda: self.toggle_live())
         menu.addAction(self.live_action)
         self._start_live_shortcut()
+        self.meeting_action = QAction("Meeting mode", menu, checkable=True)
+        self.meeting_action.triggered.connect(lambda: self.toggle_meeting())
+        menu.addAction(self.meeting_action)
+        self._start_meeting_shortcut()
         menu.addAction("AI && models", lambda: self.window.open("models"))
         menu.addAction("Reading test", lambda: self.window.open("reading"))
         menu.addAction("Settings", lambda: self.window.open("settings"))
@@ -526,7 +580,7 @@ class TrayApp:
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(lambda reason: self.window.open("home")
                                     if reason == QSystemTrayIcon.ActivationReason.Trigger else None)
-        self.tray.messageClicked.connect(lambda: self.window.open())  # e.g. "Rflow 1.2.0 is available"
+        self.tray.messageClicked.connect(self._message_clicked)  # e.g. "Rflow 1.2.0 is available"
         self.tray.setToolTip(f"{APP_NAME}: loading...")
         self.tray.show()
         if self._told_later:  # what went wrong while starting: a damaged settings file or dictionary
@@ -836,7 +890,7 @@ class TrayApp:
                 self._cleanup_notice = time.monotonic()
                 self._notify("Text cleanup unavailable", f"Typed what was heard ({message}).",
                              QSystemTrayIcon.MessageIcon.Warning)
-        recording = bool(self.dictation and self.dictation.recording)
+        recording = bool(self.dictation and self.dictation.recording) or self.meeting is not None
         self.tray.setIcon(self.recording_icon if recording else self.icon)
         if recording and state not in ("recording",):
             return  # a previous dictation finished while a new one is being recorded: keep showing the recording
@@ -934,6 +988,9 @@ class TrayApp:
         if (new.live_shortcut, new.translate_shortcut, new.transform_shortcut) != (
                 old.live_shortcut, old.translate_shortcut, old.transform_shortcut) and hasattr(self, "live_action"):
             self._start_live_shortcut()
+        shortcuts = ("meeting_shortcut", "live_shortcut", "translate_shortcut", "transform_shortcut")
+        if any(getattr(new, k) != getattr(old, k) for k in shortcuts) and hasattr(self, "meeting_action"):
+            self._start_meeting_shortcut()
         if new.speech_model != old.speech_model:
             self._load_speech()
         self.window.refresh()
@@ -1412,6 +1469,278 @@ class TrayApp:
         folder = self.live_folder()
         folder.mkdir(parents=True, exist_ok=True)
         shell.open_url(QUrl.fromLocalFile(str(folder)))
+
+    # -- Meeting mode (sst.meeting): live translation, the recording, the minutes and the slides, with one Start
+
+    def meetings_folder(self) -> Path:
+        return self.profile.meetings_folder
+
+    def meeting_windows(self) -> list:
+        """The meetings open now (Teams, Zoom, Google Meet, Webex), the likeliest first; [] when none."""
+        from sst.meeting import apps
+        try:
+            return apps.find()
+        except OSError as e:  # a window list that can't be read is no meeting, not a crash
+            log.warning("Couldn't look for a meeting window: %s", e)
+            return []
+
+    @property
+    def meeting(self):
+        """The running MeetingSession, or None (its minutes being written: no longer running)."""
+        m = self.last_meeting
+        return m if m is not None and m.state == "recording" else None
+
+    def meeting_options(self):
+        from sst.meeting.session import MeetingOptions
+        s = self.settings
+        return MeetingOptions(**{part: getattr(s, f"meeting_{part}") for part in MEETING_PARTS})
+
+    def set_meeting_option(self, name: str, on: bool) -> None:
+        """A part switched on or off: for the next meeting (a running one keeps what it started with)."""
+        if name not in MEETING_PARTS:
+            raise ValueError(f"No meeting part {name!r}")
+        self.apply_settings(dataclasses.replace(self.settings, **{f"meeting_{name}": on}))
+
+    def meeting_problem(self) -> str:
+        """Why a meeting can't start with the parts switched on, or ""."""
+        on = self.meeting_options().effective()
+        if not on.anything():
+            return "Switch on live translation or Record first."
+        if (on.translate or on.minutes) and not self.gateway.key_for("gemini"):
+            return "Live translation and the minutes use Google Gemini: add a Gemini key in AI & models."
+        return ""
+
+    def meeting_status(self) -> tuple:
+        """(state, window, folder, result, error) of this run's latest meeting; state "" before the first."""
+        m = self.last_meeting
+        return (m.state, m.window, m.folder, m.result, m.error) if m is not None else ("", None, None, None, "")
+
+    def meeting_cost(self):
+        """The latest meeting's MeetingCost (so far, while it runs), or None."""
+        m = self.last_meeting
+        if m is None or not m.state:
+            return None
+        try:
+            return m.cost()
+        except Exception as e:  # a cost figure never stops the meeting
+            log.warning("The meeting's cost: %s", e)
+            return None
+
+    def start_meeting(self, window) -> str:
+        """Start a meeting in `window` (a MeetingWindow) with the parts switched on; "" or why it didn't start."""
+        if self.meeting is not None:
+            return ""
+        if window is None:
+            return "Start a meeting first: Teams, Zoom, Google Meet or Webex."
+        problem = self.meeting_problem()
+        if problem:
+            return problem
+        options, s = self.meeting_options(), self.settings
+        if not s.meeting_told:
+            answer = QMessageBox.question(None, f"{APP_NAME}: meeting mode", MEETING_NOTICE)
+            if answer != QMessageBox.StandardButton.Yes:
+                return "Not started."
+            # the notice said what live translation sends too: its own isn't asked again in the meeting
+            self.apply_settings(dataclasses.replace(s, meeting_told=True, live_told=s.live_told or options.translate))
+        from sst.meeting.session import MeetingSession
+        session = MeetingSession(window, options, self._new_meeting_folder(window), recorder_factory=self._meeting_recorder,
+                                 frames_factory=self._meeting_frames, live=_MeetingLive(self),
+                                 summarise=self._summarise_meeting)
+        before, self.last_meeting = self.last_meeting, session
+        session.on_change = self.signals.meeting.emit  # queued onto this thread when it comes from another
+        try:
+            session.start()
+        except Exception as e:  # e.g. no output device or microphone; the parts started are stopped again
+            log.warning("The meeting didn't start: %s", e)
+            self.last_meeting = before
+            self._meeting_changed()
+            return f"The meeting couldn't start: {e}"
+        log.info("Meeting started in %s: %s", window.app, session.options)
+        return ""
+
+    def stop_meeting(self) -> None:
+        """Stop the running meeting; its minutes are written in the background (a notification says when)."""
+        m = self.meeting
+        if m is not None:
+            m.stop()
+
+    def toggle_meeting(self) -> None:
+        """The shortcut and the tray: stop the meeting, or start one in the meeting found (several: the page asks)."""
+        if self.meeting is not None:
+            self.stop_meeting()
+            return
+        from sst.meeting import apps
+        found = self.meeting_windows()
+        window = apps.choose(found)
+        if window is None:
+            self.window.open("meeting")  # none, or several to pick from: the page shows them
+            if not found:
+                self._notify(APP_NAME, "Start a meeting first: Teams, Zoom, Google Meet or Webex.")
+        else:
+            problem = self.start_meeting(window)
+            if problem and problem != "Not started.":
+                self._notify(APP_NAME, problem, QSystemTrayIcon.MessageIcon.Warning)
+        self.meeting_action.setChecked(self.meeting is not None)
+
+    def _new_meeting_folder(self, window) -> Path:
+        """<profile>/meetings/2026-10-27 1003 Microsoft Teams, made unique when two start in the same minute."""
+        root, name = self.meetings_folder(), f"{datetime.now():%Y-%m-%d %H%M} {window.app}"
+        folder, n = root / name, 2
+        while folder.exists():
+            folder, n = root / f"{name} ({n})", n + 1
+        return folder
+
+    def _meeting_recorder(self, folder: Path):
+        from sst.meeting.recorder import Recorder
+        # the microphone chosen for dictation (read when it opens), else Windows' default, as live translation does
+        return Recorder(folder, speakers=Capture.speakers,
+                        microphone=lambda: Capture.microphone(lambda: self.settings.microphone))
+
+    def _meeting_frames(self, window, folder: Path):
+        from sst.meeting.screen import WindowFrames
+        return WindowFrames(window, folder)
+
+    def _summarise_meeting(self, folder: Path):
+        from sst.meeting.minutes import summarise  # it counts its Gemini calls as the cost tracker's "meeting"
+        return summarise(folder, self.gateway.key_for("gemini"))
+
+    def _meeting_changed(self) -> None:
+        """The meeting's state changed (on this thread): the tray, a notification once per change, the page."""
+        state, window, folder, result, error = self.meeting_status()
+        recording = state == "recording"
+        self.meeting_action.setChecked(recording)
+        self.tray.setIcon(self.recording_icon if recording or (self.dictation and self.dictation.recording) else self.icon)
+        self.tray.setToolTip(f"{APP_NAME}: recording the meeting" if recording else f"{APP_NAME}: {self._status[0]}")
+        if state != self._meeting_state:
+            self._meeting_state = state
+            if recording:
+                self._notify(APP_NAME, f"Recording the meeting in {window.app}." if self.last_meeting.options.record
+                             else f"Meeting mode is on in {window.app}.")
+            elif state == "done" and result is not None:
+                self._notify("Minutes ready", f"Minutes ready: {result.title}", on_click=lambda f=folder: self.open_meeting(f))
+            elif state == "done":
+                self._notify(APP_NAME, "The meeting ended." + (" Its recording is saved." if self.last_meeting.options.record
+                                                               else ""))
+            elif state == "failed":
+                self._notify(APP_NAME, f"The minutes couldn't be written: {error}. The recording is kept.",
+                             QSystemTrayIcon.MessageIcon.Warning)
+        if self.window.isVisible():
+            self.window.refresh()
+
+    def past_meetings(self, limit: int = 8) -> list[tuple[Path, datetime, str, float, bool]]:
+        """The latest meetings, newest first (not the one recording): (folder, started, app, seconds, has minutes)."""
+        try:
+            folders = sorted((p for p in self.meetings_folder().iterdir() if p.is_dir()), key=lambda p: p.name, reverse=True)
+        except OSError:  # no meeting yet
+            return []
+        running = self.meeting.folder if self.meeting is not None else None
+        found = []
+        for folder in folders:
+            try:
+                started = datetime.strptime(folder.name[:15], "%Y-%m-%d %H%M")
+            except ValueError:  # not a meeting's folder
+                continue
+            if folder == running:
+                continue
+            try:
+                meta = json.loads((folder / "meeting.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                meta = {}
+            meta = meta if isinstance(meta, dict) else {}
+            app = str(meta.get("app") or folder.name[16:].split(" (")[0])
+            seconds = meta.get("seconds")
+            found.append((folder, started, app, float(seconds) if isinstance(seconds, (int, float)) else 0.0,
+                          (folder / "minutes.md").is_file()))
+            if len(found) >= limit:
+                break
+        return found
+
+    def write_minutes(self, folder: Path) -> None:
+        """A past meeting's minutes from its recording, on a worker thread: Rflow quit while they were written, or Gemini
+        failed then. The page's "Write minutes"; the answer comes back through signals.minutes_written."""
+        folder = Path(folder)
+        if folder in self.writing_minutes:
+            return
+        self.writing_minutes.add(folder)
+
+        def work():
+            try:
+                self.signals.minutes_written.emit(folder, self._summarise_meeting(folder), "")
+            except Exception as e:  # noqa: BLE001 - MinutesError in plain words; anything else said as it is
+                log.warning("The minutes of %s couldn't be written: %s", folder.name, e)
+                self.signals.minutes_written.emit(folder, None, str(e).rstrip("."))
+
+        threading.Thread(target=work, name="meeting-minutes-again", daemon=True).start()
+        if self.window.isVisible():
+            self.window.refresh()
+
+    def _minutes_written(self, folder: Path, result, error: str) -> None:
+        self.writing_minutes.discard(folder)
+        if result is not None:
+            self._notify("Minutes ready", f"Minutes ready: {result.title}", on_click=lambda f=folder: self.open_meeting(f))
+        else:
+            self._notify(APP_NAME, f"The minutes couldn't be written: {error}. The recording is kept.",
+                         QSystemTrayIcon.MessageIcon.Warning)
+        if self.window.isVisible():
+            self.window.refresh()
+
+    def open_meeting(self, folder: Path) -> None:
+        """A meeting's minutes, or its folder before they're written."""
+        minutes = Path(folder) / "minutes.md"
+        shell.open_url(QUrl.fromLocalFile(str(minutes if minutes.is_file() else folder)))
+
+    def open_meeting_folder(self, folder: Path | None = None) -> None:
+        """A meeting's folder (the recording, the slides, the minutes), or the one holding them all."""
+        folder = Path(folder) if folder is not None else self.meetings_folder()
+        folder.mkdir(parents=True, exist_ok=True)
+        shell.open_url(QUrl.fromLocalFile(str(folder)))
+
+    def copy_minutes(self, folder: Path) -> str:
+        """A meeting's minutes onto the clipboard, to paste anywhere: "" or why they couldn't be copied."""
+        try:
+            text = (Path(folder) / "minutes.md").read_text(encoding="utf-8")
+        except OSError as e:
+            log.warning("Couldn't read the minutes: %s", e)
+            return "The minutes couldn't be read"
+        try:
+            textaccess.set_clipboard(text)
+        except OSError as e:  # another app holds the clipboard
+            log.warning("Couldn't copy the minutes: %s", e)
+            return "Another app is using the clipboard: try again"
+        return ""
+
+    def meeting_shortcut_clash(self) -> str:
+        """The tool already using Meeting mode's shortcut, or "": the shortcut then stays with that tool."""
+        s = self.settings
+        for name, shortcut in (("Live translation", s.live_shortcut), ("Translate", s.translate_shortcut),
+                               ("Text Transform", s.transform_shortcut)):
+            if s.meeting_shortcut and shortcut == s.meeting_shortcut:
+                return name
+        return ""
+
+    def _start_meeting_shortcut(self) -> None:
+        """Ctrl+Alt+M (or the user's choice) starts and stops a meeting from any app."""
+        if self.meeting_listener is not None:
+            self.meeting_listener.stop()
+            self.meeting_listener = None
+        shortcut, label = self.settings.meeting_shortcut, ""
+        if shortcut and not self.meeting_shortcut_clash():
+            try:
+                self.meeting_listener = HotkeyListener(parse_hotkey(shortcut))
+                self.meeting_listener.on_event = self.signals.meeting_key.emit
+                self.meeting_listener.start()
+                label = parse_hotkey(shortcut).label
+            except (ValueError, OSError) as e:
+                log.warning("Meeting mode's shortcut %r doesn't work: %s", shortcut, e)
+                self.meeting_listener = None
+        self.meeting_action.setText(f"Meeting mode\t{label.title()}" if label else "Meeting mode")
+
+    def _meeting_key_pump(self) -> None:
+        listener = self.meeting_listener
+        while listener is not None and not listener.events.empty():
+            event, _ = listener.events.get_nowait()
+            if event == "press":
+                self.toggle_meeting()
 
     def run_translation(self, text: str, target: str, second: str = ""):
         """`text` translated (sst.translate.Translation); raises when the provider can't be asked."""
@@ -1933,9 +2262,11 @@ class TrayApp:
         self.wake.stop()
         self.transforms.stop()
         self.translator.stop()
+        self.stop_meeting()  # the recording is kept; minutes still being written are lost with Rflow
         self.live.stop()
-        if self.live_listener is not None:
-            self.live_listener.stop()
+        for listener in (self.live_listener, self.meeting_listener):
+            if listener is not None:
+                listener.stop()
         if self.listener:
             self.listener.stop()
         if self.dictation:
@@ -1978,11 +2309,17 @@ class TrayApp:
     def _set_status(self, message: str, ready: bool = False) -> None:
         self._status = (message, ready)  # a window built later (another profile) shows it too
         self.status_action.setText(message)
-        self.tray.setToolTip(f"{APP_NAME}: {message}")
+        self.tray.setToolTip(f"{APP_NAME}: recording the meeting" if self.meeting is not None else f"{APP_NAME}: {message}")
         self.window.set_status(message, ready)
 
-    def _notify(self, title: str, message: str, icon=QSystemTrayIcon.MessageIcon.Information) -> None:
+    def _notify(self, title: str, message: str, icon=QSystemTrayIcon.MessageIcon.Information,
+                on_click: Callable[[], None] | None = None) -> None:
+        self._on_message = on_click  # a notification replaces the one before, and what clicking it did
         self.tray.showMessage(title, message, icon, 5000)
+
+    def _message_clicked(self) -> None:
+        action, self._on_message = self._on_message, None
+        action() if action is not None else self.window.open()
 
     def _tell(self, message: str) -> None:
         """A warning the user must see: a notification now, or once the tray icon is there (while starting)."""

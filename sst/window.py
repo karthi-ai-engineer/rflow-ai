@@ -157,6 +157,18 @@ LIVE_SOURCE_WORDS = {
 }
 LIVE_SPEEDS = [("Normal", 1.0), ("A little faster", 1.15), ("Faster", 1.3)]
 LIVE_SHORTCUTS = [("Ctrl+Alt+L", "ctrl+alt+l"), ("Ctrl+Shift+L", "ctrl+shift+l"), ("Win+Alt+L", "win+alt+l"), ("Off", "")]
+MEETING_SHORTCUTS = [("Ctrl+Alt+M", "ctrl+alt+m"), ("Ctrl+Shift+M", "ctrl+shift+m"), ("Win+Alt+M", "win+alt+m"),
+                     ("Off", "")]
+# Meeting mode's parts (Settings.meeting_<part>): its title and what it does, one line each
+MEETING_PARTS = [
+    ("translate", "Live translation", "The translation bar runs during the meeting, as set on Live translation."),
+    ("record", "Record", "The others (what the laptop plays) and you (the microphone), saved as sound files on this laptop."),
+    ("minutes", "Minutes", "After the meeting: who said what, a summary, the decisions, and the action items with owners "
+                           "and dates. Needs Record."),
+    ("screen", "Screen", "The meeting window seen every 5 seconds; a slide is kept when the screen changes, and given to "
+                         "the minutes."),
+]
+MEETING_REFRESH_MS = 5000  # the meeting's line (time, cost, slides) and the meetings found, while the page is shown
 TRANSLATE_SHORTCUTS = [("Ctrl+C+C (press Ctrl+C twice)", "ctrl+c+c"), ("Ctrl+Alt+L", "ctrl+alt+l"), ("Off", "")]
 TRANSFORM_HOTKEYS = [("Double-tap Ctrl", "double ctrl"), ("Ctrl+Alt+T", "ctrl+alt+t"), ("F8", "f8"), ("Off", "")]
 WHERE_LABELS = {"local": "On this PC", "cloud": "In the cloud", "server": "Your own server"}
@@ -4672,6 +4684,368 @@ class LivePage(Page):
         self.refresh()
 
 
+def meeting_line(app_name: str, cost, screen: bool) -> str:
+    """The running meeting in a line: "Microsoft Teams · 14 min · $0.12 so far · 6 slides"."""
+    if cost is None:
+        return app_name
+    words = [app_name, _minutes(cost.seconds), f"{dollars(cost.total)} so far"]
+    if screen:
+        words.append(f"{cost.frames} slide{'' if cost.frames == 1 else 's'}")
+    return " · ".join(words)
+
+
+class MeetingPage(Page):
+    """Meeting mode (sst.meeting): the meeting found by itself (several: a choice; none: "Start a meeting first"), one
+    switch per part (live translation, the recording, the minutes, the slides), a big Start / Stop with a red Recording
+    light and the meeting's time and cost, then "Writing the minutes…" and "Minutes ready" with Open and Copy, and the
+    past meetings. Like the Live page it shows the real state, however the meeting was started: here, the shortcut, the
+    tray, or the meeting window closing by itself."""
+
+    def __init__(self, app, go_to):
+        super().__init__("Meeting mode", "Your meeting translated, recorded and written up: the minutes, decisions and "
+                                         "action items, from Teams, Zoom, Google Meet or Webex.")
+        self.app = app
+        self.found: list | None = None  # the meetings open now (MeetingWindow), from the last look
+        self.chosen = None  # the one picked of them
+        self._timer = QTimer(self, interval=MEETING_REFRESH_MS, timeout=self._tick)
+        self.connect_card, connect = card(12, (16, 12, 12, 12), kind="well", horizontal=True)
+        info = QLabel()
+        info.setPixmap(theme.icon_pixmap("info", tok("warn").name(), 16, 1.0))
+        connect.addWidget(info)
+        self.connect_words = caption("", "2")
+        connect.addWidget(self.connect_words, 1)
+        self.connect_button = button("Add a Gemini key", lambda: LivePage._add_key(self, go_to), primary=True, size="sm")
+        connect.addWidget(self.connect_button)
+        self.add(self.connect_card)
+
+        # Start / Stop first, with the Recording light and the meeting's line next to it
+        self.start_card = GlowCard()
+        column = QVBoxLayout(self.start_card)
+        column.setContentsMargins(24, 24, 24, 20)
+        column.setSpacing(16)
+        self.start_button = PowerButton("Start")
+        self.start_button.clicked.connect(self._start_clicked)
+        self.light = BlinkLamp("off")
+        self.state = label("Off", "heading", wrap=False)
+        status = QHBoxLayout()
+        status.setSpacing(8)
+        status.addWidget(self.light, 0, Qt.AlignmentFlag.AlignVCenter)
+        status.addWidget(self.state, 0, Qt.AlignmentFlag.AlignVCenter)
+        status.addStretch()
+        words = QVBoxLayout()
+        words.setSpacing(4)
+        words.addStretch()  # centred on the button
+        words.addLayout(status)
+        self.doing = label("", tone="2")
+        words.addWidget(self.doing)
+        self.done_row = QWidget()  # the minutes written: Open and Copy them, or the folder
+        done = QHBoxLayout(self.done_row)
+        done.setContentsMargins(0, 4, 0, 0)
+        done.setSpacing(4)
+        self.open_minutes = button("Open the minutes", lambda: self._open_last(), link=True, size="sm", icon="external")
+        self.copy_last = button("Copy", link=True, size="sm", icon="copy")
+        self.copy_last.clicked.connect(lambda: self._copy(self.copy_last, self.app.meeting_status()[2], "Copy"))
+        self.open_last_folder = button("Open the folder", lambda: self.app.open_meeting_folder(self.app.meeting_status()[2]),
+                                       link=True, size="sm", icon="folder")
+        for b in (self.open_minutes, self.copy_last, self.open_last_folder):
+            done.addWidget(b)
+        done.addStretch()
+        self.done_row.hide()
+        words.addWidget(self.done_row)
+        words.addStretch()
+        top = QHBoxLayout()
+        top.setSpacing(20)
+        top.addWidget(self.start_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        top.addLayout(words, 1)
+        column.addLayout(top)
+        self.how = QHBoxLayout()
+        self.how.setSpacing(6)
+        column.addLayout(self.how)
+        self.note = caption("", "3")
+        self.note.hide()
+        column.addWidget(self.note)
+        self.add(self.start_card)
+
+        # The meeting: found by itself; several to pick from; none yet
+        self.app_card, column = card(8, (20, 18, 20, 18))
+        column.addLayout(row(label("Your meeting", "heading"), button("Look again", lambda: self._scan(), link=True,
+                                                                     size="sm", icon="search"), stretch_at=1))
+        self.app_line = QWidget()
+        line = QHBoxLayout(self.app_line)
+        line.setContentsMargins(0, 0, 0, 0)
+        line.setSpacing(10)
+        self.app_lamp = Lamp("ok")
+        self.app_name = label("", wrap=False)
+        self.app_name.setFont(font(14, 600))
+        self.app_title = ElidedLabel("")
+        set_tone(self.app_title, "2")
+        line.addWidget(self.app_lamp, 0, Qt.AlignmentFlag.AlignVCenter)
+        line.addWidget(self.app_name, 0, Qt.AlignmentFlag.AlignVCenter)
+        line.addWidget(self.app_title, 1, Qt.AlignmentFlag.AlignVCenter)
+        column.addWidget(self.app_line)
+        self.picker = Choice(small=True)
+        self.picker.setMinimumWidth(320)
+        self.picker.currentIndexChanged.connect(self._picked)
+        column.addWidget(self.picker, 0, Qt.AlignmentFlag.AlignLeft)
+        self.app_words = caption("", "2")
+        column.addWidget(self.app_words)
+        self.add(self.app_card)
+
+        # One switch per part
+        parts, column = card(4, (20, 6, 20, 6))
+        self.parts: dict[str, Toggle] = {}
+        self.part_rows: dict[str, QWidget] = {}
+        for i, (part, title, words_text) in enumerate(MEETING_PARTS):
+            if i:
+                column.addWidget(divider())
+            toggle = Toggle(title)
+            toggle.toggled.connect(lambda on, p=part: self._part_toggled(p, on))
+            self.parts[part] = toggle
+            self.part_rows[part] = setting_row(title, words_text, toggle)[0]
+            column.addWidget(self.part_rows[part])
+        self.add(parts)
+
+        options, column = card(4, (20, 6, 20, 6))
+        self.shortcut = Choice(small=True)
+        for label_text, value in MEETING_SHORTCUTS:
+            self.shortcut.addItem(label_text, value)
+        self.shortcut.setMinimumWidth(200)
+        self.shortcut.currentIndexChanged.connect(self._shortcut_chosen)
+        self.shortcut_row, _, self.shortcut_caption = setting_row("Shortcut", "", self.shortcut)
+        column.addWidget(self.shortcut_row)
+        self.add(options)
+
+        meetings, column = card(4, (20, 18, 20, 16))
+        column.addLayout(row(label("Past meetings", "heading"), button("Open the folder", lambda: app.open_meeting_folder(),
+                                                                         link=True, size="sm", icon="folder"),
+                             stretch_at=1))
+        self.meeting_rows = QVBoxLayout()
+        self.meeting_rows.setSpacing(0)
+        column.addLayout(self.meeting_rows)
+        self.add(meetings)
+        self.add(caption("The minutes cost about $0.25 an hour of meeting with a paid Gemini key; live translation costs "
+                         "as on its page. The recording and the slides go to Google for the minutes, and with a free key "
+                         "Google may use them to improve its products. Everything is kept on this laptop.", "3"))
+        self.body.addStretch()
+
+    # ---- the meetings found
+
+    def _scan(self) -> None:
+        """Look for the meeting windows again; the one picked stays picked while it's open."""
+        found = list(self.app.meeting_windows())
+        keep = self.chosen.hwnd if self.chosen is not None else None
+        self.found = found
+        self.chosen = next((w for w in found if w.hwnd == keep), found[0] if len(found) == 1 else None)
+        self.refresh()
+
+    def _picked(self, index: int) -> None:
+        if self.found and 0 < index <= len(self.found):  # the first choice is "Pick your meeting"
+            self.chosen = self.found[index - 1]
+        else:
+            self.chosen = None
+        self.refresh()
+
+    def _fill_picker(self) -> None:
+        self.picker.blockSignals(True)
+        self.picker.clear()
+        self.picker.addItem("Pick your meeting", None)
+        for w in self.found or []:
+            self.picker.addItem(f"{w.app}: {w.title}", w.hwnd)
+        at = self.picker.findData(self.chosen.hwnd) if self.chosen is not None else 0
+        self.picker.setCurrentIndex(max(0, at))
+        self.picker.blockSignals(False)
+
+    # ---- on screen
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._timer.start()
+
+    def hideEvent(self, event):
+        self._timer.stop()  # a hidden page looks for nothing
+        super().hideEvent(event)
+
+    def _tick(self) -> None:
+        if self.app.meeting_status()[0] == "recording":
+            self.refresh()  # the time, the cost and the slides go on
+        else:
+            self._scan()  # a meeting started meanwhile shows by itself
+
+    def refresh(self) -> None:
+        if self.found is None:
+            self._scan()  # the first time it's shown (it refreshes itself)
+            return
+        s, app = self.app.settings, self.app
+        state, window, folder, result, error = app.meeting_status()
+        running, writing = state == "recording", state == "writing minutes"
+        problem = app.meeting_problem()
+        self.connect_card.setVisible(bool(problem) and not running)
+        self.connect_words.setText(problem)
+        self.connect_button.setVisible("Gemini key" in problem)
+        ready = self.chosen is not None and not problem and not writing
+        self.start_button.set_running(running, "Stop" if running else "Start")
+        self.start_button.setEnabled(running or ready)
+        self.light.set_state({"recording": "live", "writing minutes": "ai", "done": "ok", "failed": "err"}.get(state, "off"))
+        self.light.set_blinking(running or writing)  # its timer also stops while the page is hidden
+        if running:
+            heading, tone = "Recording" if self._options_of_last("record") else "On", "live"
+            doing = meeting_line(window.app, app.meeting_cost(), self._options_of_last("screen"))
+        elif writing:
+            heading, tone = "Writing the minutes…", None
+            doing = f"{meeting_line(window.app, app.meeting_cost(), False)}: they're ready in a few minutes."
+        elif state == "done" and result is not None:
+            heading, tone, doing = "Minutes ready", None, result.title
+        elif state == "done":
+            heading, tone, doing = "Saved", None, f"The meeting in {window.app} is saved on this laptop."
+        elif state == "failed":
+            heading, tone, doing = "The minutes failed", None, f"{error}. The recording is kept: nothing is lost."
+        else:
+            heading, tone = "Off", None
+            doing = ("Add a Gemini key to start it" if "Gemini key" in problem else "Switch on a part to start it" if problem
+                     else f"Ready for your meeting in {self.chosen.app}" if self.chosen is not None
+                     else "Pick your meeting below" if self.found else "Start a meeting first")
+        self.state.setText(heading)
+        set_tone(self.state, tone)
+        self.doing.setText(doing)
+        finished = state in ("done", "failed") and folder is not None
+        self.done_row.setVisible(finished)
+        self.open_minutes.setVisible(result is not None)
+        self.copy_last.setVisible(result is not None)
+        self.open_last_folder.setVisible(result is None)
+        clash = app.meeting_shortcut_clash()
+        clear(self.how)
+        if s.meeting_shortcut and not clash:
+            self.how.addWidget(caption("Start and stop it in any app with", "2", wrap=False))
+            self.how.addWidget(_shortcut_caps(s.meeting_shortcut))
+        else:
+            self.how.addWidget(caption("Start it here, or from the tray menu", "2", wrap=False))
+        self.how.addStretch()
+        self._refresh_app(running or writing, window)
+        self._refresh_parts(s, running)
+        self.shortcut.blockSignals(True)
+        if self.shortcut.findData(s.meeting_shortcut) < 0:  # a shortcut set by hand
+            self.shortcut.insertItem(self.shortcut.count() - 1, s.meeting_shortcut, s.meeting_shortcut)
+        self.shortcut.setCurrentIndex(self.shortcut.findData(s.meeting_shortcut))
+        self.shortcut.blockSignals(False)
+        self.shortcut_caption.setText(f"{key_names(parse_hotkey(s.meeting_shortcut).label)} is {clash}'s shortcut, so "
+                                      f"it stays with {clash}: choose another." if clash
+                                      else "Starts and stops the meeting in any app, with the meeting found.")
+        self.shortcut_caption.show()
+        self._refresh_past()
+
+    def _options_of_last(self, part: str) -> bool:
+        """A part as the meeting running started with it (a switch changed meanwhile waits for the next one)."""
+        last = getattr(self.app, "last_meeting", None)
+        options = getattr(last, "options", None)
+        return getattr(options, part) if options is not None else getattr(self.app.settings, f"meeting_{part}")
+
+    def _refresh_app(self, busy: bool, window) -> None:
+        shown = window if busy else self.chosen
+        several = not busy and len(self.found or []) > 1
+        self.app_line.setVisible(shown is not None and not several)
+        if shown is not None:
+            self.app_name.setText(shown.app)
+            self.app_title.setText(shown.title)
+            self.app_lamp.set_state("live" if busy else "ok")
+        self.picker.setVisible(several)
+        if several:
+            self._fill_picker()
+        self.picker.setEnabled(not busy)
+        if busy:
+            words = ""
+        elif several:
+            words = f"{len(self.found)} meetings are open: pick the one to record."
+        elif shown is not None:
+            words = "Found by itself. Start when the meeting begins; it stops by itself when the meeting window closes."
+        else:
+            words = ("Start a meeting first: Microsoft Teams, Zoom, Google Meet in a browser, or Webex. Rflow finds it "
+                     "by itself.")
+        self.app_words.setText(words)
+        self.app_words.setVisible(bool(words))
+
+    def _refresh_parts(self, s, running: bool) -> None:
+        on = {part: getattr(s, f"meeting_{part}") for part, *_ in MEETING_PARTS}
+        works = {"translate": on["translate"], "record": on["record"], "minutes": on["minutes"] and on["record"]}
+        works["screen"] = on["screen"] and works["minutes"]
+        for part, toggle in self.parts.items():
+            toggle.blockSignals(True)
+            toggle.setChecked(works[part])
+            toggle.blockSignals(False)
+            # a running meeting keeps the parts it started with; the minutes need the sound, the slides the minutes
+            needs = {"minutes": on["record"], "screen": works["minutes"]}.get(part, True)
+            toggle.setEnabled(not running and needs)
+            self.part_rows[part].setToolTip("" if needs else "Needs Record" if part == "minutes" else "Needs the minutes")
+
+    def _refresh_past(self) -> None:
+        clear(self.meeting_rows)
+        found = self.app.past_meetings()
+        if not found:
+            self.meeting_rows.addWidget(caption("Each meeting is kept here: its recording, its slides and its minutes.",
+                                                "3"))
+        for folder, began, app_name, seconds, has_minutes in found:
+            line = QWidget()
+            layout = QHBoxLayout(line)
+            layout.setContentsMargins(0, 6, 0, 6)
+            layout.setSpacing(12)
+            layout.addWidget(label(f"{began:%a} {began.day} {began:%b}, {began:%H:%M}", wrap=False))
+            layout.addWidget(caption(f"{app_name} · {_minutes(seconds)}" + ("" if has_minutes else " · no minutes"), "3",
+                                     wrap=False), 1)
+            if has_minutes:
+                copy = button("Copy minutes", link=True, size="sm", icon="copy")
+                copy.clicked.connect(lambda _=False, b=copy, f=folder: self._copy(b, f, "Copy minutes"))
+                layout.addWidget(copy)
+                layout.addWidget(button("Open minutes", lambda _=False, f=folder: self.app.open_meeting(f), link=True,
+                                        size="sm"))
+            elif (folder / "others.wav").is_file() or (folder / "you.wav").is_file():  # quit or failed while written
+                writing = folder in self.app.writing_minutes
+                write = button("Writing the minutes…" if writing else "Write minutes",
+                               lambda _=False, f=folder: self.app.write_minutes(f), link=True, size="sm")
+                write.setEnabled(not writing)
+                write.setToolTip("The minutes from the recording, by Gemini (about $0.25 an hour)")
+                layout.addWidget(write)
+            layout.addWidget(button("Open folder", lambda _=False, f=folder: self.app.open_meeting_folder(f), link=True,
+                                    size="sm"))
+            self.meeting_rows.addWidget(line)
+
+    # ---- what the user does
+
+    def _say(self, message: str) -> None:
+        self.note.setText(message)
+        self.note.setVisible(bool(message))
+
+    def _start_clicked(self) -> None:
+        if self.app.meeting_status()[0] == "recording":
+            self.app.stop_meeting()
+            self._say("")
+        else:
+            problem = self.app.start_meeting(self.chosen)
+            self._say("" if problem == "Not started." else problem)
+        self.refresh()
+
+    def _open_last(self) -> None:
+        folder = self.app.meeting_status()[2]
+        if folder is not None:
+            self.app.open_meeting(folder)
+
+    def _copy(self, copy: Button, folder, words: str) -> None:
+        """A meeting's minutes onto the clipboard; the button says "Copied", or why not, for a moment."""
+        problem = self.app.copy_minutes(folder) if folder is not None else "Nothing to copy"
+        if problem:
+            copy.setToolTip(problem)
+        LivePage._show_copied(copy, "Couldn't copy" if problem else "Copied", "warning" if problem else "check")
+        QTimer.singleShot(1500, lambda: LivePage._show_copied(copy, words, "copy"))
+
+    def _part_toggled(self, part: str, on: bool) -> None:
+        self.app.set_meeting_option(part, on)
+        self.refresh()
+
+    def _shortcut_chosen(self, *_) -> None:
+        chosen = self.shortcut.currentData()
+        if chosen != self.app.settings.meeting_shortcut:
+            self.app.apply_settings(dataclasses.replace(self.app.settings, meeting_shortcut=chosen))
+        self.refresh()
+
+
 # What each transform does, shown on its page: realistic dictations and what Rflow makes of them. The tests check every
 # one with the real TransformGuard, so each result is one Rflow would accept (nothing invented, nothing lost).
 TRANSFORM_EXAMPLES = {
@@ -6785,23 +7159,25 @@ class ProfilesPage(Page):
 
 # ---------------------------------------------------------------- the window
 
-NAV = [("home", "Home"), ("live", "Live translation"), ("words", "Words"), ("snippets", "Snippets"),
-       ("transform", "Text Transform"), ("translate", "Translate"), ("formatting", "Formatting"), ("models", "AI & models"),
-       ("settings", "Settings"), ("report", "Report a problem")]
-NAV_ICONS = {"home": "home", "live": "live", "words": "words", "snippets": "snippets", "transform": "transform",
-             "translate": "translate", "formatting": "formatting", "models": "models", "settings": "settings",
-             "report": "report"}
-RAIL_NAMES = {"live": "Live", "transform": "Transform", "formatting": "Format", "models": "AI", "report": "Report"}
+NAV = [("home", "Home"), ("live", "Live translation"), ("meeting", "Meeting mode"), ("words", "Words"),
+       ("snippets", "Snippets"), ("transform", "Text Transform"), ("translate", "Translate"), ("formatting", "Formatting"),
+       ("models", "AI & models"), ("settings", "Settings"), ("report", "Report a problem")]
+NAV_ICONS = {"home": "home", "live": "live", "meeting": "meeting", "words": "words", "snippets": "snippets",
+             "transform": "transform", "translate": "translate", "formatting": "formatting", "models": "models",
+             "settings": "settings", "report": "report"}
+RAIL_NAMES = {"live": "Live", "meeting": "Meeting", "transform": "Transform", "formatting": "Format", "models": "AI",
+              "report": "Report"}
 # The section each page belongs to (its sidebar button), and the page a section opens on. "tools" was the section of
 # Text Transform and Translate until phase 31: a link to it (from another page, an older build) opens Text Transform.
-SECTION = {"home": "home", "live": "live", "dictionary": "words", "snippets": "snippets", "transform": "transform",
-           "translate": "translate", "formatting": "formatting", "models": "models", "speech": "models", "cleanup": "models",
-           "settings": "settings", "reading": "settings", "profiles": "settings", "report": "report"}
+SECTION = {"home": "home", "live": "live", "meeting": "meeting", "dictionary": "words", "snippets": "snippets",
+           "transform": "transform", "translate": "translate", "formatting": "formatting", "models": "models",
+           "speech": "models", "cleanup": "models", "settings": "settings", "reading": "settings", "profiles": "settings",
+           "report": "report"}
 OPENS = {"words": "dictionary", "tools": "transform"}
 REFRESHED = ("home", "dictionary", "snippets", "profiles", "speech", "cleanup", "transform", "translate", "formatting",
-             "live", "models", "settings", "report")
-# A sidebar button's height (roomy, tight), in the sidebar and in the narrow rail: ten sections fit the smallest window.
-NAV_HEIGHTS = {False: (40, 30), True: (52, 36)}
+             "live", "meeting", "models", "settings", "report")
+# A sidebar button's height (roomy, tight), in the sidebar and in the narrow rail: eleven sections fit the smallest window.
+NAV_HEIGHTS = {False: (40, 26), True: (52, 33)}
 
 
 class NavButton(Button):
@@ -6948,9 +7324,9 @@ class MainWindow(QWidget):
 
         self._update_status = ""  # Settings' update line, kept for when that page is built
         kinds = {"home": HomePage, "dictionary": DictionaryPage, "snippets": SnippetsPage, "live": LivePage,
-                 "transform": TransformPage, "translate": TranslatePage, "formatting": FormattingPage, "report": ReportPage,
-                 "models": ModelsPage, "speech": SpeechPage, "cleanup": CleanupPage, "settings": SettingsPage,
-                 "reading": ReadingTestPage, "profiles": ProfilesPage, "welcome": WelcomePage}
+                 "meeting": MeetingPage, "transform": TransformPage, "translate": TranslatePage, "formatting": FormattingPage,
+                 "report": ReportPage, "models": ModelsPage, "speech": SpeechPage, "cleanup": CleanupPage,
+                 "settings": SettingsPage, "reading": ReadingTestPage, "profiles": ProfilesPage, "welcome": WelcomePage}
         self.stack = QStackedWidget()
         self.pages = Pages({key: lambda kind=kind: kind(app, self.show_page) for key, kind in kinds.items()},
                            self._page_built)
@@ -7486,6 +7862,73 @@ class PreviewApp:
     def set_live_duck(self, depth: float) -> None:
         self.calls.append(("set_live_duck", depth))
         self.apply_settings(dataclasses.replace(self.settings, live_duck=depth))
+
+    # Meeting mode, for screenshots and tests: nothing is recorded, looked at or sent
+    _meeting_windows: tuple = ()  # the meetings "open now" (MeetingWindow or alike: app, title, hwnd, pid)
+    _meeting: tuple = ("", None, None, None, "")  # (state, window, folder, result, error), as TrayApp.meeting_status
+    _meeting_cost = None  # the meeting's MeetingCost (or alike: total, seconds, frames)
+    _past_meetings: tuple = ()  # (folder, started, app, seconds, has minutes)
+    last_meeting = None
+
+    def meeting_windows(self) -> list:
+        return list(self._meeting_windows)
+
+    def meeting_status(self) -> tuple:
+        return self._meeting
+
+    def meeting_cost(self):
+        return self._meeting_cost if self._meeting[0] else None
+
+    def meeting_problem(self) -> str:
+        s = self.settings
+        if not (s.meeting_translate or s.meeting_record):
+            return "Switch on live translation or Record first."
+        if (s.meeting_translate or s.meeting_minutes and s.meeting_record) and not self.gateway.key_for("gemini"):
+            return "Live translation and the minutes use Google Gemini: add a Gemini key in AI & models."
+        return ""
+
+    def start_meeting(self, window) -> str:
+        self.calls.append(("start_meeting", getattr(window, "app", None)))
+        problem = "Start a meeting first: Teams, Zoom, Google Meet or Webex." if window is None else self.meeting_problem()
+        if not problem:
+            self._meeting = ("recording", window, Path("meetings") / f"2026-10-27 1003 {window.app}", None, "")
+        return problem
+
+    def stop_meeting(self) -> None:
+        self.calls.append(("stop_meeting",))
+        state, window, folder, _, _ = self._meeting
+        if state == "recording":
+            self._meeting = ("writing minutes" if self.settings.meeting_minutes else "done", window, folder, None, "")
+
+    def set_meeting_option(self, name: str, on: bool) -> None:
+        self.calls.append(("set_meeting_option", name, on))
+        self.apply_settings(dataclasses.replace(self.settings, **{f"meeting_{name}": on}))
+
+    def past_meetings(self, limit: int = 8) -> list:
+        return list(self._past_meetings)[:limit]
+
+    def open_meeting(self, folder) -> None:
+        self.calls.append(("open_meeting", folder))
+
+    writing_minutes: set = set()
+
+    def write_minutes(self, folder) -> None:
+        self.calls.append(("write_minutes", folder))
+
+    def open_meeting_folder(self, folder=None) -> None:
+        self.calls.append(("open_meeting_folder", folder))
+
+    def copy_minutes(self, folder) -> str:
+        self.calls.append(("copy_minutes", folder))
+        return ""
+
+    def meeting_shortcut_clash(self) -> str:
+        s = self.settings
+        for name, shortcut in (("Live translation", s.live_shortcut), ("Translate", s.translate_shortcut),
+                               ("Text Transform", s.transform_shortcut)):
+            if s.meeting_shortcut and shortcut == s.meeting_shortcut:
+                return name
+        return ""
 
     _wake: WakeState | None = None  # the wake word as the card shows it, for screenshots and tests
 

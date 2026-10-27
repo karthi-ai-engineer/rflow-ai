@@ -259,6 +259,21 @@ def test_the_wake_word_setup_is_kept_in_the_profile_and_goes_with_it(tmp_path, m
     assert settings.read_wake(rahul.wake_file) is None
 
 
+def test_meeting_mode_has_every_part_on_and_ctrl_alt_m_until_changed(tmp_path, monkeypatch):
+    s = Settings()
+    assert (s.meeting_translate, s.meeting_record, s.meeting_minutes, s.meeting_screen) == (True, True, True, True)
+    assert s.meeting_shortcut == "ctrl+alt+m" and not s.meeting_told
+    path = tmp_path / "settings.json"
+    Settings(meeting_translate=False, meeting_screen=False, meeting_shortcut="", meeting_told=True).save(path)
+    loaded = Settings.load(path)
+    assert not loaded.meeting_translate and loaded.meeting_record and not loaded.meeting_screen
+    assert loaded.meeting_shortcut == "" and loaded.meeting_told
+    monkeypatch.setattr(settings, "CONFIG_DIR", tmp_path)
+    profiles = Profiles()
+    assert profiles.current.meetings_folder == tmp_path / "meetings"  # in the profile: each person's meetings their own
+    assert profiles.add("Rahul").meetings_folder == tmp_path / "profiles" / "rahul" / "meetings"
+
+
 def test_a_damaged_wake_word_setup_is_ignored(tmp_path):
     path = tmp_path / "wake.json"
     path.write_text("{ not json", encoding="utf-8")

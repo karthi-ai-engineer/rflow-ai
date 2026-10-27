@@ -51,6 +51,13 @@ class Settings:
     live_voice: str = "en_US-danny-low"  # the voice (sst.live.voice VOICES)
     live_save: bool = False  # the cost saver: audio goes to Google only while someone talks (sst.live LiveConfig.save)
     live_told: bool = False  # the notice (audio goes to Google, the cost) was accepted once
+    # Meeting mode (sst.meeting): one switch per part, all started and stopped with the meeting
+    meeting_translate: bool = True  # live translation's bar runs during the meeting
+    meeting_record: bool = True  # the others (what the laptop plays) and you (the microphone), saved on this laptop
+    meeting_minutes: bool = True  # after it: transcript with speakers, minutes, decisions, action items (needs the recording)
+    meeting_screen: bool = True  # the meeting window's changed frames (slides) given to the minutes
+    meeting_shortcut: str = "ctrl+alt+m"  # starts and stops a meeting from any app ("" = none)
+    meeting_told: bool = False  # the notice (people should know it's recorded; audio and frames go to Google) accepted once
     # The Gemini key is on Google's free tier: the cost card says "$0 billed (would cost $X)". No key can tell its tier,
     # and nothing sets it yet (TODO: the owner decides how it is asked or found out).
     gemini_free_tier: bool = False
@@ -260,6 +267,11 @@ class Profile:
     @property
     def settings_file(self) -> Path:
         return self.folder() / "settings.json"
+
+    @property
+    def meetings_folder(self) -> Path:
+        """Meeting mode's meetings, one folder each (sst.meeting): the recording, the frames, the minutes."""
+        return self.folder() / "meetings"
 
     @property
     def history_file(self) -> Path:
