@@ -46,7 +46,7 @@ def test_a_paste_waits_while_the_keys_are_held_for_the_next_dictation(monkeypatc
 
 
 def test_a_paste_is_never_pressed_with_the_keys_still_held(monkeypatch):
-    clock = iter(range(0, 1000, 10))
+    clock = iter(range(0, 100_000, 100))  # past HELD_WAIT (an hour, a dictation's longest)
     monkeypatch.setattr(paste, "_modifiers_held", lambda: True)
     monkeypatch.setattr(paste.time, "monotonic", lambda: next(clock))
     monkeypatch.setattr(paste.time, "sleep", lambda seconds: None)

@@ -766,3 +766,23 @@ def test_a_refused_call_and_other_providers_are_not_counted(fake, ledger):
         fake.engine("gemini", path="/v1beta").transcribe_chunk(AUDIO, RATE)
     fake.engine("groq").transcribe(AUDIO, RATE)
     assert ledger.days == {}
+
+
+LONG = (0.1 * np.sin(np.linspace(0, 20000, 12 * 16_000))).astype(np.float32)  # twelve seconds at 16 kHz
+
+
+def test_a_long_recording_transcribed_whole_goes_in_pieces(fake, monkeypatch):
+    monkeypatch.setattr(cloud, "WHOLE_PIECE_SECONDS", 6)  # stands in for 5 minutes: an hour's dictation in a few requests
+    engine = fake.engine("groq")
+    text = engine.transcribe(LONG, 16_000)
+    sizes = [_wav(r["fields"]["file"])[1] for r in fake.requests]
+    assert len(sizes) >= 2 and sum(sizes) == len(LONG) and max(sizes) <= 6 * 16_000  # cut at the quietest moments
+    assert text == " ".join(["Hello from OpenAI."] * len(sizes))
+
+
+def test_a_long_recording_with_a_piece_that_fails_is_typed_whole_by_parakeet(fake, monkeypatch):
+    monkeypatch.setattr(cloud, "WHOLE_PIECE_SECONDS", 6)
+    parakeet = Parakeet()
+    engine = fake.engine(fallback=lambda: parakeet)
+    fake.statuses = [200, 500, 500]  # the second piece fails: never the first piece alone, with a hole after it
+    assert engine.transcribe(LONG, 16_000) == "hello from parakeet" and parakeet.calls == 1

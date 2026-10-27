@@ -38,7 +38,8 @@ MODEL = Download(FOLDER, f"https://huggingface.co/{REPO}/resolve/{REVISION}/", (
 ))
 VOCAB = Path(__file__).resolve().parent.parent / "static" / "parakeet" / "bpe.vocab"  # comes with Rflow
 # Audio longer than this is transcribed in pieces cut at pauses: as one piece, onnxruntime fails somewhere
-# between 4 and 9 minutes (257 s worked, 514 s crashed). Up to 3 minutes (a whole dictation) stays one piece:
+# between 4 and 9 minutes (257 s worked, 514 s crashed). Up to 3 minutes stays one piece (the voice
+# pipeline's chunks are ~20 s; a longer dictation transcribed whole, as a last resort, goes in 3-minute pieces):
 # cutting at 30 s dropped a whole sentence that the model gets right with the full context.
 MAX_PIECE_SECONDS = 180
 # How strongly the user's words are favoured. Chosen on the owner's tuning sets (0.5 / 1.0 / 1.5 / 2.0): 1.0 was best
