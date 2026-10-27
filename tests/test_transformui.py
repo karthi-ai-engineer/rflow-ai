@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from sst.settings import Settings  # noqa: E402
 from sst.transform import TransformResult  # noqa: E402
-from sst.transformui import BOX_LIMIT, MENU_KEYS, TOO_LONG, UNDO, TransformController, edges  # noqa: E402
+from sst.transformui import BOX_LIMIT, MENU_KEYS, TOO_LONG, TOO_MUCH, UNDO, TransformController, edges  # noqa: E402
 
 ORIGINAL = "I checked the deployment and everything looks good, but we still have one issue with the database migration."
 CONCISE = "Deployment looks good, but the database migration issue remains."
@@ -214,7 +214,7 @@ def test_where_select_all_copies_nothing_the_last_dictation_is_used(qt):
 
 @pytest.mark.parametrize("caret_far", [False, True])
 def test_a_whole_document_is_never_transformed(qt, caret_far):
-    document = "Chapter one. " * 200  # 2,600 characters: most likely a document, not a message
+    document = "Chapter one. " * 1600  # 20,800 characters: most likely a document, not a message
     controller, access, app = make(selection=None, box=document)
     if caret_far:  # the caret far into it: seen before Ctrl+A is pressed
         access.text_before_caret = lambda: access.keys.append("before") or document
@@ -232,6 +232,78 @@ def test_a_box_of_up_to_the_limit_is_transformed(qt):
     controller.run_command("concise")
     assert wait_until(lambda: not controller.busy and access.pasted)
     assert app.asked == [("concise", "a" * BOX_LIMIT)]
+
+
+LONG_DICTATION = " ".join([ORIGINAL] * 40)  # 3-4 minutes of dictation: 720 words, 4,400 characters
+
+
+@pytest.mark.parametrize("command", ["concise", "bullets", "professional"])
+def test_a_long_dictation_in_the_box_is_transformed(qt, command):
+    """The owner's 3-4 minutes of dictation, then "make it concise": the box held more than the old 2,000-character limit,
+    so nothing was ever sent to the model."""
+    controller, access, app = make(selection=None, box=LONG_DICTATION)
+    controller.run_command(command)
+    assert wait_until(lambda: not controller.busy and access.pasted)
+    assert app.asked == [(command, LONG_DICTATION)] and access.box == CONCISE
+
+
+def test_a_long_selection_is_transformed(qt):
+    controller, access, app = make(selection=LONG_DICTATION * 3)  # 13,000 characters
+    controller.run_command("concise")
+    assert wait_until(lambda: not controller.busy and access.pasted)
+    assert app.asked == [("concise", LONG_DICTATION * 3)]
+
+
+def test_far_too_much_selected_is_said_not_sent(qt):
+    controller, access, app = make(selection="word " * 13_000)  # 65,000 characters: a book selected by mistake
+    controller.run_command("concise")
+    assert wait_until(lambda: not controller.busy and app.said[-1][0] == "warning")
+    assert app.said[-1] == ("warning", TOO_MUCH.format(words=13_000)) and not app.asked and not access.pasted
+
+
+def test_in_a_whole_document_the_last_dictation_typed_there_is_used(qt):
+    document = "Chapter one. " * 1600 + LONG_DICTATION
+    controller, access, app = make(selection=None, box=document)
+    access.text_before_caret = lambda: access.keys.append("before") or document
+    controller.note_typed(LONG_DICTATION + " ", hwnd=7)
+    controller.run_command("concise")
+    assert wait_until(lambda: not controller.busy and access.pasted)
+    assert access.selected_last == [LONG_DICTATION + " "] and app.asked == [("concise", LONG_DICTATION)]
+    assert access.pasted[0][0] == CONCISE + " "  # over the dictation selected again; the document never sent
+
+
+def test_a_menu_without_transforms_unselects_the_box(qt):
+    controller, access, app = make(selection=None, box=ORIGINAL)
+    app.settings.transforms = []
+    open_menu(controller)
+    assert app.said[-1] == ("warning", "No transforms are chosen: pick some on the Text Transform page.")
+    assert wait_until(lambda: not controller.busy)
+    assert access.selection is None and access.keys[-1] == ("unselect", ORIGINAL, ORIGINAL)  # not left selected
+    assert controller.pending is None and not controller.menu.isVisible()
+
+
+def test_the_shortcut_while_a_long_transform_runs_shows_it_is_still_working(qt):
+    import threading
+    release = threading.Event()
+    controller, access, app = make(selection=ORIGINAL)
+    slow = app.run_transform
+    app.run_transform = lambda text, key: release.wait(5) and slow(text, key)
+    controller.run_command("concise")
+    assert wait_until(lambda: controller.working == "concise")
+    controller.trigger()  # double-tap Ctrl again: it used to do nothing at all
+    controller.run_command("bullets")
+    assert app.said[-2:] == [("transforming", "Concise"), ("transforming", "Concise")]
+    release.set()
+    assert wait_until(lambda: not controller.busy and access.pasted) and controller.working == ""
+
+
+def test_a_long_text_with_a_part_kept_as_written_says_so(qt):
+    done = TransformResult("concise", ORIGINAL, CONCISE, CONCISE, "", True, [], 4, 3.0, 3,
+                           ["part 2 of 3 stayed as written: lost '$25,000'"])
+    controller, access, app = make(selection=ORIGINAL, answer=done)
+    controller.run_command("concise")
+    assert wait_until(lambda: not controller.busy and access.pasted)
+    assert app.said[-1] == ("warning", "Concise: Part 2 of 3 stayed as written: lost '$25,000'")
 
 
 def test_undo_restores_all_the_text_of_the_box(qt):
