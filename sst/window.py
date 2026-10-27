@@ -84,6 +84,7 @@ from sst.hotkey import parse_hotkey
 from sst.live.contracts import LANGUAGES as LIVE_LANGUAGES
 from sst.live.contracts import LiveConfig, language_name
 from sst.live.voice import LOCAL as LOCAL_VOICE
+from sst.meeting.apps import IN_PERSON
 from sst.pipeline.contracts import VoiceConfig
 from sst.pipeline.dictionary import speech_hints
 from sst.pipeline.formatting import Formatter
@@ -162,16 +163,39 @@ MEETING_SHORTCUTS = [("Ctrl+Alt+M", "ctrl+alt+m"), ("Ctrl+Shift+M", "ctrl+shift+
 # Meeting mode's parts (Settings.meeting_<part>): its title and what it does, one line each
 MEETING_PARTS = [
     ("translate", "Live translation", "The translation bar runs during the meeting, as set on Live translation."),
+    ("speak", "Spoken translation", "The translation read aloud too, in Gemini's voice, the other apps lowered as set on "
+                                    "Live translation. Off: silent captions. It costs nothing more. Needs Live "
+                                    "translation."),
     ("record", "Record", "The others (what the laptop plays) and you (the microphone), saved as sound files on this laptop."),
     ("minutes", "Minutes", "After the meeting: who said what, a summary, the decisions, and the action items with owners "
                            "and dates. Needs Record."),
     ("screen", "Screen", "The meeting window seen every 5 seconds; a slide is kept when the screen changes, and given to "
                          "the minutes."),
 ]
+# The In person tab's parts (Settings.room_<part>): one microphone hears the room, so no screen and no "you" track
+ROOM_PARTS = [
+    ("translate", "Live transcript", "What the room says, live on the bar: translated into your language, or as said "
+                                     "when it already is."),
+    ("record", "Record", "The room as your microphone hears it, saved as a sound file on this laptop."),
+    ("minutes", "Minutes", "After the meeting: who said what, a summary, the decisions, and the action items with owners "
+                           "and dates. Needs Record."),
+]
+MEETING_TABS = [("online", "Online"), ("room", "In person")]
+MEETING_SUBTITLES = {
+    "online": "Your meeting translated, recorded and written up: the minutes, decisions and action items, from Teams, "
+              "Zoom, Google Meet or Webex.",
+    "room": "A meeting in a room, around a table: your microphone hears everyone. A live transcript, the recording and "
+            "the minutes, with each voice told apart.",
+}
 MEETING_REFRESH_MS = 5000  # the meeting's line (time, cost, slides) and the meetings found, while the page is shown
 TRANSLATE_SHORTCUTS = [("Ctrl+C+C (press Ctrl+C twice)", "ctrl+c+c"), ("Ctrl+Alt+L", "ctrl+alt+l"), ("Off", "")]
 TRANSFORM_HOTKEYS = [("Double-tap Ctrl", "double ctrl"), ("Ctrl+Alt+T", "ctrl+alt+t"), ("F8", "f8"), ("Off", "")]
 WHERE_LABELS = {"local": "On this PC", "cloud": "In the cloud", "server": "Your own server"}
+# The top bar's look: as Windows is set, or always light or dark (Settings.appearance)
+APPEARANCE_CHOICES = [("system", "System"), ("light", "Light"), ("dark", "Dark")]
+APPEARANCE_ICONS = {"system": "display", "light": "sun", "dark": "moon"}
+APPEARANCE_TIPS = {"system": "Light or dark, as Windows is set", "light": "Always light (Porcelain)",
+                   "dark": "Always dark (Obsidian)"}
 COMPACT_WIDTH = 900  # below it, the sidebar becomes a rail of icons with their names under them
 
 log = logging.getLogger("sst.window")
@@ -1052,10 +1076,146 @@ class HistoryRow(QWidget):
         super().leaveEvent(event)
 
 
+class _Share(QWidget):
+    """A thin bar: a feature's part of the month's cost, in Iris on the theme's line."""
+
+    def __init__(self):
+        super().__init__()
+        self.value = 0.0
+        self.setFixedHeight(4)
+
+    def set_value(self, value: float) -> None:
+        self.value = max(0.0, min(1.0, value))
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(tok("line"))
+        p.drawRoundedRect(QRectF(self.rect()), 2, 2)
+        if self.value > 0:  # a sliver at least: a feature that cost something shows it
+            p.setBrush(tok("iris"))
+            p.drawRoundedRect(QRectF(0, 0, max(4.0, self.width() * self.value), self.height()), 2, 2)
+        p.end()
+
+
+class _UsageColumn:
+    """Home's usage: this month's Gemini cost and what it went on, from the same ledger and estimate as AI & models'
+    cost card (sst.usage), which Details opens. Beside the hero, one feature a line; under it, two."""
+
+    SHOWN = 4  # features listed, the costliest first; the rest are in AI & models' card
+    WIDTH = 280  # beside the hero
+
+    def __init__(self, app, go_to):
+        self.app, self.beside = app, False
+        self.frame, layout = card(10, (20, 18, 20, 18))
+        self.frame.setObjectName("usage")
+        self.details = button("Details", lambda _=False: go_to("models"), link=True, size="sm", icon="chevron-right",
+                              icon_after=True)
+        layout.addLayout(row(_caps_label("Usage this month"), self.details, stretch_at=1))
+        self.month = label("", wrap=False)
+        self.month.setFont(font(30, 600, tabular=True))
+        self.month.setAccessibleName("This month's cost")
+        self.today = caption("", "3", wrap=False)
+        totals = QVBoxLayout()
+        totals.setSpacing(0)
+        totals.addWidget(self.month)
+        totals.addWidget(self.today)
+        totals.addStretch()
+        # the total over the features beside the hero; to their left under it, so the card stays low
+        self.body = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        self.body.setSpacing(40)
+        self.body.addLayout(totals)
+        features = QVBoxLayout()
+        features.setSpacing(0)
+        self.lines = QGridLayout()
+        self.lines.setHorizontalSpacing(28)
+        self.lines.setVerticalSpacing(10)
+        features.addLayout(self.lines)
+        self.empty = caption("", "2")
+        features.addWidget(self.empty)
+        features.addStretch()
+        self.body.addLayout(features, 1)
+        layout.addLayout(self.body)
+        layout.addStretch()
+        self.foot = caption("", "3")
+        layout.addWidget(self.foot)
+
+    def set_beside(self, beside: bool) -> None:
+        if beside == self.beside:
+            return
+        self.beside = beside
+        self.body.setDirection(QBoxLayout.Direction.TopToBottom if beside else QBoxLayout.Direction.LeftToRight)
+        self.body.setSpacing(14 if beside else 40)
+        if beside:
+            self.frame.setFixedWidth(self.WIDTH)
+        else:
+            self.frame.setMinimumWidth(0)
+            self.frame.setMaximumWidth(16777215)
+        self.refresh()
+
+    def refresh(self) -> None:
+        ledger = getattr(self.app, "usage", None)
+        summary = ledger.summary() if ledger is not None else usage.Summary()
+        free = bool(getattr(self.app.settings, "gemini_free_tier", False))  # as the cost card: nothing billed
+        self.month.setText("$0.00" if free else dollars(summary.month))
+        self.today.setText(f"{'$0.00' if free else dollars(summary.today)} today")
+        clear(self.lines)
+        lines = sorted(summary.lines, key=lambda line: -line.cost)[:self.SHOWN]
+        columns = 1 if self.beside else 2
+        for i, line in enumerate(lines):
+            self.lines.addWidget(self._line(line, summary.month), i // columns, i % columns)
+        for column in range(2):
+            self.lines.setColumnStretch(column, 1 if column < columns else 0)
+        self.empty.setVisible(not lines)
+        self.empty.setText("Nothing counted yet. Parakeet on this PC is free; each call to Gemini is counted here.")
+        more = len(summary.lines) - len(lines)
+        foot = ["A free key: nothing billed" if free else "Estimate at list prices"]
+        if summary.saved > 0:
+            foot.append(f"{dollars(summary.saved)} saved by the cost saver")
+        if more > 0:
+            foot.append(f"{more} more in Details")
+        self.foot.setText(" · ".join(foot))
+
+    @staticmethod
+    def _line(line: "usage.Line", month: float) -> QWidget:
+        widget = QWidget()
+        widget.setObjectName("usageLine")
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        name = ElidedText(line.title, None, None)
+        name.setFont(font(13, 500))
+        top.addWidget(name, 1)
+        top.addWidget(caption(line.amount.split(" · ")[0], "3", wrap=False))  # what wasn't sent: in Details
+        cost = label(dollars(line.cost), wrap=False)
+        cost.setFont(font(13, 500, mono=True))
+        cost.setMinimumWidth(52)
+        cost.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        top.addWidget(cost)
+        layout.addLayout(top)
+        share = _Share()
+        share.set_value(line.cost / month if month > 0 else 0.0)
+        layout.addWidget(share)
+        widget.setAccessibleName(f"{line.title}: {line.amount}, {dollars(line.cost)}")
+        return widget
+
+
+def greeting(now: datetime, name: str = "") -> str:
+    """Home's hello in the top bar: "Good afternoon, Alex" (no name yet: "Good afternoon")."""
+    part = "morning" if 5 <= now.hour < 12 else "afternoon" if 12 <= now.hour < 18 else "evening"
+    return f"Good {part}, {name.strip()}" if name.strip() else f"Good {part}"
+
+
 class HomePage(Page):
-    """The voice orb and how to dictate (or what Rflow still needs), the stats strip, and the dictations."""
+    """The voice orb and how to dictate (or what Rflow still needs) beside this month's usage, the stats strip, and the
+    dictations."""
 
     SHOWN = 30  # dictations listed before "Show all"
+    BESIDE = 860  # the page's width from which the usage sits beside the hero (the window about 1,080 px wide)
 
     def __init__(self, app, go_to=None):
         super().__init__()
@@ -1128,8 +1288,16 @@ class HomePage(Page):
             actions.addWidget(widget)
         actions.addStretch()
         column.addWidget(self.actions)
+        column.insertStretch(0)  # centred when the usage beside it is taller
+        column.addStretch()
         hero.addLayout(column, 1)
-        self.add(self.hero)
+        # the hero and the month's usage side by side; the usage goes under the hero in the rail layout
+        self.usage = _UsageColumn(app, self.go_to)
+        self.top = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        self.top.setSpacing(24)
+        self.top.addWidget(self.hero, 1)
+        self.top.addWidget(self.usage.frame)
+        self.add(self.top)
 
         # the stats strip: one inset readout
         self.readout, strip = card(0, (20, 0, 20, 0), kind="well", horizontal=True)
@@ -1207,10 +1375,23 @@ class HomePage(Page):
     def set_compact(self, compact: bool) -> None:
         super().set_compact(compact)
         self.compact = compact
-        self.let_go.setVisible(not compact)
         self.search_box.setFixedWidth(180 if compact else 236)
         self.search_keys.setVisible(not compact)
         self.hero.layout().setContentsMargins(*(4 * [20 if compact else 24]))
+        self.arrange()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.arrange()
+
+    def arrange(self) -> None:
+        """The usage beside the hero when the page has room for both (the hero's line on one line), else under it."""
+        width = self.width()
+        beside = not self.compact and width >= self.BESIDE
+        self.top.setDirection(QBoxLayout.Direction.LeftToRight if beside else QBoxLayout.Direction.TopToBottom)
+        self.top.setSpacing(24 if beside else 16 if self.compact else 24)
+        self.let_go.setVisible(not self.compact and (not beside or width >= self.BESIDE + 200))
+        self.usage.set_beside(beside)
 
     def _hero_keys(self, label_text: str) -> None:
         clear(self.hero_caps_layout)
@@ -1232,6 +1413,7 @@ class HomePage(Page):
         self.stat_values["speed"].setText(str(wpm) if wpm else "–")
         self.stat_values["streak"].setText(str(stats.streak(today)))
         self.stat_values["speed"].setToolTip("" if wpm else "Shown after half a minute of dictation.")
+        self.usage.refresh()
         self._fill_history(app.history_entries(), today)
 
     def _show_state(self, label_text: str) -> None:
@@ -4699,15 +4881,20 @@ class MeetingPage(Page):
     switch per part (live translation, the recording, the minutes, the slides), a big Start / Stop with a red Recording
     light and the meeting's time and cost, then "Writing the minutes…" and "Minutes ready" with Open and Copy, and the
     past meetings. Like the Live page it shows the real state, however the meeting was started: here, the shortcut, the
-    tray, or the meeting window closing by itself."""
+    tray, or the meeting window closing by itself. Two tabs at the top: Online (all that) and In person (a meeting in a
+    room: the microphone alone, no meeting app, no screen; it runs until stopped)."""
 
     def __init__(self, app, go_to):
-        super().__init__("Meeting mode", "Your meeting translated, recorded and written up: the minutes, decisions and "
-                                         "action items, from Teams, Zoom, Google Meet or Webex.")
+        super().__init__("Meeting mode", MEETING_SUBTITLES["online"])
         self.app = app
         self.found: list | None = None  # the meetings open now (MeetingWindow), from the last look
         self.chosen = None  # the one picked of them
+        self.place = "room" if app.settings.meeting_place == "room" else "online"
         self._timer = QTimer(self, interval=MEETING_REFRESH_MS, timeout=self._tick)
+        self.tabs = Segmented(MEETING_TABS)
+        self.tabs.set_current(self.place)
+        self.tabs.changed.connect(self._tab_chosen)
+        self.add(self.tabs)
         self.connect_card, connect = card(12, (16, 12, 12, 12), kind="well", horizontal=True)
         info = QLabel()
         info.setPixmap(theme.icon_pixmap("info", tok("warn").name(), 16, 1.0))
@@ -4791,19 +4978,28 @@ class MeetingPage(Page):
         column.addWidget(self.app_words)
         self.add(self.app_card)
 
-        # One switch per part
-        parts, column = card(4, (20, 6, 20, 6))
+        # One switch per part, each tab its own
         self.parts: dict[str, Toggle] = {}
         self.part_rows: dict[str, QWidget] = {}
-        for i, (part, title, words_text) in enumerate(MEETING_PARTS):
-            if i:
-                column.addWidget(divider())
-            toggle = Toggle(title)
-            toggle.toggled.connect(lambda on, p=part: self._part_toggled(p, on))
-            self.parts[part] = toggle
-            self.part_rows[part] = setting_row(title, words_text, toggle)[0]
-            column.addWidget(self.part_rows[part])
-        self.add(parts)
+        self.room_parts: dict[str, Toggle] = {}
+        self.room_rows: dict[str, QWidget] = {}
+        self.parts_card = self.room_card = None
+        for place, items, toggles, rows in (("online", MEETING_PARTS, self.parts, self.part_rows),
+                                            ("room", ROOM_PARTS, self.room_parts, self.room_rows)):
+            parts, column = card(4, (20, 6, 20, 6))
+            for i, (part, title, words_text) in enumerate(items):
+                if i:
+                    column.addWidget(divider())
+                toggle = Toggle(title)
+                toggle.toggled.connect(lambda on, p=part, r=place == "room": self._part_toggled(p, on, r))
+                toggles[part] = toggle
+                rows[part] = setting_row(title, words_text, toggle)[0]
+                column.addWidget(rows[part])
+            self.add(parts)
+            if place == "online":
+                self.parts_card = parts
+            else:
+                self.room_card = parts
 
         options, column = card(4, (20, 6, 20, 6))
         self.shortcut = Choice(small=True)
@@ -4866,23 +5062,47 @@ class MeetingPage(Page):
         super().hideEvent(event)
 
     def _tick(self) -> None:
-        if self.app.meeting_status()[0] == "recording":
-            self.refresh()  # the time, the cost and the slides go on
+        if self.app.meeting_status()[0] == "recording" or self.place == "room":
+            self.refresh()  # the time, the cost and the slides go on (in person, there are no windows to look for)
         else:
             self._scan()  # a meeting started meanwhile shows by itself
 
+    def _tab_chosen(self, place: str) -> None:
+        """Online or In person; remembered, so the shortcut and the tray start that kind next time."""
+        self.place = place
+        if self.app.settings.meeting_place != place:
+            self.app.apply_settings(dataclasses.replace(self.app.settings, meeting_place=place))
+        self._say("")
+        self.refresh()
+
+    @property
+    def target(self):
+        """What Start starts: the room in person, else the meeting window picked (None: none yet)."""
+        return IN_PERSON if self.place == "room" else self.chosen
+
     def refresh(self) -> None:
-        if self.found is None:
+        if self.found is None and self.place == "online":
             self._scan()  # the first time it's shown (it refreshes itself)
             return
         s, app = self.app.settings, self.app
         state, window, folder, result, error = app.meeting_status()
         running, writing = state == "recording", state == "writing minutes"
-        problem = app.meeting_problem()
+        if (running or writing) and window is not None:
+            self.place = "room" if window == IN_PERSON else "online"  # the tab of the meeting going on
+        room = self.place == "room"
+        self.tabs.set_current(self.place)
+        for key, b in self.tabs.buttons.items():
+            b.setEnabled(not running or key == self.place)  # one meeting at a time
+        self.subtitle.setText(MEETING_SUBTITLES[self.place])
+        problem = app.meeting_problem(room)
         self.connect_card.setVisible(bool(problem) and not running)
         self.connect_words.setText(problem)
         self.connect_button.setVisible("Gemini key" in problem)
-        ready = self.chosen is not None and not problem and not writing
+        # a finished meeting of the other kind isn't shown on this tab
+        mine = window is not None and (window == IN_PERSON) == room
+        if not mine and not running:
+            state, folder, result, error = "", None, None, ""
+        ready = self.target is not None and not problem and not writing
         self.start_button.set_running(running, "Stop" if running else "Start")
         self.start_button.setEnabled(running or ready)
         self.light.set_state({"recording": "live", "writing minutes": "ai", "done": "ok", "failed": "err"}.get(state, "off"))
@@ -4896,12 +5116,14 @@ class MeetingPage(Page):
         elif state == "done" and result is not None:
             heading, tone, doing = "Minutes ready", None, result.title
         elif state == "done":
-            heading, tone, doing = "Saved", None, f"The meeting in {window.app} is saved on this laptop."
+            where = "in person" if window == IN_PERSON else f"in {window.app}"
+            heading, tone, doing = "Saved", None, f"The meeting {where} is saved on this laptop."
         elif state == "failed":
             heading, tone, doing = "The minutes failed", None, f"{error}. The recording is kept: nothing is lost."
         else:
             heading, tone = "Off", None
             doing = ("Add a Gemini key to start it" if "Gemini key" in problem else "Switch on a part to start it" if problem
+                     else "Ready: put the laptop where its microphone hears everyone" if room
                      else f"Ready for your meeting in {self.chosen.app}" if self.chosen is not None
                      else "Pick your meeting below" if self.found else "Start a meeting first")
         self.state.setText(heading)
@@ -4920,7 +5142,11 @@ class MeetingPage(Page):
         else:
             self.how.addWidget(caption("Start it here, or from the tray menu", "2", wrap=False))
         self.how.addStretch()
-        self._refresh_app(running or writing, window)
+        self.app_card.setVisible(not room)
+        self.parts_card.setVisible(not room)
+        self.room_card.setVisible(room)
+        if not room:
+            self._refresh_app(running or writing, window)
         self._refresh_parts(s, running)
         self.shortcut.blockSignals(True)
         if self.shortcut.findData(s.meeting_shortcut) < 0:  # a shortcut set by hand
@@ -4929,7 +5155,8 @@ class MeetingPage(Page):
         self.shortcut.blockSignals(False)
         self.shortcut_caption.setText(f"{key_names(parse_hotkey(s.meeting_shortcut).label)} is {clash}'s shortcut, so "
                                       f"it stays with {clash}: choose another." if clash
-                                      else "Starts and stops the meeting in any app, with the meeting found.")
+                                      else "Starts and stops the meeting in any app: in the room when In person "
+                                           "was the tab last open, else the meeting found.")
         self.shortcut_caption.show()
         self._refresh_past()
 
@@ -4937,7 +5164,11 @@ class MeetingPage(Page):
         """A part as the meeting running started with it (a switch changed meanwhile waits for the next one)."""
         last = getattr(self.app, "last_meeting", None)
         options = getattr(last, "options", None)
-        return getattr(options, part) if options is not None else getattr(self.app.settings, f"meeting_{part}")
+        if options is not None:
+            return getattr(options, part)
+        if self.place == "room":
+            return part != "screen" and getattr(self.app.settings, f"room_{part}")
+        return getattr(self.app.settings, f"meeting_{part}")
 
     def _refresh_app(self, busy: bool, window) -> None:
         shown = window if busy else self.chosen
@@ -4964,17 +5195,21 @@ class MeetingPage(Page):
         self.app_words.setVisible(bool(words))
 
     def _refresh_parts(self, s, running: bool) -> None:
-        on = {part: getattr(s, f"meeting_{part}") for part, *_ in MEETING_PARTS}
-        works = {"translate": on["translate"], "record": on["record"], "minutes": on["minutes"] and on["record"]}
-        works["screen"] = on["screen"] and works["minutes"]
-        for part, toggle in self.parts.items():
-            toggle.blockSignals(True)
-            toggle.setChecked(works[part])
-            toggle.blockSignals(False)
-            # a running meeting keeps the parts it started with; the minutes need the sound, the slides the minutes
-            needs = {"minutes": on["record"], "screen": works["minutes"]}.get(part, True)
-            toggle.setEnabled(not running and needs)
-            self.part_rows[part].setToolTip("" if needs else "Needs Record" if part == "minutes" else "Needs the minutes")
+        for kind, toggles, rows in (("meeting", self.parts, self.part_rows), ("room", self.room_parts, self.room_rows)):
+            on = {part: getattr(s, f"{kind}_{part}", False) for part, *_ in MEETING_PARTS}
+            works = {"translate": on["translate"], "record": on["record"], "minutes": on["minutes"] and on["record"]}
+            works["screen"] = on["screen"] and works["minutes"]
+            works["speak"] = on["speak"] and on["translate"]
+            for part, toggle in toggles.items():
+                toggle.blockSignals(True)
+                toggle.setChecked(works[part])
+                toggle.blockSignals(False)
+                # a running meeting keeps the parts it started with (speaking changes at once, as on the bar's button);
+                # the minutes need the sound, the slides the minutes, speaking the translation
+                needs = {"minutes": on["record"], "screen": works["minutes"], "speak": on["translate"]}.get(part, True)
+                toggle.setEnabled((not running or part == "speak") and needs)
+                rows[part].setToolTip("" if needs else {"minutes": "Needs Record", "speak": "Needs Live translation"}.get(
+                    part, "Needs the minutes"))
 
     def _refresh_past(self) -> None:
         clear(self.meeting_rows)
@@ -5018,7 +5253,7 @@ class MeetingPage(Page):
             self.app.stop_meeting()
             self._say("")
         else:
-            problem = self.app.start_meeting(self.chosen)
+            problem = self.app.start_meeting(self.target)
             self._say("" if problem == "Not started." else problem)
         self.refresh()
 
@@ -5035,8 +5270,11 @@ class MeetingPage(Page):
         LivePage._show_copied(copy, "Couldn't copy" if problem else "Copied", "warning" if problem else "check")
         QTimer.singleShot(1500, lambda: LivePage._show_copied(copy, words, "copy"))
 
-    def _part_toggled(self, part: str, on: bool) -> None:
-        self.app.set_meeting_option(part, on)
+    def _part_toggled(self, part: str, on: bool, in_person: bool = False) -> None:
+        if in_person:
+            self.app.set_meeting_option(part, on, True)
+        else:
+            self.app.set_meeting_option(part, on)
         self.refresh()
 
     def _shortcut_chosen(self, *_) -> None:
@@ -5167,6 +5405,7 @@ class TransformPage(Page):
                                            "names, dates and your “maybe” stay.")
         self.app = app
         s = app.settings
+        self.trying = False  # a try on the page is with the model
         self.ai = AiNeeded(go_to, "Text Transform")
         self.model, self.setup = self.ai.words, self.ai.setup
         self.add(self.ai)
@@ -5336,8 +5575,8 @@ class TransformPage(Page):
         self.reset.setVisible(bool(s.command_phrases))
         self._check_phrases(phrases)
         self.ai.show_model(model)
-        for b in self.try_buttons.values():
-            b.setEnabled(bool(model))
+        for b in self.try_buttons.values():  # not while a try runs: a second one's answer would land on the first's
+            b.setEnabled(bool(model) and not self.trying)
         self.switch_words.setText("On: rewrite text by voice or from a menu, in any app. Here's how:" if on else
                                   "Off. Turn it on to rewrite text by voice or from a menu, in any app.")
         self.steps.setVisible(on)
@@ -5453,20 +5692,26 @@ class TransformPage(Page):
             return
         for b in self.try_buttons.values():
             b.setEnabled(False)
-        self._say(f"{TRANSFORMS[key].name}...")
+        self.trying = True
+        self.result.hide()  # the last try's result isn't this one's: it went on showing under an error
+        self._say(f"{TRANSFORMS[key].name}..." + (f" ({len(sample.split()):,} words: this takes a little longer)"
+                                                    if len(sample.split()) > 300 else ""))
 
         def done(result, error) -> None:
+            self.trying = False
             self.refresh()
             if error:
                 self._say(f"Didn't work: {error}")
             elif not result.accepted:
-                self.result.hide()
                 self._say("Kept the text: " + "; ".join(result.reasons))
             else:
                 self.result.setHtml(result.html or html.escape(result.plain))
                 self.result.show()
-                self._say(f"{TRANSFORMS[key].name} in {result.seconds:.1f} s" +
-                          (f" (checked and fixed once: {result.attempts} answers)" if result.attempts > 1 else ""))
+                parts = getattr(result, "parts", 1)
+                self._say(f"{TRANSFORMS[key].name} in {result.seconds:.1f} s"
+                          + (f", in {parts} parts" if parts > 1 else "")
+                          + (f" (checked and fixed: {result.attempts} answers)" if result.attempts > parts else "")
+                          + "".join(f". {k[0].upper()}{k[1:]}" for k in getattr(result, "kept", [])))
         run_in_background(self, lambda: usage.within("tests", self.app.run_transform, sample, key), done)
 
 
@@ -5652,6 +5897,11 @@ FORMAT_EXAMPLES = ["sales went up twenty five percent this quarter", "the budget
                    "the launch is on october first twenty twenty six", "we need twenty five hundred copies",
                    "send it to john dot smith at gmail dot com"]
 FORMAT_KEPT = ["we have two options", "meet me at five", "the first time"]  # prose, or unclear: stays as said
+# For each: what a formatter that turned every number word into digits would type, and why Rflow doesn't. The page shows
+# it struck out, so a phrase typed exactly as said reads as a choice, not as nothing happening (the owner's question).
+FORMAT_KEPT_WHY = {"we have two options": ("we have 2 options", "A small number in a sentence reads better as a word."),
+                   "meet me at five": ("meet me at 5:00", "Five what? 5 AM, 5 PM or five minutes: Rflow won't guess."),
+                   "the first time": ("the 1st time", "An everyday word, not a date or a list.")}
 
 
 def formatted(said: str) -> tuple[str, str]:
@@ -5698,9 +5948,9 @@ class FormattingPage(Page):
         layout.addWidget(self.changed_box)
         layout.addSpacing(4)
         layout.addWidget(label("What stays as you said it", "heading"))
-        layout.addWidget(caption("Small numbers in a sentence, and anything that could be read two ways: a wrong "
-                                 "number would change what you meant.", "2"))
-        self.kept_box = self._table(FORMAT_KEPT)
+        layout.addWidget(caption("Rflow leaves these alone on purpose. Turning every number word into digits would type "
+                                 "what's struck out, and change how it reads or what you meant.", "2"))
+        self.kept_box = self._kept(FORMAT_KEPT)
         layout.addWidget(self.kept_box)
         self.add(changes)
 
@@ -5742,6 +5992,39 @@ class FormattingPage(Page):
         grid.setColumnStretch(2, 1)
         return box
 
+    def _kept(self, phrases: list[str]) -> Card:
+        """Phrases Rflow types as said, one well: each with a check, why it's kept, and the wrong version struck out."""
+        box = Card("well", 14)
+        grid = QGridLayout(box)
+        grid.setContentsMargins(16, 12, 16, 14)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(0)
+        grid.addWidget(_caps_label("Typed as you said it"), 0, 1)
+        grid.addWidget(_caps_label("Not this"), 0, 2)
+        grid.setRowMinimumHeight(1, 8)
+        box.arrows, box.checks = [], []  # arrows: none here; refresh() colours both kinds of box alike
+        for i, said in enumerate(phrases):
+            wrong, why = FORMAT_KEPT_WHY[said]
+            at = 2 + 3 * i
+            if i:
+                grid.setRowMinimumHeight(at - 1, 12)
+            check = QLabel()
+            box.checks.append(check)
+            grid.addWidget(check, at, 0, Qt.AlignmentFlag.AlignVCenter)
+            typed = label(formatted(said)[1])
+            typed.setTextFormat(Qt.TextFormat.RichText)
+            typed.setObjectName("typed")
+            typed.said = said
+            grid.addWidget(typed, at, 1)
+            naive = label(f"<s>{html.escape(wrong)}</s>", tone="3")
+            naive.setTextFormat(Qt.TextFormat.RichText)
+            naive.setObjectName("naive")
+            grid.addWidget(naive, at, 2)
+            grid.addWidget(caption(why, "3"), at + 1, 1, 1, 2)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)
+        return box
+
     def refresh(self) -> None:
         s = self.app.settings
         self.format_text.blockSignals(True)
@@ -5754,6 +6037,8 @@ class FormattingPage(Page):
         for box in (self.changed_box, self.kept_box):  # the theme's colours: the arrows, the changes in Iris
             for arrow in box.arrows:
                 arrow.setPixmap(theme.icon_pixmap("arrow-right", tok("text3").name(), 14, self.devicePixelRatioF()))
+            for check in getattr(box, "checks", []):
+                check.setPixmap(theme.icon_pixmap("check", tok("ok").name(), 16, self.devicePixelRatioF()))
             for typed in box.findChildren(QLabel, "typed"):
                 typed.setText(formatted(typed.said)[1])
         self._try()
@@ -6080,6 +6365,12 @@ class SettingsPage(Page):
         self.start_with_windows.setEnabled(can_start_with_windows())
         layout.addWidget(setting_row("Start when I sign in", "Rflow waits quietly in the tray" if can_start_with_windows()
                                      else "Available in the installed app", self.start_with_windows)[0])
+        layout.addWidget(divider())
+        self.appearance = Segmented(APPEARANCE_CHOICES, icons=APPEARANCE_ICONS)
+        self.appearance.set_current(s.appearance)
+        self.appearance.changed.connect(lambda name: getattr(self.window(), "set_appearance", lambda _: None)(name))
+        layout.addWidget(setting_row("Appearance", "Light or dark, or as Windows is set. Also in the bar at the top.",
+                                     self.appearance)[0])
         layout.addWidget(divider())
         self.reading = link_row("Reading test", "Read 30 sentences aloud: how many words does Rflow get wrong?",
                                 lambda _=False: go_to("reading"))
@@ -7335,6 +7626,34 @@ class MainWindow(QWidget):
         content = QVBoxLayout(self.content)
         content.setContentsMargins(0, 0, 0, 0)
         content.setSpacing(0)
+        # The bar over every page: the look (as Windows is set, light or dark) and Check for updates, one click each
+        self.topbar = QWidget()
+        top = QHBoxLayout(self.topbar)
+        top.setContentsMargins(32, 16, 32, 0)
+        top.setSpacing(12)
+        # Home only: a hello and the date at the bar's left, where the other pages have nothing (their title is below)
+        self.greeting = QWidget()
+        hello = QVBoxLayout(self.greeting)
+        hello.setContentsMargins(0, 0, 0, 0)
+        hello.setSpacing(0)
+        self.greeting_text = ElidedText("", None, None)
+        self.greeting_text.setFont(font(18, 600))
+        self.greeting_date = ElidedText("", "caption", "3")
+        hello.addWidget(self.greeting_text)
+        hello.addWidget(self.greeting_date)
+        top.addWidget(self.greeting, 1, Qt.AlignmentFlag.AlignVCenter)
+        self.greeting.hide()
+        top.addStretch()
+        self.appearance = Segmented(APPEARANCE_CHOICES, icons=APPEARANCE_ICONS)
+        for key, b in self.appearance.buttons.items():
+            b.setToolTip(APPEARANCE_TIPS[key])
+        self.appearance.set_current(theme.APPEARANCES[0])
+        self.appearance.changed.connect(self.set_appearance)
+        top.addWidget(self.appearance, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.check_button = button("Check for updates", self._check_for_updates, primary=True, size="sm", icon="update")
+        top.addWidget(self.check_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._checking = False  # the top bar's check is waiting for its answer (a toast says it)
+        content.addWidget(self.topbar)
         self.banner_holder = QWidget()
         banner_holder = QVBoxLayout(self.banner_holder)
         banner_holder.setContentsMargins(24, 20, 24, 0)
@@ -7349,6 +7668,8 @@ class MainWindow(QWidget):
         layout.addWidget(self.content, 1)
         self.toast = Toast(self)
 
+        theme.set_appearance(app.settings.appearance)
+        self.appearance.set_current(app.settings.appearance)
         self.apply_theme()
         QGuiApplication.styleHints().colorSchemeChanged.connect(self.apply_theme)
         self._set_compact(False)
@@ -7372,6 +7693,34 @@ class MainWindow(QWidget):
             widget.update()
         self.update()
         self.refresh()
+
+    def set_appearance(self, name: str) -> None:
+        """The look chosen in the top bar or in Settings: saved in the profile, used at once."""
+        name = name if name in theme.APPEARANCES else "system"
+        if self.app.settings.appearance != name:
+            self.app.apply_settings(dataclasses.replace(self.app.settings, appearance=name))
+        theme.set_appearance(name)
+        self.appearance.set_current(name)
+        if "settings" in self.pages.built:
+            self.pages["settings"].appearance.set_current(name)
+        self.apply_theme()
+
+    def _check_for_updates(self) -> None:
+        """The top bar's button: it says Checking… until the answer, which a toast then gives (or the update banner)."""
+        self._checking = True
+        self.check_button.setText("Checking…")
+        self.check_button.setEnabled(False)
+        self.app.check_for_updates(manual=True)
+
+    def _checked(self, message: str = "") -> None:
+        if not self._checking:
+            return
+        self._checking = False
+        self.check_button.setText("Check for updates")
+        self.check_button.setEnabled(True)
+        if message:
+            latest = message.startswith("You have the latest")
+            self.toast.show_message(message, "check" if latest else "warning", "ok" if latest else "warn")
 
     def _page_built(self, key: str, page: QWidget) -> None:
         """A page built on first use: the window's present state, as it would have had from the start."""
@@ -7462,6 +7811,7 @@ class MainWindow(QWidget):
             page.refresh(self.ready)
         self.stack.setCurrentWidget(page)
         self.sidebar.setVisible(key != "welcome")  # the welcome has the whole window
+        self._show_greeting(key)
         section = SECTION.get(key)
         if section in self.nav:
             self.nav[section].setChecked(True)
@@ -7470,6 +7820,13 @@ class MainWindow(QWidget):
                 b.setAutoExclusive(False)
                 b.setChecked(False)
                 b.setAutoExclusive(True)
+
+    def _show_greeting(self, key: str) -> None:
+        self.greeting.setVisible(key == "home")
+        if key == "home":
+            now = datetime.now()
+            self.greeting_text.setText(greeting(now, self.app.profiles.current.name))
+            self.greeting_date.setText(f"{now:%A}, {now.day} {now:%B}")
 
     def current_section(self) -> str:
         return SECTION.get(self.current_page(), "")
@@ -7528,6 +7885,10 @@ class MainWindow(QWidget):
 
     def refresh(self) -> None:
         """New dictation, words, settings or profile name: update what is on screen."""
+        wanted = self.app.settings.appearance
+        if wanted in theme.APPEARANCES and wanted != theme.appearance():  # e.g. another profile's look
+            self.set_appearance(wanted)
+            return  # apply_theme refreshes
         self._show_profile()
         self._show_status()
         current = self.current_page()
@@ -7537,9 +7898,11 @@ class MainWindow(QWidget):
             self.pages[current].refresh(self.ready)
 
     def usage_changed(self) -> None:
-        """A Gemini call was counted: AI & models' cost card, if it is on screen (it refreshes itself when shown)."""
+        """A Gemini call was counted: AI & models' cost card or Home's usage, if on screen (each refreshes when shown)."""
         if "models" in self.pages.built and self.current_page() == "models":
             self.pages["models"].costs.refresh()
+        elif self.current_page() == "home":
+            self.pages["home"].usage.refresh()
 
     def set_status(self, message: str, ready: bool) -> None:
         self.ready, self.status_message = ready, message
@@ -7577,6 +7940,7 @@ class MainWindow(QWidget):
         self.mark.set_state(state)
 
     def show_update(self, message: str, busy: bool = False, version: str = "") -> None:
+        self._checked()
         self.banner_text.setText(message)
         self.update_button.setEnabled(not busy)
         self.banner.show()
@@ -7593,6 +7957,8 @@ class MainWindow(QWidget):
 
     def set_update_status(self, message: str) -> None:
         self._update_status = message
+        if not message.startswith("Checking"):
+            self._checked("" if self.banner.isVisible() else message)  # an update found: the banner says it
         if "settings" in self.pages.built:
             self.pages["settings"].update_status.setText(message)
 
@@ -7879,17 +8245,19 @@ class PreviewApp:
     def meeting_cost(self):
         return self._meeting_cost if self._meeting[0] else None
 
-    def meeting_problem(self) -> str:
-        s = self.settings
-        if not (s.meeting_translate or s.meeting_record):
+    def meeting_problem(self, in_person: bool = False) -> str:
+        s, kind = self.settings, "room" if in_person else "meeting"
+        on = {part: getattr(s, f"{kind}_{part}") for part in ("translate", "record", "minutes")}
+        if not (on["translate"] or on["record"]):
             return "Switch on live translation or Record first."
-        if (s.meeting_translate or s.meeting_minutes and s.meeting_record) and not self.gateway.key_for("gemini"):
+        if (on["translate"] or on["minutes"] and on["record"]) and not self.gateway.key_for("gemini"):
             return "Live translation and the minutes use Google Gemini: add a Gemini key in AI & models."
         return ""
 
     def start_meeting(self, window) -> str:
         self.calls.append(("start_meeting", getattr(window, "app", None)))
-        problem = "Start a meeting first: Teams, Zoom, Google Meet or Webex." if window is None else self.meeting_problem()
+        problem = ("Start a meeting first: Teams, Zoom, Google Meet or Webex." if window is None
+                   else self.meeting_problem(window.app == "In person"))
         if not problem:
             self._meeting = ("recording", window, Path("meetings") / f"2026-10-27 1003 {window.app}", None, "")
         return problem
@@ -7898,11 +8266,12 @@ class PreviewApp:
         self.calls.append(("stop_meeting",))
         state, window, folder, _, _ = self._meeting
         if state == "recording":
-            self._meeting = ("writing minutes" if self.settings.meeting_minutes else "done", window, folder, None, "")
+            minutes = self.settings.room_minutes if window.app == "In person" else self.settings.meeting_minutes
+            self._meeting = ("writing minutes" if minutes else "done", window, folder, None, "")
 
-    def set_meeting_option(self, name: str, on: bool) -> None:
-        self.calls.append(("set_meeting_option", name, on))
-        self.apply_settings(dataclasses.replace(self.settings, **{f"meeting_{name}": on}))
+    def set_meeting_option(self, name: str, on: bool, in_person: bool = False) -> None:
+        self.calls.append(("set_meeting_option", name, on, *(("in person",) if in_person else ())))
+        self.apply_settings(dataclasses.replace(self.settings, **{f"{'room' if in_person else 'meeting'}_{name}": on}))
 
     def past_meetings(self, limit: int = 8) -> list:
         return list(self._past_meetings)[:limit]

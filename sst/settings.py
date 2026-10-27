@@ -53,11 +53,17 @@ class Settings:
     live_told: bool = False  # the notice (audio goes to Google, the cost) was accepted once
     # Meeting mode (sst.meeting): one switch per part, all started and stopped with the meeting
     meeting_translate: bool = True  # live translation's bar runs during the meeting
+    meeting_speak: bool = False  # its translation read aloud (as Live translation speaks it); off: silent captions
     meeting_record: bool = True  # the others (what the laptop plays) and you (the microphone), saved on this laptop
     meeting_minutes: bool = True  # after it: transcript with speakers, minutes, decisions, action items (needs the recording)
     meeting_screen: bool = True  # the meeting window's changed frames (slides) given to the minutes
     meeting_shortcut: str = "ctrl+alt+m"  # starts and stops a meeting from any app ("" = none)
+    room_translate: bool = True  # a meeting in person (Meeting mode's In person tab): the room's words live on the bar
+    room_record: bool = True  # the room as the microphone hears it (room.wav)
+    room_minutes: bool = True  # after it, from that recording (needs it)
+    meeting_place: str = "online"  # the Meeting mode tab last open: "online" or "room" (in person)
     meeting_told: bool = False  # the notice (people should know it's recorded; audio and frames go to Google) accepted once
+    appearance: str = "system"  # the window's look: "system" (as Windows is set), "light" (Porcelain) or "dark" (Obsidian)
     # The Gemini key is on Google's free tier: the cost card says "$0 billed (would cost $X)". No key can tell its tier,
     # and nothing sets it yet (TODO: the owner decides how it is asked or found out).
     gemini_free_tier: bool = False

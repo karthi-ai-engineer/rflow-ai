@@ -262,11 +262,12 @@ def test_the_wake_word_setup_is_kept_in_the_profile_and_goes_with_it(tmp_path, m
 def test_meeting_mode_has_every_part_on_and_ctrl_alt_m_until_changed(tmp_path, monkeypatch):
     s = Settings()
     assert (s.meeting_translate, s.meeting_record, s.meeting_minutes, s.meeting_screen) == (True, True, True, True)
-    assert s.meeting_shortcut == "ctrl+alt+m" and not s.meeting_told
+    assert s.meeting_shortcut == "ctrl+alt+m" and not s.meeting_told and not s.meeting_speak  # silent captions
     path = tmp_path / "settings.json"
-    Settings(meeting_translate=False, meeting_screen=False, meeting_shortcut="", meeting_told=True).save(path)
+    Settings(meeting_translate=False, meeting_screen=False, meeting_shortcut="", meeting_told=True,
+             meeting_speak=True).save(path)
     loaded = Settings.load(path)
-    assert not loaded.meeting_translate and loaded.meeting_record and not loaded.meeting_screen
+    assert not loaded.meeting_translate and loaded.meeting_record and not loaded.meeting_screen and loaded.meeting_speak
     assert loaded.meeting_shortcut == "" and loaded.meeting_told
     monkeypatch.setattr(settings, "CONFIG_DIR", tmp_path)
     profiles = Profiles()

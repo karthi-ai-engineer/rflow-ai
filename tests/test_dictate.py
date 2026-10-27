@@ -113,6 +113,7 @@ def test_space_while_holding_keeps_recording_after_the_keys_are_released(make):
 
 
 def test_recording_stops_by_itself_at_the_limit(make):
+    assert dictate.MAX_SECONDS >= 60 * 60  # long dictations work: the limit is only for one forgotten with hands-free on
     d, typed, states = make()
     feed(d, (0, "press"), (TAP, "release"))
     d.tick(dictate.MAX_SECONDS - 1)

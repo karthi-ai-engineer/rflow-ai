@@ -35,7 +35,12 @@ from sst.snippets import Snippet
 
 HOLD_SECONDS = 0.4   # key held longer than this = push-to-talk; a quicker tap = hands-free
 MIN_SECONDS = 0.3    # shorter recordings are treated as accidental presses
-MAX_SECONDS = 180    # recordings stop by themselves after 3 minutes (the text is still typed)
+# No length limit to speak of (the owner's wish of 2026-10-27): the pipeline sends 20 s chunks as the user speaks and
+# skips the silence, a whole recording goes to an engine in pieces (Parakeet's MAX_PIECE_SECONDS, cloud.WHOLE_PIECE_SECONDS)
+# and the AI cleanup gets a long text in pieces (sst.pipeline.polish). Only memory is left: the take is kept whole for the
+# last resort, a retry and the saved recording, 230 MB an hour at 16 kHz (690 MB at a 48 kHz microphone's own rate), so a
+# recording forgotten with hands-free on stops after an hour, and the text is still typed.
+MAX_SECONDS = 60 * 60
 SHORTCUT_SECONDS = 0.6  # another key this soon after Ctrl+Win: a Windows shortcut (Ctrl+Win+D), not a dictation
 DEFAULT_HOTKEY = "ctrl+win"
 START_BEEP = 880  # Hz: the voice pipeline filters it out of the recording (sst.pipeline.session._ToneNotch)

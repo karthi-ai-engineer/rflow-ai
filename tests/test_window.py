@@ -1,6 +1,7 @@
 """The Rflow window, built off-screen with PreviewApp in place of the tray app (no model, no microphone, no hook)."""
 import dataclasses
 import os
+import threading
 import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -181,6 +182,50 @@ def test_home_shows_the_stats_and_the_dictations_by_day():
     assert not home.hero_keys.isHidden() and home.hero_keys.accessibleName().startswith("Hold Ctrl+Win and talk")
     assert [cap.key_text for cap in home.hero_keys.findChildren(KeyCap)] == ["Ctrl", "Win"]  # drawn as keys
     assert home.orb.state == "ready" and window.status_title.text() == "Ready"
+
+
+def test_home_shows_this_months_usage_beside_the_hero_or_under_it():
+    window, app = _window()
+    app.usage.record("dictation", "gemini-3.5-transcribe", audio_in=500_000, seconds=1500)  # $1.00, 25 minutes
+    app.usage.record("cleanup", "gemini-3.5-flash-lite", text_in=100_000, out=20_000)  # $0.08
+    app.usage.record("live_translation", "gemini-3.5-live-translate-preview", seconds=600, calls=0, unsent=600)
+    window.resize(1200, 760)
+    window.show_page("home")
+    home = window.pages["home"]
+    assert not window.grab().isNull()  # laid out as shown (a resize waits for that), off the screen
+    column = home.usage
+    assert column.month.text() == "$1.08" and column.today.text() == "$1.08 today"  # the cost card's figures
+    shown = _shown(column.frame)
+    assert shown.index("Dictation | 25 min | $1.00") < shown.index("AI cleanup | 1 call | $0.08")  # the costliest first
+    assert "not sent" not in shown and "saved by the cost saver" in column.foot.text()  # the detail is in Details
+    assert column.beside and home.top.direction() == w.QBoxLayout.Direction.LeftToRight
+    window.resize(1000, 700)  # the default window: under the hero, the features two a row
+    assert not window.grab().isNull()  # laid out as shown (a resize waits for that), off the screen
+    assert not column.beside and home.top.direction() == w.QBoxLayout.Direction.TopToBottom
+    window.resize(860, 700)  # the rail
+    assert not window.grab().isNull()  # laid out as shown (a resize waits for that), off the screen
+    assert window.compact and not column.beside
+    _button(column.frame, "Details").click()
+    assert window.current_page() == "models"
+    # Counted while Home is shown: the column follows
+    window.show_page("home")
+    app.usage.record("translate", "gemini-3.5-flash-lite", text_in=1_000_000, calls=3)
+    window.usage_changed()
+    assert "Translate | 3 calls | $0.30" in _shown(column.frame)
+
+
+def test_home_says_nothing_is_counted_yet_and_greets_in_the_top_bar():
+    window, app = _window()
+    app.profiles.current.name = "Alex"
+    window.show_page("home")
+    column = window.pages["home"].usage
+    assert column.month.text() == "$0.00" and not column.empty.isHidden() and "Nothing counted yet" in column.empty.text()
+    assert window.greeting.isVisibleTo(window) and window.greeting_text.text().endswith(", Alex")
+    window.show_page("formatting")
+    assert not window.greeting.isVisibleTo(window)  # Home only: the other pages have their title
+    assert w.greeting(datetime(2026, 10, 27, 9)) == "Good morning"
+    assert w.greeting(datetime(2026, 10, 27, 14), " Alex ") == "Good afternoon, Alex"
+    assert w.greeting(datetime(2026, 10, 27, 21), "Alex") == "Good evening, Alex"
 
 
 def test_the_orb_moves_only_while_listening_or_cleaning_up():
@@ -1266,13 +1311,21 @@ def test_the_formatting_examples_are_what_the_real_stage_types():
     assert list(expected) == w.FORMAT_EXAMPLES
     for said, typed in expected.items():
         assert w.formatted(said)[0] == typed
+    assert list(w.FORMAT_KEPT_WHY) == w.FORMAT_KEPT
     for said in w.FORMAT_KEPT:
         assert w.formatted(said)[0] == said  # prose stays as said
+        assert w.FORMAT_KEPT_WHY[said][0] != said  # what a blind formatter would type differs: worth striking out
     window, _ = _window()
     page = window.pages["formatting"]
     page.refresh()
     shown = _shown(page.changed_box)
     assert all(w.formatted(said)[1] in shown for said in expected) and "25%</span>" in shown  # its changes in Iris
+    # What stays: one well, each phrase once with a check, why, and the wrong version struck out (not two equal columns)
+    kept = _shown(page.kept_box)
+    assert "YOU SAY" not in kept and "TYPED AS YOU SAID IT" in kept
+    for said, (wrong, why) in w.FORMAT_KEPT_WHY.items():
+        assert kept.count(said) == 1 and f"<s>{wrong}</s>" in kept and why in kept
+    assert len(page.kept_box.checks) == len(w.FORMAT_KEPT) and all(not c.pixmap().isNull() for c in page.kept_box.checks)
 
 
 def test_formatting_says_when_the_voice_pipeline_is_off_and_turns_it_on():
@@ -1448,6 +1501,48 @@ def test_text_transform_can_be_tried_on_the_page():
             break
         time.sleep(0.01)
     assert "database migration issue" in page.result.toPlainText() and ("run_transform", "concise") in app.calls
+
+
+def _tried(page, ms=2000):
+    for _ in range(ms // 10):
+        QApplication.processEvents()
+        if not page.trying:
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_text_transform_s_try_never_shows_an_old_result_or_takes_a_second_try_meanwhile(monkeypatch):
+    from sst.transform import TransformResult
+    window, app = _window(gateway=GatewayConfig(provider="gemini", api_key="AIza"),
+                          settings=Settings(welcomed=True, cleanup_model="gemini-3.5-flash-lite"))
+    page = window.pages["transform"]
+    page.refresh()
+    page.try_buttons["concise"].click()
+    assert _tried(page) and not page.result.isHidden()
+    release = threading.Event()
+
+    def failing(text, key):
+        release.wait(5)
+        raise RuntimeError("Gemini: quota used up")
+    monkeypatch.setattr(app, "run_transform", failing)
+    page.try_buttons["bullets"].click()
+    assert page.result.isHidden()  # the last result isn't this one's
+    page.refresh()  # the theme changed, or settings: the buttons stay off while the model works
+    assert not any(b.isEnabled() for b in page.try_buttons.values())
+    release.set()
+    assert _tried(page)
+    assert page.result.isHidden() and page.note.text() == "Didn't work: Gemini: quota used up"
+    assert all(b.isEnabled() for b in page.try_buttons.values())
+    long = TransformResult("concise", "x", "y", "y", "<p>y</p>", True, [], 4, 2.5, 3,
+                           ["part 2 of 3 stayed as written: lost '$25,000'"])
+    monkeypatch.setattr(app, "run_transform", lambda text, key: long)
+    page.sample.setPlainText("word " * 700)
+    page.try_buttons["concise"].click()
+    assert "700 words: this takes a little longer" in page.note.text()
+    assert _tried(page)
+    assert page.note.text() == ("Concise in 2.5 s, in 3 parts (checked and fixed: 4 answers). Part 2 of 3 stayed as "
+                                "written: lost '$25,000'")
 
 
 def test_text_transform_without_an_ai_model_points_to_the_setup():
@@ -2118,7 +2213,29 @@ def test_meeting_mode_is_a_section_after_live_translation_and_finds_the_meeting_
     assert page.chosen.app == "Microsoft Teams" and page.picker.isHidden() and not page.app_line.isHidden()
     assert page.app_name.text() == "Microsoft Teams" and page.start_button.isEnabled() and page.connect_card.isHidden()
     assert page.state.text() == "Off" and page.doing.text() == "Ready for your meeting in Microsoft Teams"
-    assert [t.isChecked() for t in page.parts.values()] == [True, True, True, True]
+    assert {p: t.isChecked() for p, t in page.parts.items()} == {"translate": True, "speak": False, "record": True,
+                                                                 "minutes": True, "screen": True}  # silent captions
+
+
+def test_the_in_person_tab_needs_no_meeting_app_and_has_its_own_switches():
+    window, app, page = _meeting_window()  # no meeting app open
+    assert [b.text() for b in page.tabs.buttons.values()] == ["Online", "In person"] and page.place == "online"
+    assert not page.start_button.isEnabled() and page.room_card.isHidden()
+    page.tabs.buttons["room"].click()
+    assert page.place == "room" and app.settings.meeting_place == "room"  # remembered for the shortcut
+    assert page.app_card.isHidden() and page.parts_card.isHidden() and not page.room_card.isHidden()
+    assert set(page.room_parts) == {"translate", "record", "minutes"} and "room" in page.subtitle.text()
+    assert page.start_button.isEnabled() and page.doing.text().startswith("Ready: put the laptop")
+    page.room_parts["minutes"].click()
+    assert ("set_meeting_option", "minutes", False, "in person") in app.calls and not app.settings.room_minutes
+    assert app.settings.meeting_minutes  # the online switches stay as they were
+    page.start_button.click()
+    assert ("start_meeting", "In person") in app.calls and page.start_button.text() == "Stop"
+    assert not page.tabs.buttons["online"].isEnabled()  # one meeting at a time
+    page.start_button.click()
+    assert page.state.text() == "Saved" and page.doing.text() == "The meeting in person is saved on this laptop."
+    page.tabs.buttons["online"].click()
+    assert page.state.text() == "Off"  # the room's meeting isn't the online tab's
 
 
 def test_several_meetings_are_picked_from_and_none_says_start_one_first():
@@ -2146,7 +2263,8 @@ def test_a_meeting_starts_records_with_its_cost_then_shows_its_minutes():
     window.refresh()
     assert page.state.text() == "Recording" and page.light.state == "live" and page.light.blinking
     assert page.doing.text() == "Microsoft Teams · 14 min · $0.12 so far · 6 slides"
-    assert not any(t.isEnabled() for t in page.parts.values())  # a running meeting keeps the parts it started with
+    # a running meeting keeps the parts it started with; speaking changes at once, like the bar's speaker button
+    assert [p for p, t in page.parts.items() if t.isEnabled()] == ["speak"]
     page.start_button.click()
     assert ("stop_meeting",) in app.calls and page.state.text() == "Writing the minutes…" and page.light.blinking
     assert not page.start_button.isEnabled()  # one meeting's minutes at a time
@@ -2181,6 +2299,20 @@ def test_the_parts_switch_for_the_next_meeting_and_follow_each_other():
     assert "Switch on live translation or Record" in page.connect_words.text() and not page.start_button.isEnabled()
     page.parts["record"].click()
     assert page.parts["minutes"].isChecked() and page.parts["screen"].isEnabled() and page.start_button.isEnabled()
+
+
+def test_spoken_translation_is_its_own_row_that_needs_live_translation():
+    window, app, page = _meeting_window([("Zoom", "Zoom Meeting", 102)], live_speak=True)
+    keys = list(page.parts)
+    assert keys.index("speak") == keys.index("translate") + 1 and "speak" not in page.room_parts  # never in the room
+    assert not page.parts["speak"].isChecked() and page.parts["speak"].isEnabled()  # the Live page's speaking aside
+    page.parts["speak"].click()
+    assert ("set_meeting_option", "speak", True) in app.calls and app.settings.meeting_speak
+    page.parts["translate"].click()
+    assert not page.parts["speak"].isChecked() and not page.parts["speak"].isEnabled()
+    assert page.part_rows["speak"].toolTip() == "Needs Live translation" and app.settings.meeting_speak  # kept
+    page.parts["translate"].click()
+    assert page.parts["speak"].isChecked() and page.part_rows["speak"].toolTip() == ""
 
 
 def test_without_a_gemini_key_only_recording_can_start():
@@ -2221,3 +2353,42 @@ def test_a_past_meeting_with_a_recording_but_no_minutes_can_have_them_written(tm
     window.refresh()
     (busy,) = [b for b in page.findChildren(QPushButton) if b.text() == "Writing the minutes…"]
     assert not busy.isEnabled()
+
+
+# ---- the top bar: the look and Check for updates
+
+def test_the_top_bar_switches_light_and_dark_at_once_and_remembers_it():
+    window, app = _window(settings=Settings(welcomed=True))
+    assert list(window.appearance.buttons) == ["system", "light", "dark"]
+    assert window.appearance.buttons["system"].isChecked() and w.theme.appearance() == "system"
+    window.appearance.buttons["light"].click()
+    assert app.settings.appearance == "light" and w.theme.theme() == "light" and not w.theme.dark_mode()
+    window.appearance.buttons["dark"].click()
+    assert app.settings.appearance == "dark" and w.theme.theme() == "dark"
+    window.show_page("settings")
+    page = window.pages["settings"]
+    assert page.appearance.buttons["dark"].isChecked()
+    page.appearance.buttons["light"].click()  # the same choice in Settings
+    assert app.settings.appearance == "light" and window.appearance.buttons["light"].isChecked()
+    assert w.theme.theme() == "light"
+    again, _ = _window(settings=Settings(welcomed=True, appearance="dark"))  # the next start (or another profile)
+    assert again.appearance.buttons["dark"].isChecked() and w.theme.theme() == "dark"
+    _window(settings=Settings(welcomed=True))  # back to the default for the tests after
+    assert w.theme.appearance() == "system"
+
+
+def test_check_for_updates_in_the_top_bar_says_checking_then_the_answer():
+    window, app = _window(settings=Settings(welcomed=True))
+    assert window.check_button.text() == "Check for updates" and window.check_button.kind == "primary"
+    window.check_button.click()
+    assert ("check_for_updates", True) in app.calls
+    assert window.check_button.text() == "Checking…" and not window.check_button.isEnabled()
+    window.set_update_status("Checking for updates...")
+    assert not window.check_button.isEnabled()
+    window.set_update_status("You have the latest version (2.7.0).")
+    assert window.check_button.isEnabled() and window.check_button.text() == "Check for updates"
+    assert window.toast.text.text() == "You have the latest version (2.7.0)."
+    window.check_button.click()
+    window.show_update("Rflow 2.8.0 is available (you have 2.7.0).", version="2.8.0")  # the banner says it
+    window.set_update_status("Rflow 2.8.0 is available (you have 2.7.0).")
+    assert window.check_button.isEnabled() and not window.banner_holder.isHidden()

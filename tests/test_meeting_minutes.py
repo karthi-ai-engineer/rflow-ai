@@ -134,6 +134,33 @@ def test_the_requests_carry_both_tracks_the_frames_inline_and_the_schemas(tmp_pa
     assert set(minutes["generationConfig"]["responseJsonSchema"]["required"]) >= {"title", "decisions", "actions"}
 
 
+def test_a_meeting_in_person_sends_the_room_and_tells_every_voice_apart(tmp_path, ledger):
+    folder = tmp_path / "2026-10-27 1003 In person"
+    folder.mkdir()
+    write_wav(folder / "room.wav", 60)
+    (folder / "meeting.json").write_text(json.dumps({"app": "In person", "title": "", "in_person": True,
+                                                     "started": "2026-10-27T10:03:00", "seconds": 60}), encoding="utf-8")
+    gemini = Gemini(transcripts=[{"language": "ja", "names": [], "lines": [
+        {"time": "00:01", "speaker": "Speaker 1", "text": "おはようございます。"}]}])
+    result = run(folder, gemini)
+    (transcript,), (minutes,) = gemini.transcript_requests(), gemini.minutes_requests()
+    parts = transcript["contents"][0]["parts"]
+    assert len(gemini.uploads) == 1 and "meeting room" in parts[0]["text"]
+    prompt = parts[-1]["text"]
+    assert "a meeting in person" in prompt and 'never use "You"' in prompt and "laptop track" not in prompt
+    assert "a meeting in person" in minutes["contents"][0]["parts"][0]["text"]
+    assert result.transcript == [("00:01", "Speaker 1", "おはようございます。")]
+    assert mm.estimate(3600, 0, tracks=1) < mm.estimate(3600, 0)  # one track: less audio
+
+
+def test_an_online_meeting_s_prompt_keeps_you_and_the_laptop_track(tmp_path, ledger):
+    gemini = Gemini()
+    run(meeting(tmp_path), gemini)
+    prompt = gemini.transcript_requests()[0]["contents"][0]["parts"][-1]["text"]
+    assert "an online meeting" in prompt and '"You" for speech on the microphone track' in prompt
+    assert "{" not in prompt.replace("{languages}", "")  # every placeholder filled
+
+
 def test_uploaded_tracks_are_deleted_and_a_silent_microphone_isn_t_sent(tmp_path, ledger):
     gemini = Gemini()
     run(meeting(tmp_path, mic_loud=False), gemini)

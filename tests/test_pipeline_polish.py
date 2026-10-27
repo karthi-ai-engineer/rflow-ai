@@ -9,7 +9,7 @@ import pytest
 
 from sst import gateway
 from sst.gateway import SYSTEM_PROMPT, GatewayConfig, Polisher
-from sst.pipeline.polish import MAX_TERMS, POLISH_PROMPT, GatewayLLM, LLMError, LLMPolisher, present_terms
+from sst.pipeline.polish import MAX_TERMS, POLISH_PROMPT, GatewayLLM, LLMError, LLMPolisher, pieces, present_terms
 
 HEARD = "um so we merge the five PRs today"
 CLEAN = "So we merge the five PRs today."
@@ -193,3 +193,35 @@ def test_without_a_beginning_the_rest_is_cleaned_like_a_whole_dictation(fake):
     llm = fake.llm()
     llm.polish_continued(HEARD, "  ")
     assert fake.system() == POLISH_PROMPT
+
+
+def test_pieces_cut_a_long_text_after_sentence_ends():
+    text = " ".join(f"Sentence number {n} has six words." for n in range(300))  # 1,800 words
+    parts = pieces(text, 600)
+    assert " ".join(parts) == text and len(parts) == 3
+    assert all(p.endswith(".") for p in parts) and all(len(p.split()) <= 606 for p in parts)
+    assert pieces("no punctuation at all " * 500, 600) and max(len(p.split()) for p in pieces("word " * 3000, 600)) == 1200
+    assert pieces("A short one.") == ["A short one."]
+
+
+def test_a_long_dictation_is_cleaned_in_pieces_each_after_the_ones_before(fake):
+    text = " ".join(f"Sentence number {n} has six words." for n in range(300))
+    assert fake.llm("echo").polish(text) == text
+    assert len(fake.requests) == 3  # a 30-minute dictation in one request would need more answer than many models write
+    assert "<before>" not in fake.system(0) and "<before>" in fake.system(1) and "number 99 has" in fake.system(1)
+    assert all(len(r["messages"][-1]["content"].split()) <= 606 for r in fake.requests)
+
+
+def test_a_long_dictation_with_a_piece_that_fails_fails_whole(fake, monkeypatch):
+    llm, calls = fake.llm("echo"), []
+    real = llm._polish
+
+    def flaky(text, terms, extra):
+        calls.append(text)
+        if len(calls) == 2:
+            raise LLMError("the AI took too long")
+        return real(text, terms, extra)
+
+    monkeypatch.setattr(llm, "_polish", flaky)
+    with pytest.raises(LLMError):  # the pipeline types the formatted text: never one with a piece missing
+        llm.polish(" ".join(f"Sentence number {n} has six words." for n in range(300)))

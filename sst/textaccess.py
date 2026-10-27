@@ -200,9 +200,15 @@ def copy_selection(timeout: float = 0.6, fallback: bool = False) -> str | None:
         return None  # nothing copied, so the user's clipboard was never touched: no need to rewrite it
     text = ours = None
     try:
-        with _clipboard():  # waits while the app still holds the clipboard open to write it
-            ours = _sequence()
-            text = _read_text()
+        for attempt in range(3):  # an app writing a long selection (Word: text, HTML, RTF) may hold it open over a second
+            try:
+                with _clipboard():  # waits a second while the app still holds the clipboard open to write it
+                    ours = _sequence()
+                    text = _read_text()
+                break
+            except OSError:
+                if attempt == 2:
+                    raise
     except Exception:  # whatever went wrong, the user's clipboard must come back
         log.exception("Could not read the copied selection")
     finally:
@@ -332,14 +338,21 @@ def _select_close(plain: str, want: str) -> str | None:
 def _closest_start(around: str, want: str) -> int | None:
     """Where in `around` (the text before the caret) the text typed last starts, allowing the small changes apps make
     (difflib's ratio of at least CLOSE_ENOUGH, compared loosely); None when nothing there is that close."""
-    best, best_score = None, CLOSE_ENOUGH
+    # The app changes a few characters, not a fifth of a long dictation: the starts looked at are bounded (a 3,300-character
+    # dictation took 50 s here, with Text Transform showing nothing meanwhile), and `want` is indexed once for all of them.
+    best, best_score, slack = None, CLOSE_ENOUGH, max(3, min(len(want) // 5, 2 * LOOK_FURTHER + 8))
+    matcher = difflib.SequenceMatcher(None, autojunk=False)
+    matcher.set_seq2(want)
     for start in range(len(around)):
         tail = _loose(around[start:])
         if not tail:
             break
-        if around[start].isspace() or abs(len(tail) - len(want)) > max(3, len(want) // 5):
+        if around[start].isspace() or abs(len(tail) - len(want)) > slack:
             continue  # a selection never starts on a space
-        score = difflib.SequenceMatcher(None, tail, want, autojunk=False).ratio()
+        matcher.set_seq1(tail)
+        if matcher.real_quick_ratio() < best_score or matcher.quick_ratio() < best_score:
+            continue  # can't beat the best one: the full comparison isn't needed
+        score = matcher.ratio()
         if score > best_score or (score == best_score and best is None):
             best, best_score = start, score
     return best
@@ -384,7 +397,9 @@ def paste_rich(text: str, html: str | None = None) -> None:
         # the change: Ctrl+V at once would paste what it copied, over itself. A moment lets the news arrive.
         time.sleep(SETTLE_DELAY)
         send_keys(_CTRL_V)
-        time.sleep(RESTORE_DELAY)  # the app reads the clipboard when it handles Ctrl+V, a moment later
+        # The app reads the clipboard when it handles Ctrl+V, a moment later; longer for a long text with its HTML (a rich
+        # editor busy laying it out could otherwise read the user's clipboard back instead).
+        time.sleep(RESTORE_DELAY + min(1.0, len(text) / 10000))
     finally:
         _restore(saved, ours)
 

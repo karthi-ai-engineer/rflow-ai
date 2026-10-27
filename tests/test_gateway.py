@@ -67,6 +67,10 @@ class FakeGateway:
                                                  "content": [{"type": "text", "text": part}] if part else []})
                     return self._reply(200, {"choices": [{"message": {"role": "assistant", "content": part},
                                                           "finish_reason": "length"}]})
+                if model in ("empty", "filtered"):  # no text: an empty answer, or one stopped by the content filter
+                    return self._reply(200, {"choices": [{"message": {"role": "assistant", "content": ""},
+                                                          "finish_reason": "content_filter" if model == "filtered"
+                                                          else "stop"}]})
                 answer = {"long": text + " and then some more words " * 10,
                           "think": "<think>let me see</think> So we merge the five PRs today.",
                           "quoted": '"So we merge the five PRs today."'}.get(model, "So we merge the five PRs today.")
@@ -257,6 +261,31 @@ def test_text_transform_and_translate_get_a_higher_token_limit(fake):
     cleanup = _last_post(fake)["max_completion_tokens"]
     polisher.complete(HEARD)  # a translation into Tamil or Japanese takes several tokens a word
     assert _last_post(fake)["max_completion_tokens"] >= cleanup + 200
+
+
+@pytest.mark.parametrize("model, said", [("empty", "gave an empty answer"), ("filtered", "content filter")])
+def test_an_empty_or_filtered_answer_is_said_plainly(fake, model, said):
+    """Gemini's SAFETY stop came back as an empty text, which Text Transform then showed as "the result is empty"."""
+    with pytest.raises(GatewayError, match=said):
+        fake.polisher(model=model).complete(HEARD)
+    assert fake.polisher(model=model, fallback="good").complete(HEARD) == "So we merge the five PRs today."  # the backup
+    p = fake.polisher(model=model)
+    assert p.polish(HEARD) == HEARD and said in p.last_error  # a dictation is typed as heard
+
+
+def test_a_long_or_japanese_transform_gets_time_and_tokens_for_its_length(fake, monkeypatch):
+    """Japanese has no spaces: 1,500 characters counted as one word, and got one word's time (8 s) and 264 tokens."""
+    timeouts = []
+    real = Polisher._request
+    monkeypatch.setattr(Polisher, "_request", lambda self, path, body, timeout, method="POST":
+                        timeouts.append(timeout) or real(self, path, body, timeout, method))
+    japanese = "明日の会議は午後3時から始まりますので、資料の準備をお願いします。" * 50  # 1,650 characters
+    assert gateway.words_in(japanese) >= 600 and gateway.words_in("three plain words") == 3
+    fake.polisher(model="gpt-4.1-mini", provider="openai").complete(japanese)
+    assert timeouts[-1] >= gateway.TRANSFORM_TIMEOUT + 600 * gateway.TRANSFORM_PER_WORD
+    assert _last_post(fake)["max_completion_tokens"] >= 600 * gateway.TRANSFORM_TOKENS_PER_WORD
+    fake.polisher().complete(" ".join(["word"] * 350))  # a 350-word part: a minute at most to write it
+    assert timeouts[-1] >= 45
 
 
 @pytest.mark.parametrize("model", ["think", "quoted"])
