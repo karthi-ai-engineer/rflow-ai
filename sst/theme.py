@@ -89,6 +89,18 @@ SHADOWS = {
 }
 
 _theme = "dark"
+APPEARANCES = ("system", "light", "dark")  # Settings.appearance
+_appearance = "system"
+
+
+def set_appearance(name: str) -> None:
+    """The user's choice: as Windows is set, or always light or dark (dark_mode() follows it)."""
+    global _appearance
+    _appearance = name if name in APPEARANCES else "system"
+
+
+def appearance() -> str:
+    return _appearance
 
 
 def set_theme(name: str) -> None:
@@ -101,6 +113,8 @@ def theme() -> str:
 
 
 def dark_mode() -> bool:
+    if _appearance != "system":
+        return _appearance == "dark"
     return QGuiApplication.styleHints().colorScheme() != Qt.ColorScheme.Light  # Obsidian unless Windows says light
 
 
@@ -151,6 +165,10 @@ def font(px: float, weight: int = 400, mono: bool = False, spacing: float = 0.0,
 # ---------------------------------------------------------------- icons (the design's line icons, 24-unit grid)
 
 ICONS = {
+    "sun": '<circle cx="12" cy="12" r="4"/><path d="M12 2.5V5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 '
+           '1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8"/>',
+    "moon": '<path d="M19.5 14.5A7.5 7.5 0 0 1 9.5 4.5a7.5 7.5 0 1 0 10 10z"/>',
+    "display": '<rect x="3.5" y="4.5" width="17" height="11.5" rx="2"/><path d="M9 20h6M12 16v4"/>',  # as Windows is set
     "meeting": '<circle cx="9" cy="8.5" r="3"/><path d="M3.5 19.5a5.5 5.5 0 0 1 11 0"/>'
                '<circle cx="16.5" cy="9.5" r="2.5"/><path d="M16 14.1a4.5 4.5 0 0 1 4.5 5.4"/>',  # two people at a meeting
     "home":'<path d="M3.5 10.2 12 3.5l8.5 6.7V19a1.5 1.5 0 0 1-1.5 1.5h-4.5v-6h-5v6H5A1.5 1.5 0 0 1 3.5 19z"/>',

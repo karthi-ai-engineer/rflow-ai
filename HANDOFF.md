@@ -12,6 +12,25 @@ _Last updated: 2026-10-23_
 ## Start here (a new session, or the owner's other laptop)
 
 **Where things stand (2026-10-27):**
+- **Phase 50** (#225, #226; not released yet). Meeting mode has two tabs, **Online** and **In person**
+  (`Settings.meeting_place`, which the shortcut and tray also follow).
+  - In person, the window is `sst.meeting.apps.IN_PERSON`: no app, no frames, and the meeting never stops by itself.
+  - The microphone alone records `room.wav` (`Recorder(room=True)`).
+  - Live translation runs with `TrayApp.room_live_config()`: source microphone, translated into `live_target`, never
+    spoken. This makes it the room's live transcript.
+  - The minutes use `ROOM_WORDS`: every voice on the one track is a "Speaker N", never "You".
+  - Its switches are `Settings.room_translate`, `room_record` and `room_minutes`.
+  - Online has a **Spoken translation** row (#233, `Settings.meeting_speak`, off by default, needs Live translation):
+    `TrayApp.meeting_live_config()` is the Live page's config with speak set by it alone (the Live page's speed and
+    ducking). It applies at once while the meeting runs, and the bar's speaker button on a meeting's bar
+    (`set_bar_speak`) is this switch. In person nothing turns speaking on (#234). `_MeetingLive` stops and counts only
+    the LiveSession it started (#235). Includes #228 (the spoken-translation stall, #227).
+  - `tests/test_live_paths.py` runs live translation end to end in virtual time (#236): an engine answering like Gemini
+    (its voice 1 s later, silence for silence), each source, speaking on/off, the cost saver, a reconnect, the whole mix
+    (Bluetooth), 40 sentences in a row. Without #228 the whole-mix and speakers cases stall.
+  - A bar over every page has **System / Light / Dark** (`Settings.appearance`; `theme.set_appearance`, which
+    `dark_mode()` follows; also in Settings) and a purple **Check for updates**, which shows "Checking…" and then a
+    toast.
 - **Rflow 2.7.0** (phase 49, #223) adds **Meeting mode** (its own page after Live translation; Ctrl+Alt+M), a package
   of its own, `sst/meeting/`, which may use `sst.live` but never `sst.pipeline`, `sst.dictate` or `sst.audio`:
   `apps.py` finds the meeting window (Teams, Zoom, Google Meet in a browser, Webex; one found is chosen, several are
@@ -355,7 +374,8 @@ laptop (useful for phase 13's local AI cleanup); check with `ollama list` on the
   text is kept out of Win+V history. Pasting was chosen over simulated typing because it is instant and editors don't
   auto-close brackets partway through.
 - **Long audio is split at pauses into pieces of up to 30 s.** Parakeet crashed in onnxruntime on a 514 s recording.
-- **Recordings stop by themselves after 3 minutes** (the owner's choice). 3 minutes transcribes in about 23 s.
+- **Recordings stop by themselves only after an hour** (`dictate.MAX_SECONDS`; 3 minutes until 2026-10-27, when the
+  owner asked for no limit: the take is kept whole in memory, 230 MB an hour at 16 kHz). 3 minutes transcribes in about 23 s.
 - **Recordings are kept** as `.wav` + `.txt` in `recordings/` (git-ignored) to compare engines later. `--no-save` turns
   this off.
 
@@ -509,7 +529,7 @@ laptop (useful for phase 13's local AI cleanup); check with `ollama list` on the
   | Fallback (switched-off `qwen3` chosen) | 1.17 s via model 1 | | |
 
   "STD dictation" → "SST Dictation", "pr's" → "PRs", and fillers were removed.
-- `MAX_PIECE_SECONDS` is 180: a whole dictation (max 3 min) is transcribed in one piece.
+- `MAX_PIECE_SECONDS` is 180: a whole recording up to 3 min is transcribed in one piece, a longer one in 3-minute pieces.
 - Tests: 94. `tests/test_gateway.py` runs a fake gateway on localhost (good, error, slow, unreachable, implausible
   answers, keep-alive, fallback).
 
@@ -952,7 +972,9 @@ laptop (useful for phase 13's local AI cleanup); check with `ollama list` on the
   | Groq | the same, at `api.groq.com/openai/v1` | whisper-large-v3-turbo, whisper-large-v3 |
   | Google Gemini | `POST /v1beta/models/<model>:generateContent`, `x-goog-api-key`, the WAV inline (base64) with an instruction to write down exactly what is said | gemini-flash-lite-latest, gemini-flash-latest, gemini-3.5-flash-lite, gemini-3.6-flash |
 
-  - The recording goes as a 16 kHz 16-bit WAV (32 KB a second; 3 minutes is 5.8 MB, under every provider's limit).
+  - The recording goes as a 16 kHz 16-bit WAV (32 KB a second); a whole recording goes in pieces of
+    `cloud.WHOLE_PIECE_SECONDS` (5 min, 9.6 MB, under every provider's limit), and a long text to the AI cleanup in
+    pieces of `polish.PIECE_WORDS` (600 words), each after the ones before it.
   - Hints: the chosen language (OpenAI's `language`, or named in Gemini's instruction) and Your words (OpenAI's
     `prompt`, or in Gemini's instruction). Gemini's thinking parts are left out of the text.
   - The connection opens while the user speaks (`prepare()`), with a 1.5 s connect timeout and 3 tries (the

@@ -54,7 +54,7 @@ CF_EXCLUDE_FROM_HISTORY = user32.RegisterClipboardFormatW("ExcludeClipboardConte
 _NOT_MEMORY = {2, 3, 9, 14, 0x80, 0x82, 0x83, 0x8E}
 
 RESTORE_DELAY = 0.5  # seconds the target app gets to read the clipboard before the old content returns
-HELD_WAIT = 200.0  # seconds a dictation waits for held keys: they may be held for the next one already (up to 3 min)
+HELD_WAIT = 3620.0  # seconds a dictation waits for held keys: they may be held for the next one already (up to an hour)
 # Held from a paste's first clipboard write until the user's clipboard is back, released by the restore (on a timer
 # thread): the dictation goes on at once, and a next paste waits for the restore instead of saving our own text as the
 # user's (or replacing the text before the app has read it).
