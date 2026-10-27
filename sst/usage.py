@@ -2,8 +2,8 @@
 
 No API key can read the real spend or balance (only AI Studio's Billing page shows it; the Cloud Billing API needs
 OAuth), so Rflow counts what it sends and gets back and prices it at Google's list prices (sst.costs):
-  generateContent (speech on a Flash model, Gemini Transcribe)  usageMetadata: the prompt by modality (audio, text),
-                                                                the answer, and the thinking, billed as output
+  generateContent (speech on a Flash model, Gemini Transcribe,  usageMetadata: the prompt by modality (audio, text),
+  meeting minutes)                                              the answer, and the thinking, billed as output
   the OpenAI-compatible endpoint (cleanup, Text Transform,      usage: prompt_tokens in; total_tokens - prompt_tokens
   Translate)                                                    out (Gemini leaves the thinking out of completion_tokens)
   the Live API (Transcribe Live, Live Translate)                seconds of audio sent and received, 25 tokens a second
@@ -41,6 +41,7 @@ FEATURES = {  # key -> what the card calls it, and whether its amount is minutes
     "transform": ("Text Transform", False),
     "translate": ("Translate", False),
     "live_translation": ("Live translation", True),
+    "meeting": ("Meeting minutes", True),  # sst.meeting.minutes: the recording's transcript, then the minutes
     "tests": ("Tests and the Reading test", False),
 }
 COUNTS = ("audio_in", "text_in", "out", "thoughts", "audio_out", "seconds", "calls", "unsent")  # unsent: s, not billed

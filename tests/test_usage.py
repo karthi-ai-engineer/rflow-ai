@@ -185,3 +185,12 @@ def test_the_tracker_imports_nothing_live_translation_may_not():
     names = [a.name for node in ast.walk(tree) if isinstance(node, ast.Import) for a in node.names]
     names += [node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
     assert {name for name in names if name.startswith("sst")} == {"sst"}  # from sst import costs
+
+
+def test_meeting_minutes_have_a_line_of_their_own_counted_in_minutes_of_meeting():
+    ledger = Ledger(None, today=Today(date(2026, 10, 27)))
+    ledger.record("meeting", "gemini-3.6-flash", audio_in=230_400, seconds=3600)
+    ledger.record("meeting", "gemini-3.6-flash", text_in=40_000, out=2_000)  # the minutes: no audio of their own
+    (line,) = ledger.summary().lines
+    assert (line.title, line.amount, line.calls) == ("Meeting minutes", "60 min", 2)
+    assert line.cost == pytest.approx((270_400 * 0.75 + 2_000 * 3.75) / 1e6)
