@@ -12,6 +12,20 @@ _Last updated: 2026-10-23_
 ## Start here (a new session, or the owner's other laptop)
 
 **Where things stand (2026-10-27):**
+- **Rflow 2.7.0** (phase 49, #223) adds **Meeting mode** (its own page after Live translation; Ctrl+Alt+M), a package
+  of its own, `sst/meeting/`, which may use `sst.live` but never `sst.pipeline`, `sst.dictate` or `sst.audio`:
+  `apps.py` finds the meeting window (Teams, Zoom, Google Meet in a browser, Webex; one found is chosen, several are
+  offered; Teams titles can't tell a meeting from a popped-out chat, so one may be offered too), `screen.py` sees that
+  window only (PrintWindow, PW_RENDERFULLCONTENT) every 5 s and keeps a frame when a coarse grid of it changed (a new
+  slide, not a webcam tile), `recorder.py` writes others.wav (the laptop's sound) and you.wav (the microphone) as frames
+  come, `session.py` (`MeetingSession`) runs the parts the switches choose (live translation, record, minutes, screen),
+  its cost, and stops when the meeting window closes, and `minutes.py` sends the tracks through the Files API to
+  `gemini-3.6-flash` (backup 3.5 Flash-Lite) for a transcript with speakers in 20-minute stretches, then the transcript
+  and up to MAX_FRAMES frames for the title, summary, decisions and action items (JSON by `responseJsonSchema`), written
+  to minutes.md and minutes.json in `<profile>/meetings/<date time app>/`; about $0.27 an hour (doubles 2027-01-01 with
+  3.6 Flash's price). A meeting quit or failed while its minutes were written gets "Write minutes" in Past meetings.
+  Not yet tried on a real meeting: the request fields `responseJsonSchema` and per-part `mediaResolution` (a 400 for
+  the latter is retried without it), the Teams window grab, and the minutes' quality in Japanese.
 - **Rflow 2.6.4** (phase 48, #221) adds the **Cost saver** for live translation, off by default (`Settings.live_save`,
   `LiveConfig.save`; the cloud icon on the bar, a switch on the Live page). Live Translate bills every second streamed both
   ways (about $0.037/min), and Gemini's voice comes back 1:1 with what's sent, silence included (the log's "736 s sent,
