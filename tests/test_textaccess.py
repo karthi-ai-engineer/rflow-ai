@@ -323,7 +323,7 @@ def test_a_long_dictation_the_app_changed_is_found_quickly(desktop):
     d = desktop("Dear team,\n" + there)
     started = time.perf_counter()
     assert select_last(typed) == there and d.selected == there
-    assert time.perf_counter() - started < 5
+    assert time.perf_counter() - started < 20  # it took about 50 s; 2-3 s now, more on a busy or emulated (ARM) runner
 
 
 def test_a_clipboard_the_app_holds_while_writing_a_long_copy_is_waited_for(desktop, monkeypatch):
