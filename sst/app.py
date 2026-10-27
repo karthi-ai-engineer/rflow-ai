@@ -212,6 +212,7 @@ class Pill(QWidget):
 
     HEIGHT = 40
     MIN_WIDTH = 176
+    MAX_WIDTH = 640  # a longer message is cut short with "…" (Text Transform says it in a notification too: fits())
     MARGIN = 24  # transparent room around the capsule for its soft shadow
     BARS = 16
 
@@ -256,9 +257,13 @@ class Pill(QWidget):
             self._hide_timer.start(1500)
         elif state in ("typed_raw", "typed_local"):
             self._hide_timer.start(1800)
-        elif state in ("warning", "error"):
-            self._hide_timer.start(4000)
+        elif state in ("warning", "error"):  # time to read it: a long message stays longer
+            self._hide_timer.start(min(10000, 4000 + 60 * max(0, len(message) - 40)))
         self.update()
+
+    def fits(self, message: str) -> bool:
+        """Whether a warning shows whole in the pill, not cut short."""
+        return 16 + 10 + QFontMetrics(self._font).horizontalAdvance(message) + 36 <= self.MAX_WIDTH
 
     def hideEvent(self, event):
         self._animation.stop()
@@ -272,7 +277,7 @@ class Pill(QWidget):
             content = 34 + 10 + QFontMetrics(self._font).horizontalAdvance(self._text())
         else:
             content = 16 + 10 + QFontMetrics(self._font).horizontalAdvance(self._text())
-        return max(self.MIN_WIDTH, content + 36)
+        return min(self.MAX_WIDTH, max(self.MIN_WIDTH, content + 36))  # wider, it ran off both sides of a small screen
 
     def _text(self) -> str:
         return {"typed": "Typed", "typed_raw": "Typed as heard · AI offline",
@@ -328,7 +333,8 @@ class Pill(QWidget):
             p.setFont(self._font)
             p.drawText(QRectF(x + 44, body.top(), width, body.height()), Qt.AlignmentFlag.AlignVCenter, words)
         else:
-            words = self._text()
+            room = self.width() - 2 * self.MARGIN - 36 - 26
+            words = QFontMetrics(self._font).elidedText(self._text(), Qt.TextElideMode.ElideRight, room)
             width = 16 + 10 + QFontMetrics(self._font).horizontalAdvance(words)
             x = body.center().x() - width / 2
             if self.state in ("typed", "transformed"):
@@ -1823,6 +1829,8 @@ class TrayApp:
         """A short word in the pill (and the log, for warnings)."""
         if state == "warning":
             log.info("Text Transform: %s", message)
+            if not self.pill.fits(message):  # cut short in the pill: the whole of it in a notification
+                self._notify("Text Transform", message, QSystemTrayIcon.MessageIcon.Warning)
         self.pill.show_state(state, message)
 
     def remember(self, text: str, original: str) -> None:
