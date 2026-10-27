@@ -213,6 +213,7 @@ class Pill(QWidget):
 
     HEIGHT = 28
     MIN_WIDTH = 104
+    MAX_WIDTH = 640  # a longer message is cut short with "…" (Text Transform says it in a notification too: fits())
     PAD = 12  # inside the capsule, on each side of its content
     GAP = 7  # between the waveform, dots or icon and the words
     MARGIN = 24  # transparent room around the capsule for its soft shadow (the "float" shadow reaches about 20 px)
@@ -260,9 +261,13 @@ class Pill(QWidget):
             self._hide_timer.start(1500)
         elif state in ("typed_raw", "typed_local"):
             self._hide_timer.start(1800)
-        elif state in ("warning", "error"):
-            self._hide_timer.start(4000)
+        elif state in ("warning", "error"):  # time to read it: a long message stays longer
+            self._hide_timer.start(min(10000, 4000 + 60 * max(0, len(message) - 40)))
         self.update()
+
+    def fits(self, message: str) -> bool:
+        """Whether a warning shows whole in the pill, not cut short."""
+        return self.ICON + self.GAP + QFontMetrics(self._font).horizontalAdvance(message) + 2 * self.PAD <= self.MAX_WIDTH
 
     def hideEvent(self, event):
         self._animation.stop()
@@ -287,7 +292,10 @@ class Pill(QWidget):
         return self.ICON
 
     def _words(self) -> tuple[str, QFont]:
-        return (self._timer(), self._mono) if self.state == "recording" else (self._text(), self._font)
+        if self.state == "recording":
+            return self._timer(), self._mono
+        room = int(self.MAX_WIDTH - 2 * self.PAD - self._lead() - self.GAP)
+        return QFontMetrics(self._font).elidedText(self._text(), Qt.TextElideMode.ElideRight, room), self._font
 
     def _content(self) -> float:
         words, font = self._words()
@@ -295,7 +303,8 @@ class Pill(QWidget):
 
     def _width(self) -> int:
         """The capsule's width (the window has MARGIN more on each side)."""
-        return max(self.MIN_WIDTH, math.ceil(self._content()) + 2 * self.PAD)
+        # at most MAX_WIDTH: wider, a long error ran off both sides of a small screen (_words() cuts it short)
+        return min(self.MAX_WIDTH, max(self.MIN_WIDTH, math.ceil(self._content()) + 2 * self.PAD))
 
     def _text(self) -> str:
         return {"typed": "Typed", "typed_raw": "Typed as heard · AI offline",
@@ -1835,6 +1844,8 @@ class TrayApp:
         """A short word in the pill (and the log, for warnings)."""
         if state == "warning":
             log.info("Text Transform: %s", message)
+            if not self.pill.fits(message):  # cut short in the pill: the whole of it in a notification
+                self._notify("Text Transform", message, QSystemTrayIcon.MessageIcon.Warning)
         self.pill.show_state(state, message)
 
     def remember(self, text: str, original: str) -> None:

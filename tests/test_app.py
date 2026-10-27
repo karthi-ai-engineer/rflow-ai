@@ -58,6 +58,31 @@ def test_the_pill_is_small_and_its_time_grows_with_a_long_dictation(monkeypatch)
     pill.show_state("idle")
 
 
+def test_a_very_long_message_stays_inside_the_pill_and_longer_on_screen():
+    """A provider's error ran the pill off both sides of the screen, and vanished in 4 s before it could be read."""
+    pill = sst_app.Pill()
+    message = "Text Transform didn't work: Gemini: quota used up (HTTP 429 " + "x" * 200 + ")"
+    pill.show_state("warning", message)
+    assert pill.MAX_WIDTH - 8 <= pill.width() - 2 * pill.MARGIN <= pill.MAX_WIDTH  # cut short with "…" at the limit
+    assert not pill.grab().isNull() and not pill.fits(message)
+    assert pill._hide_timer.interval() == 10000
+    pill.show_state("warning", "Almost silent.")
+    assert pill.fits("Almost silent.") and pill._hide_timer.interval() == 4000
+    pill.show_state("idle")
+
+
+def test_a_text_transform_warning_cut_short_in_the_pill_is_also_a_notification(tray_app, monkeypatch):
+    app, _, _ = tray_app
+    told = []
+    monkeypatch.setattr(app, "_notify", lambda title, message, *_: told.append((title, message)))
+    app.say("warning", "Kept your text: lost '$25,000'")
+    assert told == []
+    long = "Text Transform didn't work: " + "the provider said something very long about it " * 5
+    app.say("warning", long)
+    assert told == [("Text Transform", long)]
+    app.pill.show_state("idle")
+
+
 def test_only_the_pill_lets_clicks_through_and_nothing_takes_the_focus(monkeypatch):
     import ctypes
     styles = {}

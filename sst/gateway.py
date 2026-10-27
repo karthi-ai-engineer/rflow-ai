@@ -37,8 +37,11 @@ MAX_ASKED = 2            # models asked for one text: the chosen one and one bac
 ANSWER_TIMEOUT = 2.0     # seconds, plus ANSWER_PER_WORD for each word; a normal sentence takes 0.5-0.7 s
 ANSWER_PER_WORD = 0.04
 DOWN_FOR = 60.0          # after the gateway couldn't be reached (e.g. off the office network), skip cleanup this long
-TRANSFORM_TIMEOUT = 8.0    # seconds for a Text Transform answer, plus TRANSFORM_PER_WORD for each word
-TRANSFORM_PER_WORD = 0.05
+# Seconds for a Text Transform answer, plus TRANSFORM_PER_WORD for each word: the whole answer is written before the first
+# byte comes back, and a 350-word part rewritten as Professional is ~500 tokens (8 s + 0.05 s a word timed out on slow
+# answers; the user waits for this one on purpose).
+TRANSFORM_TIMEOUT = 15.0
+TRANSFORM_PER_WORD = 0.1
 IDLE_RECONNECT = 30.0    # servers drop idle connections; refresh an older one while the user is speaking
 # The answer's token limit: a cleanup keeps the words; Text Transform and Translate may write more (Tamil or Japanese take
 # several tokens a word). An answer that reaches it is cut off, and never used.
@@ -363,7 +366,7 @@ class Polisher:
         with a readable reason."""
         if not self.address or not self.model:
             raise GatewayError("no AI model is set up: choose one in AI cleanup")
-        words, reason, asked = len(text.split()), "", 0
+        words, reason, asked = words_in(text), "", 0
         timeout, limit = TRANSFORM_TIMEOUT + TRANSFORM_PER_WORD * words, TRANSFORM_TOKENS + TRANSFORM_TOKENS_PER_WORD * words
         for polisher, model in self.routes():
             if refused := polisher._refused(model):
@@ -499,10 +502,14 @@ class Polisher:
             if status != 200 or "error" in answer or not answer.get("choices"):
                 raise GatewayError(f"{_short(model)}: HTTP {status} {_detail(answer, data)}")
             choice = answer["choices"][0]
-            content, cut = choice.get("message", {}).get("content") or "", choice.get("finish_reason") == "length"
+            content, cut = (choice.get("message") or {}).get("content") or "", choice.get("finish_reason") == "length"
+            if choice.get("finish_reason") == "content_filter":  # Gemini's SAFETY, OpenAI's filter: maybe half an answer
+                raise GatewayError(f"{_short(model)} stopped its answer (the provider's content filter)")
         if cut:  # stopped at the limit: never a text with a hole in it (the backup model, or the text as heard)
             raise GatewayError(f"{_short(model)} ran out of tokens before "
                                + ("the end of its answer" if content.strip() else "answering (thinking used them up)"))
+        if not content.strip():  # said plainly, not "the result is empty" from the checks after it
+            raise GatewayError(f"{_short(model)} gave an empty answer")
         content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
         if len(content) > 1 and content[0] == content[-1] == '"' and not text.startswith('"'):
             content = content[1:-1].strip()  # some models wrap the answer in quotes
@@ -578,6 +585,15 @@ class Polisher:
         if not self.vocabulary:
             return prompt
         return prompt + "\nThe user's vocabulary: " + ", ".join(self.vocabulary)
+
+
+_CJK = re.compile(r"[぀-ヿ㐀-鿿가-힯]")
+
+
+def words_in(text: str) -> int:
+    """A text's length in words, in any script: Japanese and Chinese have no spaces, so 1,500 characters of Japanese were
+    "one word", and got one word's time and tokens. Their letters count 2.5 to a word."""
+    return round(len(_CJK.findall(text)) / 2.5) + len(_CJK.sub(" ", text).split())
 
 
 def _short(model: str) -> str:

@@ -16,6 +16,7 @@ what must never appear, i.e. new values, new names, sentences of new content, a 
 the transforms that write in another language are checked by what survives a change of language (_Across).
 """
 import bisect
+import contextvars
 import difflib
 import html
 import logging
@@ -24,6 +25,7 @@ import time
 import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 
@@ -47,6 +49,11 @@ log = logging.getLogger(__name__)
 
 MAX_TERMS = 20  # the user's terms listed in one prompt, at most
 NO_ACTIONS = "NO_ACTIONS"  # what Action items answers when the text states no action
+# A long text (3-4 minutes of dictation is 500-700 words) goes to the model in parts of about PART_WORDS, split between
+# paragraphs or sentences, PARALLEL at a time: each part is checked on its own, so one lost value doesn't throw away the
+# whole rewrite, the repair attempt can name exactly what went wrong, and the answer comes sooner. The Japanese templates
+# are one message with one greeting and one closing: never split.
+SPLIT_OVER, PART_WORDS, PARALLEL = 450, 350, 3
 
 
 GROUPS = ("Tone", "Format", "Language")  # how the menu and the page order the transforms
@@ -1342,6 +1349,8 @@ class TransformResult:
     reasons: list[str] = field(default_factory=list)  # why it was rejected (the caller keeps the original)
     attempts: int = 0  # calls to the model
     seconds: float = 0.0
+    parts: int = 1  # the parts a long text was transformed in (split_parts)
+    kept: list[str] = field(default_factory=list)  # accepted, but these parts stayed as written, and why ("part 2 of 3...")
 
 
 _FENCE = re.compile(r"```[^\n]*\n(.*?)\n?```", re.S)
@@ -1391,26 +1400,154 @@ class Transformer:
         self.context = context or Context()
 
     def transform(self, text: str, key: str, terms: Iterable[str] = ()) -> TransformResult:
-        """`key`: a transform, or Translate with its language and register ("translate:Japanese:formal")."""
+        """`key`: a transform, or Translate with its language and register ("translate:Japanese:formal"). A long text is
+        transformed in parts (split_parts), each checked on its own; one part that can't be accepted stays as written
+        when the rest can carry it (the user's own words, never a hole), else the whole text stays."""
         spec, started, original = _spec(key), time.perf_counter(), (text or "").strip()
         if not original:
             return TransformResult(spec.key, original, "", "", "", False, ["no text to transform"])
         target = target_language(spec, original, self.context)
         if spec.language == "target":  # the result is named for the language chosen: "Translate to Japanese"
             spec = TRANSFORMS[translate_key(target, split_key(spec.key)[2])]
-        terms = present_terms(original, terms)
+        terms = list(terms)
+        parts = [(original, "")] if spec.template else split_parts(original)
+        if len(parts) == 1:
+            out, reasons, attempts = self._part(original, spec, present_terms(original, terms), target)
+            seconds = time.perf_counter() - started
+            if reasons:
+                return TransformResult(spec.key, original, out, "", "", False, reasons, attempts, seconds)
+            plain, markup = render(out)
+            return TransformResult(spec.key, original, out, plain, markup, True, [], attempts, seconds)
+        log.info("Text Transform %s of %d words in %d parts", spec.key, len(original.split()), len(parts))
+        n = len(parts)
+
+        def one(i: int) -> tuple[str, list[str], int]:
+            part = parts[i][0]
+            return self._part(part, spec, present_terms(part, terms), target, (i + 1, n))
+        # Each part in a copy of the caller's context: the cost tracker's feature ("transform", "tests") goes along.
+        contexts = [contextvars.copy_context() for _ in range(n)]
+        pool = ThreadPoolExecutor(min(PARALLEL, n), thread_name_prefix="transform-part")
+        try:
+            done = list(pool.map(lambda i: contexts[i].run(one, i), range(n)))
+        finally:  # one part failed (no answer, a refusal): the parts not started yet aren't asked for
+            pool.shutdown(wait=True, cancel_futures=True)
+        attempts, seconds = sum(a for _, _, a in done), time.perf_counter() - started
+        rejected = [(i, reasons) for i, (_, reasons, _) in enumerate(done) if reasons]
+        why = [f"part {i + 1} of {n}: {reasons[0]}" for i, reasons in rejected
+               if reasons != ["no action items in the text"]]
+        if spec.key == "actions" and len(rejected) == n and not why:
+            return TransformResult(spec.key, original, NO_ACTIONS, "", "", False, ["no action items in the text"], attempts,
+                                   seconds, n)
+        # A part kept as written is the user's own text: safe in a rewording of their own language, but not in a translation
+        # (half the text in the other language) nor in a list of actions (a paragraph among the tasks).
+        if why and (len(why) == n or spec.language or spec.key in _SELECTIVE):
+            return TransformResult(spec.key, original, "", "", "", False, why, attempts, seconds, n)
+        pieces = []
+        for i, ((part, sep), (out, reasons, _)) in enumerate(zip(parts, done, strict=True)):
+            if reasons == ["no action items in the text"]:
+                continue
+            piece = part if reasons else _later(out, pieces[0] if pieces else "") if i else out
+            pieces.append(piece)
+            pieces.append(_joint(spec, sep))
+        joined = "".join(pieces[:-1]).strip()
+        plain, markup = render(joined)
+        if why:
+            log.info("Text Transform %s kept %d of %d parts as written: %s", spec.key, len(why), n, "; ".join(why))
+        return TransformResult(spec.key, original, joined, plain, markup, True, [], attempts, seconds, n,
+                               [w.replace(":", " stayed as written:", 1) for w in why])
+
+    def _part(self, text: str, spec: Transform, terms: list[str], target: str,
+              part: tuple[int, int] | None = None) -> tuple[str, list[str], int]:
+        """One text (or one part of a long one) through the model and the check, with one repair attempt: (the model's
+        text, why it was rejected or [] when accepted, calls made)."""
         prompt, note, reasons, out = system_prompt(spec, terms, target, self.context), "", [], ""
+        if part:
+            prompt += (f"\n\nThe text is part {part[0]} of {part[1]} of a longer text, transformed part by part: transform "
+                       "only this part, as it is. It may begin or end in the middle of a topic; never refer to other parts.")
         for attempt in (1, 2):
-            out = _clean(self.complete(prompt + note, original), original)
+            out = _clean(self.complete(prompt + note, text), text)
             if out == NO_ACTIONS and spec.key == "actions":
-                reasons = ["no action items in the text"]
-                break
-            check = self.guard.validate(original, out, spec, terms, self.context, target)
+                return out, ["no action items in the text"], attempt
+            check = self.guard.validate(text, out, spec, terms, self.context, target)
             if check.accepted:
-                plain, markup = render(out)
-                return TransformResult(spec.key, original, out, plain, markup, True, [], attempt,
-                                       time.perf_counter() - started)
-            reasons = check.reasons
+                return out, [], attempt
+            reasons = check.reasons or ["the result changed the meaning"]
             note = ("\n\nYour previous version was rejected: " + "; ".join(_clip(r, 120) for r in reasons[:6])
                     + ". Fix only that; keep everything else as required.")
-        return TransformResult(spec.key, original, out, "", "", False, reasons, attempt, time.perf_counter() - started)
+        return out, reasons, 2
+
+
+_CJK = re.compile(r"[぀-ヿ㐀-鿿가-힯ｦ-ﾟ]")
+
+
+def _words(text: str) -> float:
+    """A text's length in words, in any script: Japanese, Chinese and Korean letters count 2.5 to a word (no spaces)."""
+    return len(_CJK.findall(text)) / 2.5 + len(_CJK.sub(" ", text).split())
+
+
+def split_parts(text: str, words: int = PART_WORDS, over: int = SPLIT_OVER) -> list[tuple[str, str]]:
+    """A text of more than `over` words as parts of about `words` each, as (part, the whitespace after it): split between
+    paragraphs or lines where it can, else between sentences, and only as a last resort between words. Joined again with
+    their whitespace, the parts are the text."""
+    if _words(text) <= over:
+        return [(text, "")]
+    units: list[list[str]] = []  # [text, the whitespace after it], the smallest pieces a part is made of
+    for block, gap in _pieces(text, r"\n\s*"):
+        if _words(block) <= words:
+            units.append([block, gap])
+            continue
+        for sentence, space in _pieces(block, r"(?<=[.!?…。！？])[\"'”’)\]]*\s+|(?<=[。！？])"):
+            if _words(sentence) <= words:
+                units.append([sentence, space])
+                continue
+            tokens = list(_pieces(sentence, r"\s+"))  # no punctuation for this long: dictated without it
+            for k in range(0, len(tokens), words):
+                chunk = tokens[k:k + words]
+                units.append(["".join(t + s for t, s in chunk[:-1]) + chunk[-1][0], chunk[-1][1]])
+        units[-1][1] = gap
+    parts, size = [["", ""]], 0.0
+    for unit, gap in units:
+        grow = _words(unit)
+        if parts[-1][0] and size + grow > words:
+            parts.append(["", ""])
+            size = 0.0
+        parts[-1][0] += parts[-1][1] + unit
+        parts[-1][1] = gap
+        size += grow
+    if len(parts) > 1 and _words(parts[-1][0]) < words / 4:  # a few words left over: with the part before
+        last = parts.pop()
+        parts[-1][0] += parts[-1][1] + last[0]
+        parts[-1][1] = last[1]
+    return [(p, gap) for p, gap in parts]
+
+
+def _pieces(text: str, between: str) -> Iterable[tuple[str, str]]:
+    """`text` split where `between` matches, as (piece, what matched after it); the pieces and the matches are the text."""
+    at = 0
+    for m in re.finditer(between, text):
+        if m.end() == at or m.start() == 0:
+            continue
+        yield text[at:m.start()], m.group()
+        at = m.end()
+    if at < len(text):
+        yield text[at:], ""
+
+
+def _joint(spec: Transform, gap: str) -> str:
+    """What goes between two transformed parts: a list goes on as one list; prose keeps the original's paragraph or line
+    break, and where a paragraph was split between sentences, Concise and Professional start a new paragraph (each part
+    is its own shorter paragraph), the others go on in the same one."""
+    if spec.structured:
+        return "\n"
+    if "\n" in gap:
+        return "\n\n" if gap.count("\n") > 1 else "\n"
+    return "\n\n" if spec.shorter or spec.key == "professional" else " "
+
+
+def _later(out: str, first: str) -> str:
+    """A later part without the heading the first part already has (Action items' "**Action items**" in every part)."""
+    head = _lines(first)[:1]
+    lines = out.splitlines()
+    if head and head[0][0] == "heading" and lines and _lines(lines[0]) == head:
+        return "\n".join(lines[1:]).strip("\n")
+    return out

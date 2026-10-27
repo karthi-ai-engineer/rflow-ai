@@ -1,6 +1,7 @@
 """The Rflow window, built off-screen with PreviewApp in place of the tray app (no model, no microphone, no hook)."""
 import dataclasses
 import os
+import threading
 import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -1500,6 +1501,48 @@ def test_text_transform_can_be_tried_on_the_page():
             break
         time.sleep(0.01)
     assert "database migration issue" in page.result.toPlainText() and ("run_transform", "concise") in app.calls
+
+
+def _tried(page, ms=2000):
+    for _ in range(ms // 10):
+        QApplication.processEvents()
+        if not page.trying:
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_text_transform_s_try_never_shows_an_old_result_or_takes_a_second_try_meanwhile(monkeypatch):
+    from sst.transform import TransformResult
+    window, app = _window(gateway=GatewayConfig(provider="gemini", api_key="AIza"),
+                          settings=Settings(welcomed=True, cleanup_model="gemini-3.5-flash-lite"))
+    page = window.pages["transform"]
+    page.refresh()
+    page.try_buttons["concise"].click()
+    assert _tried(page) and not page.result.isHidden()
+    release = threading.Event()
+
+    def failing(text, key):
+        release.wait(5)
+        raise RuntimeError("Gemini: quota used up")
+    monkeypatch.setattr(app, "run_transform", failing)
+    page.try_buttons["bullets"].click()
+    assert page.result.isHidden()  # the last result isn't this one's
+    page.refresh()  # the theme changed, or settings: the buttons stay off while the model works
+    assert not any(b.isEnabled() for b in page.try_buttons.values())
+    release.set()
+    assert _tried(page)
+    assert page.result.isHidden() and page.note.text() == "Didn't work: Gemini: quota used up"
+    assert all(b.isEnabled() for b in page.try_buttons.values())
+    long = TransformResult("concise", "x", "y", "y", "<p>y</p>", True, [], 4, 2.5, 3,
+                           ["part 2 of 3 stayed as written: lost '$25,000'"])
+    monkeypatch.setattr(app, "run_transform", lambda text, key: long)
+    page.sample.setPlainText("word " * 700)
+    page.try_buttons["concise"].click()
+    assert "700 words: this takes a little longer" in page.note.text()
+    assert _tried(page)
+    assert page.note.text() == ("Concise in 2.5 s, in 3 parts (checked and fixed: 4 answers). Part 2 of 3 stayed as "
+                                "written: lost '$25,000'")
 
 
 def test_text_transform_without_an_ai_model_points_to_the_setup():

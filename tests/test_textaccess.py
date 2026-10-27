@@ -1,5 +1,6 @@
 """Text access for Text Transform, against a fake clipboard and a fake text box: no key is pressed, the real clipboard is
 never touched and no window gets the focus."""
+import time
 from contextlib import contextmanager
 
 import pytest
@@ -312,6 +313,34 @@ def test_the_owners_case_a_dropped_space_and_full_stop_still_finds_the_dictation
     # 2026-10-06: 11 steps back gave 9 characters (an app dropped the trailing space and the full stop), so it failed.
     d = desktop("Hi there. Thank you")
     assert select_last("Thank you. ") == "Thank you" and d.selected == "Thank you"
+
+
+def test_a_long_dictation_the_app_changed_is_found_quickly(desktop):
+    """3-4 minutes of dictation, changed a little by the app (a comma, no trailing space): finding where it starts compared
+    every possible start in full, and took 50 s for 3,300 characters, with Text Transform showing nothing meanwhile."""
+    typed = " ".join(f"Item {n} is ready for the review on Friday and the deployment looks good." for n in range(60)) + " "
+    there = typed.replace("Item 7 is", "Item 7, is").rstrip()
+    d = desktop("Dear team,\n" + there)
+    started = time.perf_counter()
+    assert select_last(typed) == there and d.selected == there
+    assert time.perf_counter() - started < 20  # it took about 50 s; 2-3 s now, more on a busy or emulated (ARM) runner
+
+
+def test_a_clipboard_the_app_holds_while_writing_a_long_copy_is_waited_for(desktop, monkeypatch):
+    d = desktop("hello there")
+    d.select(0, 11)
+    held = {"times": 0}
+
+    @contextmanager
+    def session():
+        if d.sessions == 1 and held["times"] < 2:  # after the copy: the app still writes its formats (Word, a long text)
+            held["times"] += 1
+            raise OSError("the clipboard is busy (another app is holding it open)")
+        with d.session():
+            yield
+    monkeypatch.setattr(textaccess, "_clipboard", session)
+    assert copy_selection() == "hello there" and held["times"] == 2
+    assert d.clipboard == RESTORED
 
 
 def test_text_that_isnt_close_is_never_selected(desktop):
