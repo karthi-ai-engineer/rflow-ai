@@ -11,7 +11,7 @@ dependencies = [
     "sherpa-onnx==1.13.8",
     # Ships the matching onnxruntime.dll. It is not pulled in automatically, and without it
     # Windows loads its own older System32\onnxruntime.dll and model loading fails.
-    "sherpa-onnx-core==1.13.8",
+    "sherpa-onnx-core==2.0.0",
     "sounddevice>=0.5",
     # The tray app: tray icon, recording pill, settings and history windows (Qt, LGPL, linked dynamically).
     "pyside6-essentials>=6.8",
