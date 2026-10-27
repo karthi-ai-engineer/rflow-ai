@@ -84,6 +84,7 @@ from sst.hotkey import parse_hotkey
 from sst.live.contracts import LANGUAGES as LIVE_LANGUAGES
 from sst.live.contracts import LiveConfig, language_name
 from sst.live.voice import LOCAL as LOCAL_VOICE
+from sst.meeting.apps import IN_PERSON
 from sst.pipeline.contracts import VoiceConfig
 from sst.pipeline.dictionary import speech_hints
 from sst.pipeline.formatting import Formatter
@@ -168,6 +169,21 @@ MEETING_PARTS = [
     ("screen", "Screen", "The meeting window seen every 5 seconds; a slide is kept when the screen changes, and given to "
                          "the minutes."),
 ]
+# The In person tab's parts (Settings.room_<part>): one microphone hears the room, so no screen and no "you" track
+ROOM_PARTS = [
+    ("translate", "Live transcript", "What the room says, live on the bar: translated into your language, or as said "
+                                     "when it already is."),
+    ("record", "Record", "The room as your microphone hears it, saved as a sound file on this laptop."),
+    ("minutes", "Minutes", "After the meeting: who said what, a summary, the decisions, and the action items with owners "
+                           "and dates. Needs Record."),
+]
+MEETING_TABS = [("online", "Online"), ("room", "In person")]
+MEETING_SUBTITLES = {
+    "online": "Your meeting translated, recorded and written up: the minutes, decisions and action items, from Teams, "
+              "Zoom, Google Meet or Webex.",
+    "room": "A meeting in a room, around a table: your microphone hears everyone. A live transcript, the recording and "
+            "the minutes, with each voice told apart.",
+}
 MEETING_REFRESH_MS = 5000  # the meeting's line (time, cost, slides) and the meetings found, while the page is shown
 TRANSLATE_SHORTCUTS = [("Ctrl+C+C (press Ctrl+C twice)", "ctrl+c+c"), ("Ctrl+Alt+L", "ctrl+alt+l"), ("Off", "")]
 TRANSFORM_HOTKEYS = [("Double-tap Ctrl", "double ctrl"), ("Ctrl+Alt+T", "ctrl+alt+t"), ("F8", "f8"), ("Off", "")]
@@ -4699,15 +4715,20 @@ class MeetingPage(Page):
     switch per part (live translation, the recording, the minutes, the slides), a big Start / Stop with a red Recording
     light and the meeting's time and cost, then "Writing the minutes…" and "Minutes ready" with Open and Copy, and the
     past meetings. Like the Live page it shows the real state, however the meeting was started: here, the shortcut, the
-    tray, or the meeting window closing by itself."""
+    tray, or the meeting window closing by itself. Two tabs at the top: Online (all that) and In person (a meeting in a
+    room: the microphone alone, no meeting app, no screen; it runs until stopped)."""
 
     def __init__(self, app, go_to):
-        super().__init__("Meeting mode", "Your meeting translated, recorded and written up: the minutes, decisions and "
-                                         "action items, from Teams, Zoom, Google Meet or Webex.")
+        super().__init__("Meeting mode", MEETING_SUBTITLES["online"])
         self.app = app
         self.found: list | None = None  # the meetings open now (MeetingWindow), from the last look
         self.chosen = None  # the one picked of them
+        self.place = "room" if app.settings.meeting_place == "room" else "online"
         self._timer = QTimer(self, interval=MEETING_REFRESH_MS, timeout=self._tick)
+        self.tabs = Segmented(MEETING_TABS)
+        self.tabs.set_current(self.place)
+        self.tabs.changed.connect(self._tab_chosen)
+        self.add(self.tabs)
         self.connect_card, connect = card(12, (16, 12, 12, 12), kind="well", horizontal=True)
         info = QLabel()
         info.setPixmap(theme.icon_pixmap("info", tok("warn").name(), 16, 1.0))
@@ -4791,19 +4812,28 @@ class MeetingPage(Page):
         column.addWidget(self.app_words)
         self.add(self.app_card)
 
-        # One switch per part
-        parts, column = card(4, (20, 6, 20, 6))
+        # One switch per part, each tab its own
         self.parts: dict[str, Toggle] = {}
         self.part_rows: dict[str, QWidget] = {}
-        for i, (part, title, words_text) in enumerate(MEETING_PARTS):
-            if i:
-                column.addWidget(divider())
-            toggle = Toggle(title)
-            toggle.toggled.connect(lambda on, p=part: self._part_toggled(p, on))
-            self.parts[part] = toggle
-            self.part_rows[part] = setting_row(title, words_text, toggle)[0]
-            column.addWidget(self.part_rows[part])
-        self.add(parts)
+        self.room_parts: dict[str, Toggle] = {}
+        self.room_rows: dict[str, QWidget] = {}
+        self.parts_card = self.room_card = None
+        for place, items, toggles, rows in (("online", MEETING_PARTS, self.parts, self.part_rows),
+                                            ("room", ROOM_PARTS, self.room_parts, self.room_rows)):
+            parts, column = card(4, (20, 6, 20, 6))
+            for i, (part, title, words_text) in enumerate(items):
+                if i:
+                    column.addWidget(divider())
+                toggle = Toggle(title)
+                toggle.toggled.connect(lambda on, p=part, r=place == "room": self._part_toggled(p, on, r))
+                toggles[part] = toggle
+                rows[part] = setting_row(title, words_text, toggle)[0]
+                column.addWidget(rows[part])
+            self.add(parts)
+            if place == "online":
+                self.parts_card = parts
+            else:
+                self.room_card = parts
 
         options, column = card(4, (20, 6, 20, 6))
         self.shortcut = Choice(small=True)
@@ -4866,23 +4896,47 @@ class MeetingPage(Page):
         super().hideEvent(event)
 
     def _tick(self) -> None:
-        if self.app.meeting_status()[0] == "recording":
-            self.refresh()  # the time, the cost and the slides go on
+        if self.app.meeting_status()[0] == "recording" or self.place == "room":
+            self.refresh()  # the time, the cost and the slides go on (in person, there are no windows to look for)
         else:
             self._scan()  # a meeting started meanwhile shows by itself
 
+    def _tab_chosen(self, place: str) -> None:
+        """Online or In person; remembered, so the shortcut and the tray start that kind next time."""
+        self.place = place
+        if self.app.settings.meeting_place != place:
+            self.app.apply_settings(dataclasses.replace(self.app.settings, meeting_place=place))
+        self._say("")
+        self.refresh()
+
+    @property
+    def target(self):
+        """What Start starts: the room in person, else the meeting window picked (None: none yet)."""
+        return IN_PERSON if self.place == "room" else self.chosen
+
     def refresh(self) -> None:
-        if self.found is None:
+        if self.found is None and self.place == "online":
             self._scan()  # the first time it's shown (it refreshes itself)
             return
         s, app = self.app.settings, self.app
         state, window, folder, result, error = app.meeting_status()
         running, writing = state == "recording", state == "writing minutes"
-        problem = app.meeting_problem()
+        if (running or writing) and window is not None:
+            self.place = "room" if window == IN_PERSON else "online"  # the tab of the meeting going on
+        room = self.place == "room"
+        self.tabs.set_current(self.place)
+        for key, b in self.tabs.buttons.items():
+            b.setEnabled(not running or key == self.place)  # one meeting at a time
+        self.subtitle.setText(MEETING_SUBTITLES[self.place])
+        problem = app.meeting_problem(room)
         self.connect_card.setVisible(bool(problem) and not running)
         self.connect_words.setText(problem)
         self.connect_button.setVisible("Gemini key" in problem)
-        ready = self.chosen is not None and not problem and not writing
+        # a finished meeting of the other kind isn't shown on this tab
+        mine = window is not None and (window == IN_PERSON) == room
+        if not mine and not running:
+            state, folder, result, error = "", None, None, ""
+        ready = self.target is not None and not problem and not writing
         self.start_button.set_running(running, "Stop" if running else "Start")
         self.start_button.setEnabled(running or ready)
         self.light.set_state({"recording": "live", "writing minutes": "ai", "done": "ok", "failed": "err"}.get(state, "off"))
@@ -4896,12 +4950,14 @@ class MeetingPage(Page):
         elif state == "done" and result is not None:
             heading, tone, doing = "Minutes ready", None, result.title
         elif state == "done":
-            heading, tone, doing = "Saved", None, f"The meeting in {window.app} is saved on this laptop."
+            where = "in person" if window == IN_PERSON else f"in {window.app}"
+            heading, tone, doing = "Saved", None, f"The meeting {where} is saved on this laptop."
         elif state == "failed":
             heading, tone, doing = "The minutes failed", None, f"{error}. The recording is kept: nothing is lost."
         else:
             heading, tone = "Off", None
             doing = ("Add a Gemini key to start it" if "Gemini key" in problem else "Switch on a part to start it" if problem
+                     else "Ready: put the laptop where its microphone hears everyone" if room
                      else f"Ready for your meeting in {self.chosen.app}" if self.chosen is not None
                      else "Pick your meeting below" if self.found else "Start a meeting first")
         self.state.setText(heading)
@@ -4920,7 +4976,11 @@ class MeetingPage(Page):
         else:
             self.how.addWidget(caption("Start it here, or from the tray menu", "2", wrap=False))
         self.how.addStretch()
-        self._refresh_app(running or writing, window)
+        self.app_card.setVisible(not room)
+        self.parts_card.setVisible(not room)
+        self.room_card.setVisible(room)
+        if not room:
+            self._refresh_app(running or writing, window)
         self._refresh_parts(s, running)
         self.shortcut.blockSignals(True)
         if self.shortcut.findData(s.meeting_shortcut) < 0:  # a shortcut set by hand
@@ -4929,7 +4989,8 @@ class MeetingPage(Page):
         self.shortcut.blockSignals(False)
         self.shortcut_caption.setText(f"{key_names(parse_hotkey(s.meeting_shortcut).label)} is {clash}'s shortcut, so "
                                       f"it stays with {clash}: choose another." if clash
-                                      else "Starts and stops the meeting in any app, with the meeting found.")
+                                      else "Starts and stops the meeting in any app: in the room when In person "
+                                           "was the tab last open, else the meeting found.")
         self.shortcut_caption.show()
         self._refresh_past()
 
@@ -4937,7 +4998,11 @@ class MeetingPage(Page):
         """A part as the meeting running started with it (a switch changed meanwhile waits for the next one)."""
         last = getattr(self.app, "last_meeting", None)
         options = getattr(last, "options", None)
-        return getattr(options, part) if options is not None else getattr(self.app.settings, f"meeting_{part}")
+        if options is not None:
+            return getattr(options, part)
+        if self.place == "room":
+            return part != "screen" and getattr(self.app.settings, f"room_{part}")
+        return getattr(self.app.settings, f"meeting_{part}")
 
     def _refresh_app(self, busy: bool, window) -> None:
         shown = window if busy else self.chosen
@@ -4964,17 +5029,18 @@ class MeetingPage(Page):
         self.app_words.setVisible(bool(words))
 
     def _refresh_parts(self, s, running: bool) -> None:
-        on = {part: getattr(s, f"meeting_{part}") for part, *_ in MEETING_PARTS}
-        works = {"translate": on["translate"], "record": on["record"], "minutes": on["minutes"] and on["record"]}
-        works["screen"] = on["screen"] and works["minutes"]
-        for part, toggle in self.parts.items():
-            toggle.blockSignals(True)
-            toggle.setChecked(works[part])
-            toggle.blockSignals(False)
-            # a running meeting keeps the parts it started with; the minutes need the sound, the slides the minutes
-            needs = {"minutes": on["record"], "screen": works["minutes"]}.get(part, True)
-            toggle.setEnabled(not running and needs)
-            self.part_rows[part].setToolTip("" if needs else "Needs Record" if part == "minutes" else "Needs the minutes")
+        for kind, toggles, rows in (("meeting", self.parts, self.part_rows), ("room", self.room_parts, self.room_rows)):
+            on = {part: getattr(s, f"{kind}_{part}", False) for part, *_ in MEETING_PARTS}
+            works = {"translate": on["translate"], "record": on["record"], "minutes": on["minutes"] and on["record"]}
+            works["screen"] = on["screen"] and works["minutes"]
+            for part, toggle in toggles.items():
+                toggle.blockSignals(True)
+                toggle.setChecked(works[part])
+                toggle.blockSignals(False)
+                # a running meeting keeps the parts it started with; the minutes need the sound, the slides the minutes
+                needs = {"minutes": on["record"], "screen": works["minutes"]}.get(part, True)
+                toggle.setEnabled(not running and needs)
+                rows[part].setToolTip("" if needs else "Needs Record" if part == "minutes" else "Needs the minutes")
 
     def _refresh_past(self) -> None:
         clear(self.meeting_rows)
@@ -5018,7 +5084,7 @@ class MeetingPage(Page):
             self.app.stop_meeting()
             self._say("")
         else:
-            problem = self.app.start_meeting(self.chosen)
+            problem = self.app.start_meeting(self.target)
             self._say("" if problem == "Not started." else problem)
         self.refresh()
 
@@ -5035,8 +5101,11 @@ class MeetingPage(Page):
         LivePage._show_copied(copy, "Couldn't copy" if problem else "Copied", "warning" if problem else "check")
         QTimer.singleShot(1500, lambda: LivePage._show_copied(copy, words, "copy"))
 
-    def _part_toggled(self, part: str, on: bool) -> None:
-        self.app.set_meeting_option(part, on)
+    def _part_toggled(self, part: str, on: bool, in_person: bool = False) -> None:
+        if in_person:
+            self.app.set_meeting_option(part, on, True)
+        else:
+            self.app.set_meeting_option(part, on)
         self.refresh()
 
     def _shortcut_chosen(self, *_) -> None:
@@ -7879,17 +7948,19 @@ class PreviewApp:
     def meeting_cost(self):
         return self._meeting_cost if self._meeting[0] else None
 
-    def meeting_problem(self) -> str:
-        s = self.settings
-        if not (s.meeting_translate or s.meeting_record):
+    def meeting_problem(self, in_person: bool = False) -> str:
+        s, kind = self.settings, "room" if in_person else "meeting"
+        on = {part: getattr(s, f"{kind}_{part}") for part in ("translate", "record", "minutes")}
+        if not (on["translate"] or on["record"]):
             return "Switch on live translation or Record first."
-        if (s.meeting_translate or s.meeting_minutes and s.meeting_record) and not self.gateway.key_for("gemini"):
+        if (on["translate"] or on["minutes"] and on["record"]) and not self.gateway.key_for("gemini"):
             return "Live translation and the minutes use Google Gemini: add a Gemini key in AI & models."
         return ""
 
     def start_meeting(self, window) -> str:
         self.calls.append(("start_meeting", getattr(window, "app", None)))
-        problem = "Start a meeting first: Teams, Zoom, Google Meet or Webex." if window is None else self.meeting_problem()
+        problem = ("Start a meeting first: Teams, Zoom, Google Meet or Webex." if window is None
+                   else self.meeting_problem(window.app == "In person"))
         if not problem:
             self._meeting = ("recording", window, Path("meetings") / f"2026-10-27 1003 {window.app}", None, "")
         return problem
@@ -7898,11 +7969,12 @@ class PreviewApp:
         self.calls.append(("stop_meeting",))
         state, window, folder, _, _ = self._meeting
         if state == "recording":
-            self._meeting = ("writing minutes" if self.settings.meeting_minutes else "done", window, folder, None, "")
+            minutes = self.settings.room_minutes if window.app == "In person" else self.settings.meeting_minutes
+            self._meeting = ("writing minutes" if minutes else "done", window, folder, None, "")
 
-    def set_meeting_option(self, name: str, on: bool) -> None:
-        self.calls.append(("set_meeting_option", name, on))
-        self.apply_settings(dataclasses.replace(self.settings, **{f"meeting_{name}": on}))
+    def set_meeting_option(self, name: str, on: bool, in_person: bool = False) -> None:
+        self.calls.append(("set_meeting_option", name, on, *(("in person",) if in_person else ())))
+        self.apply_settings(dataclasses.replace(self.settings, **{f"{'room' if in_person else 'meeting'}_{name}": on}))
 
     def past_meetings(self, limit: int = 8) -> list:
         return list(self._past_meetings)[:limit]

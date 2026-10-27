@@ -144,6 +144,32 @@ def test_recorder_keeps_the_track_that_opens(tmp_path):
     rec.stop()
 
 
+def test_recorder_in_person_records_the_room_through_the_microphone_alone(tmp_path):
+    room = FakeCapture()
+    rec = Recorder(tmp_path, speakers=lambda: pytest.fail("the laptop's sound isn't recorded"), microphone=lambda: room,
+                   room=True)
+    rec.start()
+    room.on_frame(FRAME)
+    assert rec.files == [tmp_path / "room.wav"] and not (tmp_path / OTHERS).exists() and not (tmp_path / YOU).exists()
+    rec.stop()
+
+
+def test_a_meeting_in_person_has_no_frames_and_never_stops_by_itself(tmp_path):
+    from sst.meeting.apps import IN_PERSON
+    made, clock = {}, Clock()
+    session = MeetingSession(IN_PERSON, MeetingOptions(), tmp_path / "m", recorder_factory=lambda f: made.setdefault(
+        "recorder", FakeRecorder(f)), frames_factory=lambda w, f: pytest.fail("no window to look at"),
+        summarise=lambda folder: Result(), clock=clock, alive=lambda w: False, watch=0)
+    session.start()
+    assert session.in_person and not session.options.screen and session.options.minutes
+    for now in (0.0, 100.0, 10_000.0):
+        session.check(now)
+    assert session.state == "recording"
+    session.stop()
+    session.wait(5)
+    assert json.loads((tmp_path / "m" / "meeting.json").read_text(encoding="utf-8"))["in_person"] is True
+
+
 def test_recorder_raises_when_nothing_opens(tmp_path):
     rec = Recorder(tmp_path, speakers=lambda: FakeCapture(fail=True), microphone=lambda: FakeCapture(fail=True))
     with pytest.raises(OSError):
@@ -307,7 +333,7 @@ def test_meeting_json_holds_no_words(tmp_path):
     session.wait(5)
     text = (session.folder / META).read_text(encoding="utf-8")
     meta = json.loads(text)
-    assert set(meta) == {"app", "title", "started", "seconds", "options", "frames"}
+    assert set(meta) == {"app", "title", "started", "seconds", "options", "frames", "in_person"}
     assert meta["app"] == "Microsoft Teams" and meta["seconds"] == 125.0 and meta["frames"] == 1
     assert meta["options"] == {"translate": True, "record": True, "minutes": True, "screen": True}
     assert "secret" not in text and "Friday" not in text  # the minutes' words stay in the minutes

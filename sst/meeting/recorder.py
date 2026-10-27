@@ -18,6 +18,7 @@ log = logging.getLogger(__name__)
 
 OTHERS = "others.wav"  # Capture.speakers(): everyone else in the meeting
 YOU = "you.wav"  # Capture.microphone(): the user
+ROOM = "room.wav"  # Capture.microphone() in a meeting in person: everyone in the room, the user among them
 SAMPLE_BYTES = 2  # PCM16
 
 
@@ -62,12 +63,13 @@ class _Track:
 class Recorder:
     """start() opens both captures and writes their frames into `folder`; stop() closes them. A capture that can't
     open is left out (logged, in `problems`) while the other records; when neither opens, start() raises the first
-    error. `seconds`: how long the longer track is; `files`: the tracks being recorded."""
+    error. `seconds`: how long the longer track is; `files`: the tracks being recorded. In person (`room`), only the
+    microphone, into room.wav: nobody is in the laptop's sound."""
 
     def __init__(self, folder: Path, *, speakers: Callable[[], Capture] = Capture.speakers,
-                 microphone: Callable[[], Capture] = Capture.microphone):
+                 microphone: Callable[[], Capture] = Capture.microphone, room: bool = False):
         self.folder = Path(folder)
-        self._factories = ((OTHERS, speakers), (YOU, microphone))
+        self._factories = ((ROOM, microphone),) if room else ((OTHERS, speakers), (YOU, microphone))
         self._running: list[tuple[_Track, Capture]] = []
         self.problems: list[str] = []
 

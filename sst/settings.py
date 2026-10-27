@@ -57,6 +57,10 @@ class Settings:
     meeting_minutes: bool = True  # after it: transcript with speakers, minutes, decisions, action items (needs the recording)
     meeting_screen: bool = True  # the meeting window's changed frames (slides) given to the minutes
     meeting_shortcut: str = "ctrl+alt+m"  # starts and stops a meeting from any app ("" = none)
+    room_translate: bool = True  # a meeting in person (Meeting mode's In person tab): the room's words live on the bar
+    room_record: bool = True  # the room as the microphone hears it (room.wav)
+    room_minutes: bool = True  # after it, from that recording (needs it)
+    meeting_place: str = "online"  # the Meeting mode tab last open: "online" or "room" (in person)
     meeting_told: bool = False  # the notice (people should know it's recorded; audio and frames go to Google) accepted once
     # The Gemini key is on Google's free tier: the cost card says "$0 billed (would cost $X)". No key can tell its tier,
     # and nothing sets it yet (TODO: the owner decides how it is asked or found out).

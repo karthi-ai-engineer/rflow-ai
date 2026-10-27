@@ -2121,6 +2121,27 @@ def test_meeting_mode_is_a_section_after_live_translation_and_finds_the_meeting_
     assert [t.isChecked() for t in page.parts.values()] == [True, True, True, True]
 
 
+def test_the_in_person_tab_needs_no_meeting_app_and_has_its_own_switches():
+    window, app, page = _meeting_window()  # no meeting app open
+    assert [b.text() for b in page.tabs.buttons.values()] == ["Online", "In person"] and page.place == "online"
+    assert not page.start_button.isEnabled() and page.room_card.isHidden()
+    page.tabs.buttons["room"].click()
+    assert page.place == "room" and app.settings.meeting_place == "room"  # remembered for the shortcut
+    assert page.app_card.isHidden() and page.parts_card.isHidden() and not page.room_card.isHidden()
+    assert set(page.room_parts) == {"translate", "record", "minutes"} and "room" in page.subtitle.text()
+    assert page.start_button.isEnabled() and page.doing.text().startswith("Ready: put the laptop")
+    page.room_parts["minutes"].click()
+    assert ("set_meeting_option", "minutes", False, "in person") in app.calls and not app.settings.room_minutes
+    assert app.settings.meeting_minutes  # the online switches stay as they were
+    page.start_button.click()
+    assert ("start_meeting", "In person") in app.calls and page.start_button.text() == "Stop"
+    assert not page.tabs.buttons["online"].isEnabled()  # one meeting at a time
+    page.start_button.click()
+    assert page.state.text() == "Saved" and page.doing.text() == "The meeting in person is saved on this laptop."
+    page.tabs.buttons["online"].click()
+    assert page.state.text() == "Off"  # the room's meeting isn't the online tab's
+
+
 def test_several_meetings_are_picked_from_and_none_says_start_one_first():
     window, app, page = _meeting_window([("Microsoft Teams", "Sync", 101), ("Zoom", "Zoom Meeting", 102)])
     assert page.chosen is None and not page.picker.isHidden() and not page.start_button.isEnabled()

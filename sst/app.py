@@ -391,10 +391,12 @@ def show_running_window() -> bool:
 # ---------------------------------------------------------------- the app
 
 MEETING_PARTS = ("translate", "record", "minutes", "screen")  # Settings.meeting_<part>, MeetingOptions' switches
+ROOM_PARTS = ("translate", "record", "minutes")  # Settings.room_<part>: a meeting in person has no window to look at
 MEETING_NOTICE = (
-    "Meeting mode records the meeting's sound on this laptop: the others (what your laptop plays) and you (your "
-    "microphone). Tell the people in the meeting that it is recorded.\n\n"
-    "For the minutes, the recording and the meeting window's changed slides go to Google, which writes the transcript, "
+    "Meeting mode records the meeting's sound on this laptop: online, the others (what your laptop plays) and you "
+    "(your microphone); in person, the room through your microphone. Tell the people in the meeting that it is "
+    "recorded.\n\n"
+    "For the minutes, the recording and (online) the meeting window's changed slides go to Google, which writes the transcript, "
     "the decisions and the action items with Gemini: about $0.25 an hour. Live translation, when on, costs as on its "
     "page. With a free Gemini key Google may use them to improve its products. Everything stays on this laptop "
     "afterwards; turn parts off on the Meeting mode page.\n\nStart?")
@@ -405,13 +407,13 @@ class _MeetingLive:
     it, unless it was already running (then it's left as it was). stop() may come on the meeting's watcher thread (the
     meeting window closed): the bar is stopped on the app's thread."""
 
-    def __init__(self, app: "TrayApp"):
-        self.app, self.started = app, False
+    def __init__(self, app: "TrayApp", in_person: bool = False):
+        self.app, self.started, self.in_person = app, False, in_person
 
     def start(self) -> None:
         if self.app.live.running:
             return
-        problem = self.app.start_live()
+        problem = self.app.start_live(self.app.room_live_config() if self.in_person else None)
         if problem:
             raise RuntimeError(problem)
         self.started = True
@@ -1131,6 +1133,13 @@ class TrayApp:
                           hide_from_capture=s.live_hide_from_share, speak=s.live_speak, speak_speed=s.live_speak_speed,
                           duck=s.live_duck, save=s.live_save)
 
+    def room_live_config(self) -> LiveConfig:
+        """Live translation in a meeting in person: the microphone hears the room, whose words go into the user's own
+        language (live_target, not the microphone's usual mic_target, which is for the user speaking); words already in
+        it show as heard, so the bar is the meeting's live transcript. Never spoken aloud in the room."""
+        return dataclasses.replace(self.live_config(), source="microphone", mic_target=self.settings.live_target,
+                                   speak=False, duck=False)
+
     # -- the spoken translation (sst.live.voice, sst.live.speaker)
 
     def live_voice(self) -> Voice:
@@ -1368,8 +1377,8 @@ class TrayApp:
         capture = Capture.microphone(lambda: self.settings.microphone) if lane == MIC else Capture.speakers()
         return capture, lambda emit: GeminiLiveTranslate(key, lane_config, emit, lane=lane)
 
-    def start_live(self) -> str:
-        """Start live translation of what the chosen source hears; "" or why it didn't start."""
+    def start_live(self, config: LiveConfig | None = None) -> str:
+        """Start live translation of what the chosen source hears (or as `config` says); "" or why it didn't start."""
         if self.live.running:
             return ""
         problem = self.live_problem()
@@ -1391,7 +1400,7 @@ class TrayApp:
         if s.live_speak and not self.voice_problem and not LOCAL_VOICE.ready():
             self.download_live_voice()  # e.g. an older Rflow's Danny here: Ryan comes in the background, once a run
         try:
-            self.live.start(self.live_config(), geometry=list(self.settings.live_bar) or None)
+            self.live.start(config or self.live_config(), geometry=list(self.settings.live_bar) or None)
         except Exception as e:  # e.g. no output device or microphone to listen to
             log.warning("Live translation didn't start: %s", e)
             return f"Live translation couldn't start: {e}"
@@ -1490,20 +1499,22 @@ class TrayApp:
         m = self.last_meeting
         return m if m is not None and m.state == "recording" else None
 
-    def meeting_options(self):
+    def meeting_options(self, in_person: bool = False):
         from sst.meeting.session import MeetingOptions
         s = self.settings
+        if in_person:
+            return MeetingOptions(**{part: getattr(s, f"room_{part}") for part in ROOM_PARTS}, screen=False)
         return MeetingOptions(**{part: getattr(s, f"meeting_{part}") for part in MEETING_PARTS})
 
-    def set_meeting_option(self, name: str, on: bool) -> None:
+    def set_meeting_option(self, name: str, on: bool, in_person: bool = False) -> None:
         """A part switched on or off: for the next meeting (a running one keeps what it started with)."""
-        if name not in MEETING_PARTS:
+        if name not in (ROOM_PARTS if in_person else MEETING_PARTS):
             raise ValueError(f"No meeting part {name!r}")
-        self.apply_settings(dataclasses.replace(self.settings, **{f"meeting_{name}": on}))
+        self.apply_settings(dataclasses.replace(self.settings, **{f"{'room' if in_person else 'meeting'}_{name}": on}))
 
-    def meeting_problem(self) -> str:
+    def meeting_problem(self, in_person: bool = False) -> str:
         """Why a meeting can't start with the parts switched on, or ""."""
-        on = self.meeting_options().effective()
+        on = self.meeting_options(in_person).effective()
         if not on.anything():
             return "Switch on live translation or Record first."
         if (on.translate or on.minutes) and not self.gateway.key_for("gemini"):
@@ -1532,10 +1543,12 @@ class TrayApp:
             return ""
         if window is None:
             return "Start a meeting first: Teams, Zoom, Google Meet or Webex."
-        problem = self.meeting_problem()
+        from sst.meeting.apps import in_person
+        room = in_person(window)
+        problem = self.meeting_problem(room)
         if problem:
             return problem
-        options, s = self.meeting_options(), self.settings
+        options, s = self.meeting_options(room), self.settings
         if not s.meeting_told:
             answer = QMessageBox.question(None, f"{APP_NAME}: meeting mode", MEETING_NOTICE)
             if answer != QMessageBox.StandardButton.Yes:
@@ -1543,8 +1556,9 @@ class TrayApp:
             # the notice said what live translation sends too: its own isn't asked again in the meeting
             self.apply_settings(dataclasses.replace(s, meeting_told=True, live_told=s.live_told or options.translate))
         from sst.meeting.session import MeetingSession
-        session = MeetingSession(window, options, self._new_meeting_folder(window), recorder_factory=self._meeting_recorder,
-                                 frames_factory=self._meeting_frames, live=_MeetingLive(self),
+        session = MeetingSession(window, options, self._new_meeting_folder(window),
+                                 recorder_factory=lambda folder: self._meeting_recorder(folder, room),
+                                 frames_factory=self._meeting_frames, live=_MeetingLive(self, room),
                                  summarise=self._summarise_meeting)
         before, self.last_meeting = self.last_meeting, session
         session.on_change = self.signals.meeting.emit  # queued onto this thread when it comes from another
@@ -1565,11 +1579,18 @@ class TrayApp:
             m.stop()
 
     def toggle_meeting(self) -> None:
-        """The shortcut and the tray: stop the meeting, or start one in the meeting found (several: the page asks)."""
+        """The shortcut and the tray: stop the meeting, or start one in the meeting found (several: the page asks); in
+        person when Meeting mode's In person tab was the one last open."""
         if self.meeting is not None:
             self.stop_meeting()
             return
         from sst.meeting import apps
+        if self.settings.meeting_place == "room":  # the In person tab was the one last open: a meeting in the room
+            problem = self.start_meeting(apps.IN_PERSON)
+            if problem and problem != "Not started.":
+                self._notify(APP_NAME, problem, QSystemTrayIcon.MessageIcon.Warning)
+            self.meeting_action.setChecked(self.meeting is not None)
+            return
         found = self.meeting_windows()
         window = apps.choose(found)
         if window is None:
@@ -1590,11 +1611,11 @@ class TrayApp:
             folder, n = root / f"{name} ({n})", n + 1
         return folder
 
-    def _meeting_recorder(self, folder: Path):
+    def _meeting_recorder(self, folder: Path, room: bool = False):
         from sst.meeting.recorder import Recorder
         # the microphone chosen for dictation (read when it opens), else Windows' default, as live translation does
         return Recorder(folder, speakers=Capture.speakers,
-                        microphone=lambda: Capture.microphone(lambda: self.settings.microphone))
+                        microphone=lambda: Capture.microphone(lambda: self.settings.microphone), room=room)
 
     def _meeting_frames(self, window, folder: Path):
         from sst.meeting.screen import WindowFrames
@@ -1614,8 +1635,9 @@ class TrayApp:
         if state != self._meeting_state:
             self._meeting_state = state
             if recording:
-                self._notify(APP_NAME, f"Recording the meeting in {window.app}." if self.last_meeting.options.record
-                             else f"Meeting mode is on in {window.app}.")
+                where = "in person" if window.app == "In person" else f"in {window.app}"
+                self._notify(APP_NAME, f"Recording the meeting {where}." if self.last_meeting.options.record
+                             else f"Meeting mode is on {where}.")
             elif state == "done" and result is not None:
                 self._notify("Minutes ready", f"Minutes ready: {result.title}", on_click=lambda f=folder: self.open_meeting(f))
             elif state == "done":

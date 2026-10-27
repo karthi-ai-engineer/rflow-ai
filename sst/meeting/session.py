@@ -5,6 +5,9 @@
               -> "writing minutes" -> "done" (result) or "failed" (error); without, "done" at once
     the meeting window gone for GONE_S (apps.alive false): stopped by itself
 
+In person (window apps.IN_PERSON): the microphone alone (room.wav), no frames (there's no window), and it runs until
+the user stops it.
+
 The rules between the switches: no sound, no minutes (they're made from the recording); frames are only for the
 minutes, so without them none are kept. meeting.json holds numbers and names only (the app, the window's title, times,
 switches, counts), never a word said: those stay in the recording and the minutes. A recording is never deleted here,
@@ -63,7 +66,11 @@ class MeetingSession:
                  live=None, summarise: Callable[[Path], object], clock: Callable[[], float] = time.monotonic,
                  alive: Callable[[object], bool] | None = None, estimate: Callable[[float, int], float] | None = None,
                  watch: float = WATCH_S):
+        from sst.meeting.apps import in_person
+        self.in_person = in_person(window)
         self.window, self.folder, self.options = window, Path(folder), options.effective()
+        if self.in_person:
+            self.options = replace(self.options, screen=False)  # no window to look at
         self._recorder_factory, self._frames_factory = recorder_factory, frames_factory
         self.live, self._summarise = live, summarise
         self._clock, self._alive, self._estimate, self._watch_s = clock, alive, estimate, watch
@@ -106,7 +113,7 @@ class MeetingSession:
             raise
         self._write_meta()
         self._set(RECORDING)
-        if self._watch_s > 0:
+        if self._watch_s > 0 and not self.in_person:
             self._watcher = threading.Thread(target=self._watch, name="meeting-window", daemon=True)
             self._watcher.start()
 
@@ -133,7 +140,7 @@ class MeetingSession:
 
     def check(self, now: float | None = None) -> None:
         """One look at the meeting window: gone for GONE_S, the meeting is stopped."""
-        if self.state != RECORDING:
+        if self.state != RECORDING or self.in_person:  # in person: no window, it runs until the user stops it
             return
         now = self._clock() if now is None else now
         if self._window_alive():
@@ -220,14 +227,15 @@ class MeetingSession:
     def _estimator(self) -> Callable[[float, int], float]:
         if self._estimate is None:
             from sst.meeting.minutes import estimate
-            self._estimate = estimate
+            tracks = 1 if self.in_person else 2  # in person, the microphone alone
+            self._estimate = lambda seconds, frames: estimate(seconds, frames, tracks=tracks)
         return self._estimate
 
     def _write_meta(self) -> None:
         """meeting.json: numbers and names only, never words said (the minutes and the recording hold those)."""
         meta = {"app": getattr(self.window, "app", ""), "title": getattr(self.window, "title", ""),
                 "started": self._started_wall, "seconds": round(self.seconds, 1), "options": asdict(self.options),
-                "frames": self.frame_count}
+                "frames": self.frame_count, "in_person": self.in_person}
         try:
             (self.folder / META).write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
         except OSError as e:

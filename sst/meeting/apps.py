@@ -40,6 +40,13 @@ class MeetingWindow:
     pid: int
 
 
+IN_PERSON = MeetingWindow("In person", "", 0, 0)  # a meeting in a room: no app, no window; the microphone hears everyone
+
+
+def in_person(window) -> bool:
+    return window == IN_PERSON
+
+
 def _teams(title: str) -> int:
     first = title.split("|", 1)[0].strip().lower()
     if not first or first in TEAMS_VIEWS or "notification" in first:
@@ -163,5 +170,8 @@ def choose(found: list[MeetingWindow]) -> MeetingWindow | None:
 
 
 def alive(window: MeetingWindow) -> bool:
-    """The meeting window is still there (a closed window's handle can be reused by another process's)."""
+    """The meeting window is still there (a closed window's handle can be reused by another process's). A meeting in
+    person has none: it lasts until the user stops it."""
+    if in_person(window):
+        return True
     return bool(user32.IsWindow(window.hwnd)) and _pid(window.hwnd) == window.pid

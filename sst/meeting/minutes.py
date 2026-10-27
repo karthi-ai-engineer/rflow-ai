@@ -73,9 +73,10 @@ BASE = "https://generativelanguage.googleapis.com/v1beta"
 UPLOAD = "https://generativelanguage.googleapis.com/upload/v1beta/files"
 FEATURE = "meeting"  # the cost tracker's line (sst.usage.FEATURES)
 
-YOU, OTHERS = "you.wav", "others.wav"  # sst.meeting.recorder's files
+YOU, OTHERS, ROOM = "you.wav", "others.wav", "room.wav"  # sst.meeting.recorder's files (room: a meeting in person)
 TRACKS = ((YOU, "the microphone: the user of this laptop, speaker \"You\""),
-          (OTHERS, "the laptop's sound: the other people in the meeting"))
+          (OTHERS, "the laptop's sound: the other people in the meeting"),
+          (ROOM, "the laptop's microphone in the meeting room: everyone at the meeting, the user of this laptop among them"))
 META = "meeting.json"
 FRAMES = "frames"
 MINUTES_MD, MINUTES_JSON = "minutes.md", "minutes.json"
@@ -229,7 +230,7 @@ def upload(data: bytes, mime: str, key: str, timeout: float) -> dict:
 
 # ---------------------------------------------------------------- the prompts and the answers' shapes
 
-TRANSCRIPT_PROMPT = """You are writing the transcript of an online meeting from its recording.
+TRANSCRIPT_PROMPT = """You are writing the transcript of {kind} from its recording.
 {tracks}
 The tracks start together and cover the same stretch of time.
 
@@ -241,19 +242,30 @@ correct what was said; leave out only fillers (um, uh, えーと, あの) and fa
 seconds.
 3. time: when the line starts, as MM:SS from the start of these tracks (both start at 00:00). Lines in the order they \
 were said, the two tracks interleaved.
-4. speaker: "You" for speech on the microphone track. On the laptop track there may be several people: tell them apart \
-by their voices and label them "Speaker 1", "Speaker 2"... in the order they first speak, and keep the same label for \
-the same voice all the way through. Always use these labels in the lines, even when you learn a name.
+4. speaker: {speakers} Tell people apart by their voices and label them "Speaker 1", "Speaker 2"... in the order they \
+first speak, and keep the same label for the same voice all the way through. Always use these labels in the lines, even \
+when you learn a name.
 5. names: when the meeting makes a person's name clear (they introduce themselves, or are called by name and answer), \
 give their label and the name as it was said. Only names that were said; never guess one.
-6. If the microphone also picks up the laptop's sound (no headphones), write that speech once, for its speaker on the \
-laptop track, never as "You".
+6. {echo}
 7. Only what is in the recording. Never guess at words you can't hear: write [inaudible] for a part that can't be made \
 out. Silence, music and noise give no line; if nobody speaks, lines is empty.
 8. language: the main language spoken, as a two-letter code (ja, en, ta...).
 {languages}{context}"""
 
-MINUTES_PROMPT_TEXT = """You are writing the minutes of an online meeting from its transcript{frames_note}.
+# The rules that differ: online, the user alone on the microphone and the others in the laptop's sound; in person, one
+# microphone hears everyone, so nobody's voice can be said to be "You".
+ONLINE_WORDS = {"kind": "an online meeting",
+                "speakers": '"You" for speech on the microphone track. On the laptop track there may be several people.',
+                "echo": "If the microphone also picks up the laptop's sound (no headphones), write that speech once, for its "
+                        'speaker on the laptop track, never as "You".'}
+ROOM_WORDS = {"kind": "a meeting in person, in a room",
+              "speakers": "everyone is on the one microphone track, the user of this laptop among them; never use "
+                          '"You": the user\'s voice can\'t be told from the others\'.',
+              "echo": "Voices far from the microphone are quieter: still write what they said; only words you can't make "
+                      "out are [inaudible]."}
+
+MINUTES_PROMPT_TEXT = """You are writing the minutes of {kind} from its transcript{frames_note}.
 
 Rules:
 1. Only what the transcript{frames_only} shows. Never invent a decision, a task, a name, a date or a number.
@@ -571,7 +583,8 @@ def _transcribe_span(gemini: _Gemini, tracks: list[tuple[Path, str]], start: flo
             parts += [{"text": f"Track {number}: {about}."},
                       {"fileData": {"mimeType": file.get("mimeType") or "audio/wav", "fileUri": file["uri"]}}]
         prompt = TRANSCRIPT_PROMPT.format(tracks="\n".join(described), languages=_languages_line(languages),
-                                          context=_context(done, start))
+                                          context=_context(done, start),
+                                          **(ROOM_WORDS if any(path.name == ROOM for path, _ in tracks) else ONLINE_WORDS))
         data = gemini.generate([*parts, {"text": prompt}], TRANSCRIPT_SCHEMA, LEAST,
                                ANSWER_TIMEOUT + ANSWER_PER_SECOND * (end - start), end - start)
     finally:
@@ -618,6 +631,7 @@ def _minutes(gemini: _Gemini, done: _Transcript, meta: dict, frames: list[Path])
              "length": f"{round(float(meta.get('seconds') or 0) / 60)} min",
              "people": [done.who(label) for label in done.labels]}
     prompt = MINUTES_PROMPT_TEXT.format(
+        kind=(ROOM_WORDS if meta.get("in_person") else ONLINE_WORDS)["kind"],
         frames_note=" and screenshots of the meeting window, taken when the screen changed (shared slides, documents)"
         if frames else "", frames_only=" and the screenshots" if frames else "",
         frames_rule=FRAMES_RULE if frames else NO_FRAMES_RULE,
@@ -725,9 +739,9 @@ def render(result: MinutesResult, meta: dict | None = None) -> str:
 
 # ---------------------------------------------------------------- what the minutes cost
 
-def estimate(seconds: float, frames: int, model: str = MINUTES_MODEL) -> float:
+def estimate(seconds: float, frames: int, model: str = MINUTES_MODEL, tracks: int = 2) -> float:
     """What the minutes of a meeting this long, with this many kept frames, cost in USD at today's price (0.0 for a
-    model with no price): both tracks' audio, the transcript written and read again, the frames, the minutes."""
+    model with no price): the tracks' audio (in person: one), the transcript written and read again, the frames, the minutes."""
     if seconds <= 0:
         return 0.0
     price = costs.speech_price_on("gemini", model, date.today().isoformat())
@@ -736,7 +750,7 @@ def estimate(seconds: float, frames: int, model: str = MINUTES_MODEL) -> float:
     chunks = len(_spans(seconds))
     thinking = costs.THINKING.get(gemini_thinking(model), 0)
     written = seconds / 60 * TRANSCRIPT_OUT
-    audio = len(TRACKS) * seconds * AUDIO_TOKENS
+    audio = tracks * seconds * AUDIO_TOKENS
     text_in = (chunks * PROMPT_TOKENS + MINUTES_PROMPT + written * TRANSCRIPT_TEXT
                + min(max(0, frames), MAX_FRAMES) * IMAGE_TOKENS)
     out = written + chunks * thinking + MINUTES_OUT + (costs.THINKING[MINUTES_THINKING] if gemini_thinking(model) else 0)

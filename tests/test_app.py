@@ -1414,7 +1414,11 @@ def meeting_app(tray_app, monkeypatch):
     monkeypatch.setattr(apps, "find", lambda: [teams])
     monkeypatch.setattr(apps, "alive", lambda window: True)  # the meeting window stays open
     log, shown, opened = [], [], []
-    monkeypatch.setattr(app, "_meeting_recorder", lambda folder: FakeMeetingPart(folder, log))
+    def recorder(folder, room=False):
+        if room:
+            log.append(("room",))
+        return FakeMeetingPart(folder, log)
+    monkeypatch.setattr(app, "_meeting_recorder", recorder)
     monkeypatch.setattr(app, "_meeting_frames", lambda window, folder: FakeMeetingPart(folder, log))
 
     def summarise(folder):
@@ -1424,7 +1428,8 @@ def meeting_app(tray_app, monkeypatch):
     monkeypatch.setattr(app, "_summarise_meeting", summarise)
     monkeypatch.setattr(app.tray, "showMessage", lambda title, message, *_: shown.append(message))
     monkeypatch.setattr(sst_app.shell, "open_url", lambda url: opened.append(sst_app.Path(url.toLocalFile())))
-    monkeypatch.setattr(app, "start_live", lambda: log.append(("start", "live")) or "")
+    monkeypatch.setattr(app, "start_live", lambda config=None: log.append(("start", "live", *((config,) if config else ())))
+                        or "")
     monkeypatch.setattr(app, "stop_live", lambda: log.append(("stop", "live")))
     return SimpleNamespace(app=app, teams=teams, log=log, shown=shown, opened=opened)
 
@@ -1461,6 +1466,47 @@ def test_a_meeting_asks_once_records_translates_then_writes_its_minutes(meeting_
     assert app.meeting.folder != session.folder  # a second one in the same minute: a folder of its own
     app.stop_meeting()
     app.last_meeting.wait(5)
+
+
+def test_a_meeting_in_person_records_the_room_and_its_live_transcript_until_stopped(meeting_app, monkeypatch):
+    from PySide6.QtTest import QTest
+
+    from sst.meeting import apps
+    m = meeting_app
+    app = m.app
+    monkeypatch.setattr(sst_app.QMessageBox, "question", lambda *args: sst_app.QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(apps, "alive", lambda window: False)  # no window: an in-person meeting doesn't stop by itself
+    app.apply_settings(dataclasses.replace(app.settings, live_target="en", live_mic_target="ja", live_speak=True,
+                                           room_minutes=False))
+    assert app.start_meeting(apps.IN_PERSON) == ""
+    session = app.meeting
+    assert session.in_person and session.folder.name.endswith(" In person") and not session.options.screen
+    assert m.log[0] == ("room",) and m.log[1] == ("start", "FakeMeetingPart")  # the microphone alone, no frames
+    config = m.log[2][2]
+    assert config.source == "microphone" and config.mic_target == "en" and not config.speak  # into the user's language
+    assert m.shown[-1] == "Recording the meeting in person."
+    session.check(now=1e9)
+    session.check(now=2e9)
+    assert app.meeting is session  # still recording
+    app.stop_meeting()
+    assert _wait_for(lambda: app.meeting_status()[0] == "done", QTest.qWait)  # minutes off: saved at once
+    assert ("summarise", session.folder) not in m.log
+
+
+def test_the_shortcut_starts_a_meeting_in_person_when_that_tab_was_last_open(meeting_app, monkeypatch):
+    from sst.meeting import apps
+    app, started = meeting_app.app, []
+    monkeypatch.setattr(app, "start_meeting", lambda window: started.append(window) or "")
+    app.apply_settings(dataclasses.replace(app.settings, meeting_place="room"))
+    app.toggle_meeting()
+    app.apply_settings(dataclasses.replace(app.settings, meeting_place="online"))
+    app.toggle_meeting()
+    assert started == [apps.IN_PERSON, meeting_app.teams]
+    assert app.meeting_options(in_person=True).screen is False
+    app.set_meeting_option("record", False, in_person=True)
+    assert not app.settings.room_record and app.settings.meeting_record
+    with pytest.raises(ValueError):
+        app.set_meeting_option("screen", True, in_person=True)
 
 
 def test_past_meetings_are_listed_newest_first_and_their_minutes_open_and_copy(meeting_app, monkeypatch):
