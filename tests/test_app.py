@@ -825,6 +825,53 @@ def test_how_low_the_other_apps_stay_while_it_runs_is_saved_and_used_at_once(tra
     assert sst_app.Settings.load(app.profile.settings_file).live_duck == 0.0 and depths[-1] == 0.0
 
 
+def test_the_cost_saver_is_saved_used_at_once_and_the_bar_and_page_stay_in_step(tray_app, monkeypatch):
+    app, _, _ = tray_app
+    app.gateway = GatewayConfig(provider="gemini", api_key="AIza-test")
+    app.settings = dataclasses.replace(app.settings, live_told=True)
+    assert not app.settings.live_save and not app.live_config().save  # off by default: live translation as before
+    saving, notices = [], []
+
+    class FakeSession:  # a LiveSession's ways and spend, without devices or Google
+        transcript = speaker = None
+
+        def __init__(self, config):
+            self.lanes, self.config = {}, config
+
+        def add(self, lane, capture, engine_factory):
+            self.lanes[lane] = capture
+
+        def set_saving(self, on):
+            saving.append(on)
+
+        def spend(self):
+            return SimpleNamespace(cost=0.42, saved=0.26, seconds=660.0, unsent_s=420.0)
+
+        def quiet_for(self, now=None):
+            return 0.0
+
+        def stop(self):
+            self.lanes.clear()
+    monkeypatch.setattr(app, "_live_session", lambda config, on_event: FakeSession(config))
+    monkeypatch.setattr(app, "_live_lane", lambda lane, config: (lane, None))
+    monkeypatch.setattr(app, "_notify", lambda *args: notices.append(args))
+    assert app.start_live() == "" and not app.live.bar.save_button.isChecked() and app.live_spend() is None
+    app.live.bar.save_button.click()  # the bar's button: saved to the profile, on every way at once
+    assert app.settings.live_save and saving == [True] and app.live.config.save and app.live.bar.save_button.isChecked()
+    assert sst_app.Settings.load(app.profile.settings_file).live_save and app.live_config().save
+    assert app.live_spend().cost == 0.42 and app.live.bar.title.text().endswith("$0.42 · saved $0.26")
+    app.set_live_save(False)  # the Live page's toggle: the bar follows
+    assert not app.settings.live_save and saving == [True, False] and not app.live.bar.save_button.isChecked()
+    app.set_live_save(True)
+    app.live.session.quiet_for = lambda now=None: 900.0  # nobody spoke for 15 min
+    app.live.tick()
+    assert not app.live_running() and app.live_stopped_why() == "no speech for 15 min"
+    assert app.live_last_spend().saved == 0.26 and notices[-1][1] == "Live translation stopped: no speech for 15 min."
+    app.start_live()
+    assert app.live.config.save and app.live.bar.save_button.isChecked()  # the next start saves too
+    app.stop_live()
+
+
 def test_the_voices_download_shows_its_progress_and_speaks_when_done(tray_app, monkeypatch):
     app, _, _ = tray_app
     notes, speak = [], []

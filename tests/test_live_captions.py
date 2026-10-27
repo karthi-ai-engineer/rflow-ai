@@ -407,3 +407,91 @@ def test_the_speaker_button_asks_for_speaking_and_the_bar_follows_what_happened(
     live.set_voice_note("Downloading the voice: 40%")
     assert live.bar.title.text().endswith("Downloading the voice: 40%")
     live.stop()
+
+
+# ---- the cost saver
+
+class SavingSession(FakeSession):
+    """A FakeSession that says what it cost (session.Spend's fields) and how long nobody has spoken."""
+
+    def __init__(self, config, on_event):
+        super().__init__(config, on_event)
+        self.saving, self.quiet, self.cost = config.save, 0.0, (0.42, 0.26, 660.0, 420.0)
+
+    def set_saving(self, on):
+        self.saving = on
+
+    def spend(self):
+        cost, saved, seconds, unsent = self.cost
+        return type("Spend", (), {"cost": cost, "saved": saved, "seconds": seconds, "unsent_s": unsent})()
+
+    def quiet_for(self, now=None):
+        return self.quiet
+
+
+def saving_captions():
+    made = []
+    live = LiveCaptions(lambda config, on_event: made.append(SavingSession(config, on_event)) or made[-1],
+                        lambda lane, config: (lane, None))
+    return live, made
+
+
+def test_the_cost_saver_button_asks_for_it_and_the_bar_shows_what_the_session_cost_and_saved():
+    live, made = saving_captions()
+    asked = []
+    live.save_toggled.connect(asked.append)
+    live.start(LiveConfig())
+    bar = live.bar
+    assert not bar.save_button.isChecked() and "$" not in bar.title.text()  # off: the bar as it was
+    assert bar.save_button.toolTip() == "Cost saver: send audio only while someone talks"
+    head = bar.layout().itemAt(0).layout()
+    assert head.indexOf(bar.save_button) == head.indexOf(bar.copy_button) - 1  # just before the copy button
+    bar.save_button.click()
+    assert asked == [True] and not bar.save_button.hasFocus()
+    live.set_save(True)  # what the app does: saved, and at once on every way
+    assert made[0].saving and bar.save_button.isChecked() and live.config.save
+    assert bar.title.text().endswith("$0.42 · saved $0.26")
+    made[0].cost = (0.5, 0.3, 700.0, 450.0)
+    live._ticks.timeout.emit()  # every 5 s
+    assert bar.title.text().endswith("$0.50 · saved $0.30")
+    live.set_save(False)
+    assert not made[0].saving and "$" not in bar.title.text() and not bar.save_button.isChecked()
+    live.stop()
+    assert live.last_spend is None  # it didn't save at the end: nothing to say about it
+
+
+def test_a_saving_session_with_no_words_is_warned_then_stops_by_itself():
+    live, made = saving_captions()
+    notes, stops, running = [], [], []
+    live.noted.connect(notes.append)
+    live.quiet_stop.connect(stops.append)
+    live.changed.connect(running.append)
+    live.start(LiveConfig(save=True))
+    assert live.bar.save_button.isChecked() and made[0].saving
+    made[0].quiet = 700.0
+    live.tick()
+    assert live.running and not live.bar.warning
+    made[0].quiet = 780.0
+    live.tick()
+    assert live.bar.warning == "No speech for 13 min: stops in 2 min" and live.note.startswith("No speech for 13 min")
+    assert notes[-1] == live.note and not live.bar.footer.isHidden()
+    made[0].quiet = 30.0  # someone spoke
+    live.tick()
+    assert live.bar.warning == "" and live.bar.footer.isHidden()
+    made[0].quiet = 900.0
+    live.tick()
+    assert not live.running and made[0].stopped and running == [True, False]
+    assert live.stopped_why == "no speech for 15 min" and stops == ["no speech for 15 min"]
+    assert (live.last_spend.cost, live.last_spend.saved, live.last_spend.seconds) == (0.42, 0.26, 660.0)
+    live.start(LiveConfig(save=True))  # the next session starts afresh
+    assert live.stopped_why == "" and live.last_spend is None
+    live.stop()
+
+
+def test_without_the_cost_saver_a_quiet_session_goes_on():
+    live, made = saving_captions()
+    live.start(LiveConfig())
+    made[0].quiet = 5000.0
+    live.tick()
+    assert live.running and not live.bar.warning and live.stopped_why == ""
+    live.stop()
