@@ -5483,14 +5483,14 @@ SCREEN_SHORTCUTS = [("Ctrl+Alt+S", "ctrl+alt+s"), ("Win+Alt+S", "win+alt+s"), ("
 
 
 class ScreenCard:
-    """Translate's Screen translation card (sst.screen; the card itself: .widget): what it does and costs, Start or
+    """Translate's Screen translator card (sst.screen; the card itself: .widget): what it does and costs, Start or
     Stop, and its shortcut."""
 
     def __init__(self, app):
         from sst.screen.translate import estimate
         self.app = app
         self.widget, layout = card(10, (20, 18, 20, 18))
-        layout.addWidget(label("Screen translation", "heading"))
+        layout.addWidget(label("Screen translator", "heading"))
         layout.addWidget(caption(
             "Put a frame over any app: its Japanese is covered with English, in the same place and colours, and the "
             "app still takes your clicks. Windows reads the screen on this laptop; only the text it reads goes to "

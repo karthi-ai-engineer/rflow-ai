@@ -1178,12 +1178,12 @@ clipboard tool can rewrite it).
   (ctrl+c+c), the page, the app, settings, `tests/test_textaccess.py` (clipboard_text).
 - **Not yet tried:** real apps and the owner's model.
 
-## Screen translation (phase 51, the owner's screen translator of 2026-10-09, brought in on 2026-10-27)
+## Screen translator (phase 51, the owner's screen translator of 2026-10-09, brought in on 2026-10-27)
 
-The owner's own app (`kaipulla`, "Screen Translator") as a feature of Rflow: a hollow frame put over any app, whose
+The owner's own screen translator app as a feature of Rflow: a hollow frame put over any app, whose
 Japanese is covered by English stickers in the same place and colours; the inside is click-through. Start and stop:
 **Ctrl+Alt+S** (`Settings.screen_shortcut`; Win+Alt+S or Off on the Translate page's new card; it gives way to any other
-tool's shortcut), the tray's "Screen translation", or the frame's ✕. From the shortcut the frame covers the window you
+tool's shortcut), the tray's "Screen translator", or the frame's ✕. From the shortcut the frame covers the window you
 were in (a browser's page area); otherwise it opens where it was left (`screen_lens`). A notice once (`screen_told`).
 - Its own package, `sst/screen/` (never `sst.pipeline`, `sst.dictate`, `sst.audio`: `tests/test_screen_lens.py`).
   Ported: capture → change detector → OCR → line fixes → paragraph merge → tracked stickers → painting, the UI glossary,
@@ -1196,7 +1196,7 @@ were in (a browser's page area); otherwise it opens where it was left (`screen_l
   tray, installer, single instance, launcher, its global Ctrl+Alt+P/T/R/S/Q/F (the toolbar has pause, original, fit,
   read again, ✕), the debug snapshots.
 - Cost: Gemini 3.5 Flash-Lite, minimal thinking, one call per new screen's strings (cached), about $0.0006 a new screen
-  (`translate.estimate()`); counted as "Screen translation" on the cost card (`usage.FEATURES["screen"]`).
+  (`translate.estimate()`); counted as "Screen translator" on the cost card (`usage.FEATURES["screen"]`).
 - Not yet tried on a real screen: the frame and stickers over a live app (alignment at 125-150% scaling, scrolling, the
   click-through), raw input in Rflow's process, and a real Gemini answer.
 

@@ -1,4 +1,4 @@
-"""Screen translation's translator (sst.screen.translate): Gemini through a fake post, the cache, the cost."""
+"""Screen translator's translator (sst.screen.translate): Gemini through a fake post, the cache, the cost."""
 import json
 import threading
 
@@ -46,7 +46,7 @@ def test_gemini_gets_the_strings_as_a_json_array_and_each_call_is_counted(ledger
     assert config["thinkingConfig"] == {"thinkingLevel": "minimal"} and "temperature" not in config
     assert '["保存する", "送信"]' in body["contents"][0]["parts"][0]["text"]
     (line,) = ledger.summary().lines
-    assert line.feature == "screen" and line.title == "Screen translation" and line.cost > 0
+    assert line.feature == "screen" and line.title == "Screen translator" and line.cost > 0
 
 
 def test_an_answer_of_the_wrong_length_is_an_error(ledger):

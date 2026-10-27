@@ -1,4 +1,4 @@
-"""Screen translation (phase 51, the owner's own screen translator brought into Rflow): a frame put over any app, whose
+"""Screen translator (phase 51, the owner's own screen translator brought into Rflow): a frame put over any app, whose
 Japanese text is covered by English stickers in the same place, in matching colours.
 
 The frame is hollow: its inside is click-through, so the app underneath is used as always, and a click on a sticker
@@ -20,6 +20,6 @@ reaches the button under it. The stickers are painted in a window of their own t
 
 Its own package, kept apart like live translation (sst.live): it never imports sst.pipeline, sst.dictate or sst.audio
 (tests/test_screen_lens.py checks). Standard library, numpy, PySide6 and ctypes only: no OCR or vision package.
-From the owner's screen translator (kaipulla, 2026-10-09), its README's measurements: OCR 76-132 ms a full frame,
+From the owner's own screen translator app (2026-10-09), its README's measurements: OCR 76-132 ms a full frame,
 0.5-0.8% of a core idle on a static page.
 """

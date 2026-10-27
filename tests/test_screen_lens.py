@@ -1,4 +1,4 @@
-"""Screen translation's frame, its worker and the app's side (sst.screen.lens, sst.screen.control), off-screen, with a fake
+"""Screen translator's frame, its worker and the app's side (sst.screen.lens, sst.screen.control), off-screen, with a fake
 screen, OCR and translator: nothing is captured, read by Windows or sent anywhere."""
 import ast
 import dataclasses
@@ -144,7 +144,7 @@ class FakeLens:
 
 
 def _control(app, asked=True):
-    control = ScreenControl(app, QAction("Screen translation"), check_ocr=lambda: "", ask=lambda text: asked)
+    control = ScreenControl(app, QAction("Screen translator"), check_ocr=lambda: "", ask=lambda text: asked)
     control._make_lens = lambda: FakeLens(control._closed)
     return control
 

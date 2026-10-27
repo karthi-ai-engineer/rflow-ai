@@ -1,4 +1,4 @@
-"""Screen translation's OCR lines (sst.screen.ocr): Windows OCR's quirks for Japanese, with a fake engine."""
+"""Screen translator's OCR lines (sst.screen.ocr): Windows OCR's quirks for Japanese, with a fake engine."""
 import numpy as np
 import pytest
 

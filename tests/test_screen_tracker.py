@@ -1,4 +1,4 @@
-"""Screen translation's layout and tracking (sst.screen.layout, sst.screen.tracker), on synthetic frames."""
+"""Screen translator's layout and tracking (sst.screen.layout, sst.screen.tracker), on synthetic frames."""
 import numpy as np
 import pytest
 

@@ -40,7 +40,7 @@ FEATURES = {  # key -> what the card calls it, and whether its amount is minutes
     "cleanup": ("AI cleanup", False),
     "transform": ("Text Transform", False),
     "translate": ("Translate", False),
-    "screen": ("Screen translation", False),  # sst.screen.translate: a screen's new strings, one call
+    "screen": ("Screen translator", False),  # sst.screen.translate: a screen's new strings, one call
     "live_translation": ("Live translation", True),
     "meeting": ("Meeting minutes", True),  # sst.meeting.minutes: the recording's transcript, then the minutes
     "tests": ("Tests and the Reading test", False),

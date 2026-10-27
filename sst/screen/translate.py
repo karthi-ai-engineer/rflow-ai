@@ -6,7 +6,7 @@ page scrolled back, costs nothing. Only the text the OCR read is sent, never the
 think as little as it can (sst.modelrules), with the profile's Gemini key (GatewayConfig.key_for). Every call is counted
 in the cost tracker as "screen" (sst.usage); estimate() is what a new screen costs.
 
-What the owner's screen translator learned (kaipulla, 2026-10-09):
+What the owner's own screen translator app learned (2026-10-09):
   * single UI words translate badly without context (保存 -> "keep"): UI_GLOSSARY answers those, and costs nothing
   * the translator gets era years wrong (令和6年 -> "2020"): they are written as Western years first (令和6年 -> 2024年)
   * a translation that is empty, unchanged or still mostly Japanese shows nothing: the original is better than a bad
@@ -227,7 +227,7 @@ class TranslationService:
                 self.status = "offline"
                 self._backoff = min(30.0, max(1.0, self._backoff * 2))
                 self._retry_at = time.monotonic() + self._backoff
-            log.warning("Screen translation: %s", self.last_error)
+            log.warning("Screen translator: %s", self.last_error)
             self.on_update()
             return
         self._backoff, self.status, self.last_error = 0.0, "online", ""

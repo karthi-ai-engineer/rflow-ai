@@ -1,4 +1,4 @@
-"""Screen translation for Rflow's app (sst.app.TrayApp): its shortcut (Ctrl+Alt+S by default), start and stop, the
+"""Screen translator for Rflow's app (sst.app.TrayApp): its shortcut (Ctrl+Alt+S by default), start and stop, the
 one-time notice, and where the frame was left (Settings.screen_lens). The frame and its threads are made only when it
 starts, so Rflow's start-up stays as fast as before.
 
@@ -17,7 +17,7 @@ from sst.hotkey import HotkeyListener, parse_hotkey
 from sst.screen import translate
 
 log = logging.getLogger(__name__)
-TITLE = "Screen translation"
+TITLE = "Screen translator"
 OCR_LANGUAGE = "ja"
 
 
@@ -45,7 +45,7 @@ class _Signals(QObject):
 
 class ScreenControl:
     """The app's side: app is the TrayApp (settings, apply_settings, gateway, _notify), action the tray's checkable
-    "Screen translation"."""
+    "Screen translator"."""
 
     def __init__(self, app, action, *, make_lens=None, check_ocr=ocr_problem, ask=None):
         self.app, self.action = app, action
@@ -83,7 +83,7 @@ class ScreenControl:
                 self.listener.start()
                 label = parse_hotkey(shortcut).label
             except (ValueError, OSError) as e:
-                log.warning("Screen translation's shortcut %r doesn't work: %s", shortcut, e)
+                log.warning("Screen translator's shortcut %r doesn't work: %s", shortcut, e)
                 self.listener = None
         self.action.setText(f"{TITLE}\t{label.title()}" if label else TITLE)
 
@@ -98,7 +98,7 @@ class ScreenControl:
 
     def problem(self) -> str:
         if not self.app.gateway.key_for("gemini"):
-            return "Screen translation needs a Gemini API key: add one in AI & models."
+            return "Screen translator needs a Gemini API key: add one in AI & models."
         return ""
 
     def start(self, fit_foreground: bool = False) -> str:
@@ -110,7 +110,7 @@ class ScreenControl:
         s = self.app.settings
         if not s.screen_told:
             if not self._ask(
-                    "Screen translation reads the Japanese in a frame you put over any app, with Windows' own OCR on "
+                    "Screen translator reads the Japanese in a frame you put over any app, with Windows' own OCR on "
                     "this laptop, and covers it with English. The text it reads (never a picture of the screen) goes to "
                     f"Google's Gemini to be translated: about ${translate.estimate():.4f} for each new screen, nothing for "
                     "a screen read again. With a free Gemini key Google may use that text to improve its products.\n\n"
@@ -122,7 +122,7 @@ class ScreenControl:
         self.lens = self._make_lens()
         self.lens.start(list(self.app.settings.screen_lens) or None, fit=fit)
         self.action.setChecked(True)
-        log.info("Screen translation started")
+        log.info("Screen translator started")
         return ""
 
     def _new_lens(self):
@@ -150,7 +150,7 @@ class ScreenControl:
         """The frame closed (its ✕, the shortcut, the tray): where it was is kept for the next start."""
         self.lens = None
         self.action.setChecked(False)
-        log.info("Screen translation stopped")
+        log.info("Screen translator stopped")
         if list(self.app.settings.screen_lens) != geometry:
             self.app.settings = dataclasses.replace(self.app.settings, screen_lens=list(geometry))
             self.app.settings.save(self.app.profile.settings_file)  # quietly: nothing else depends on it

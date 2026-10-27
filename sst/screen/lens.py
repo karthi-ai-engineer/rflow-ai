@@ -7,7 +7,7 @@
                    only paints); OCR has a thread of its own and hands its results back through a queue, so only the
                    worker changes the tracker; translations come from TranslationService's threads
 
-The worker's pace (the owner's measurements, kaipulla's README): 33 ms while the user scrolls, 120 ms while the screen
+The worker's pace (the owner's measurements, its README): 33 ms while the user scrolls, 120 ms while the screen
 changes, 300 then 700 ms as it stays quiet; Light (on battery) 100 / 300 / 600-1500 ms and OCR at most every 1.5 s, 1.5x.
 Raw input (wheel, keys) wakes the worker and hides the stickers before the text under them moves. An animation or a
 video changes the screen by itself: after 8 ticks of that the search stops and the pace calms.
@@ -124,7 +124,7 @@ class FrameWindow(QWidget):
         layout.setContentsMargins(10, 2, 4, 2)
         layout.setSpacing(2)
         text, muted = theme.tok("text", popup=True).name(), theme.tok("text3", popup=True).name()
-        title = QLabel("Screen translation")
+        title = QLabel("Screen translator")
         title.setFont(theme.font(12, 600))
         title.setStyleSheet(f"color: {text}; background: transparent;")
         self.status = QLabel("Starting…")
@@ -138,7 +138,7 @@ class FrameWindow(QWidget):
         self.original_button = self._button("", "Show the original", lens.toggle_original, checkable=True, icon="eye")
         self._button("⛶", "Fit to the window you were in", lens.fit_to_last)
         self._button("⟳", "Read again now", lens.refresh)
-        self._button("", "Stop screen translation", lens.close, icon="close")
+        self._button("", "Stop the screen translator", lens.close, icon="close")
 
     def _button(self, text: str, tip: str, slot, checkable: bool = False, icon: str = "") -> QToolButton:
         b = QToolButton(self.toolbar)
@@ -184,7 +184,7 @@ class FrameWindow(QWidget):
         hwnd = int(self.winId())
         win32.exclude_from_capture(hwnd)
         if not win32.register_raw_input(hwnd):
-            log.info("Screen translation: no raw input; scrolling is seen from the screen only")
+            log.info("Screen translator: no raw input; scrolling is seen from the screen only")
         super().showEvent(e)
 
     def nativeEvent(self, event_type, message):
@@ -371,7 +371,7 @@ class ScreenLens(QObject):
             b, g, r = (int(v) for v in f.img[3, 3, :3])
             self.capture_ok = not (r > 230 and b > 230 and g < 40)
             if not self.capture_ok:
-                log.warning("Screen translation: screen capture sees the stickers (Remote Desktop or a VM?)")
+                log.warning("Screen translator: screen capture sees the stickers (Remote Desktop or a VM?)")
 
     # ------------------------------------------------------------ the worker
 
@@ -391,7 +391,7 @@ class ScreenLens(QObject):
                 errors += 1
                 self.tick_error = str(e) or type(e).__name__
                 if errors == 1 or errors % 30 == 0:
-                    log.warning("Screen translation: %s", self.tick_error)
+                    log.warning("Screen translator: %s", self.tick_error)
                 if errors >= 3 and cap is not None:  # start again from a clean capturer
                     try:
                         cap.close()

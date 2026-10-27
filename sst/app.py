@@ -562,8 +562,8 @@ class TrayApp:
         menu.addAction("Words", lambda: self.window.open("dictionary"))
         menu.addAction("Text Transform", lambda: self.window.open("transform"))
         menu.addAction("Translate", lambda: self.window.open("translate"))
-        # Screen translation (sst.screen): the frame and its threads are made only when it starts
-        self.screen = ScreenControl(self, QAction("Screen translation", menu, checkable=True))
+        # Screen translator (sst.screen): the frame and its threads are made only when it starts
+        self.screen = ScreenControl(self, QAction("Screen translator", menu, checkable=True))
         menu.addAction(self.screen.action)
         self.screen.start_shortcut()
         self.live_action = QAction("Live translation", menu, checkable=True)
