@@ -88,7 +88,7 @@ def wait_until(condition, seconds=3.0):
 def live():
     made = []
 
-    def make(servers, **config):
+    def make(servers, gate_factory=None, **config):
         events, clock = [], Clock()
         servers = list(servers)
 
@@ -100,7 +100,8 @@ def live():
             if isinstance(server, Exception):
                 raise server
             return server
-        engine = GeminiLiveTranslate(KEY, LiveConfig(**config), events.append, connect=connect, clock=clock)
+        engine = GeminiLiveTranslate(KEY, LiveConfig(**config), events.append, connect=connect, clock=clock,
+                                     gate_factory=gate_factory)
         made.append(engine)
         return engine, events, clock
     yield make
@@ -717,3 +718,117 @@ def test_live_translation_is_counted_after_each_connection_by_the_seconds_each_w
     assert counted()["audio_in"] == 15 and counted()["seconds"] == pytest.approx(0.6) and counted()["audio_out"] == 5
     assert usage.cost("gemini-3.5-live-translate-preview", "2026-10-23", counted()) == pytest.approx(
         (15 * 3.50 + 5 * 21.00) / 1e6)
+
+
+# ---- the cost saver (LiveConfig.save): a speech gate decides what's sent, a fake one here (sst.live.gate has its own tests)
+
+HUM = (np.sin(np.arange(1600) / 5) * 400).astype("<i2").tobytes()  # a room's noise: no digital silence, never speech
+
+
+class FakeGate:
+    """Speech is VOICE; the rest is kept back."""
+    PREROLL_FRAMES = 3
+
+    def __init__(self):
+        self.openings, self.heard, self._open = 0, 0, False
+
+    def process(self, frame):
+        self.heard += 1
+        speech = frame == VOICE
+        self.openings += speech and not self._open
+        self._open = speech
+        return speech
+
+
+def gates():
+    made = []
+    return made, lambda: made.append(FakeGate()) or made[-1]
+
+
+def stream_ends(server):
+    return sum("audioStreamEnd" in m.get("realtimeInput", {}) for m in server.sent)
+
+
+def test_frames_the_gate_closes_are_not_sent_and_the_stream_ends_once(live):
+    server = FakeServer()
+    made, factory = gates()
+    engine, _, _ = live([server], gate_factory=factory, save=True)
+    engine.start()
+    assert wait_until(lambda: server.sent)
+    engine.feed(VOICE)
+    for _ in range(10):  # a second of a room's noise: the digital-silence rule would send it all
+        engine.feed(HUM)
+    assert wait_until(lambda: made and made[0].heard == 11)
+    assert server.frames == [VOICE] and stream_ends(server) == 1
+    assert engine.silence_s == pytest.approx(1.0) and engine.spend() == pytest.approx((0.1, 0.0, 1.0))
+    assert "gate opened 1 times" in engine.report()
+
+
+def test_the_pre_roll_goes_first_when_the_gate_opens(live):
+    server = FakeServer()
+    _, factory = gates()
+    engine, _, _ = live([server], gate_factory=factory, save=True)
+    engine.start()
+    assert wait_until(lambda: server.sent)
+    engine.feed(VOICE)
+    for _ in range(10):
+        engine.feed(HUM)
+    engine.feed(VOICE)
+    assert wait_until(lambda: len(server.frames) == 5)
+    assert server.frames == [VOICE, HUM, HUM, HUM, VOICE]  # the gate's PREROLL_FRAMES, then the voice
+    assert stream_ends(server) == 1 and engine.silence_s == pytest.approx(0.7)
+
+
+def test_the_gates_state_is_kept_across_a_reconnect(live):
+    first, second = FakeServer(), FakeServer()
+    made, factory = gates()
+    engine, _, _ = live([first, second], gate_factory=factory, save=True)
+    engine.start()
+    assert wait_until(lambda: first.sent)
+    engine.feed(VOICE)
+    engine.feed(HUM)
+    assert wait_until(lambda: made and made[0].heard == 2)
+    first.incoming.put({"goAway": {"timeLeft": "10s"}})
+    assert wait_until(lambda: second.sent)
+    engine.feed(HUM)
+    engine.feed(VOICE)
+    assert wait_until(lambda: len(second.frames) == 3)
+    assert second.frames == [HUM, HUM, VOICE] and len(made) == 1  # one gate, and what it kept back before the reconnect
+    assert stream_ends(first) == 1 and stream_ends(second) == 0
+
+
+def test_saving_can_be_turned_on_while_running(live):
+    server = FakeServer()
+    made, factory = gates()
+    engine, _, _ = live([server], gate_factory=factory)
+    engine.start()
+    assert wait_until(lambda: server.sent)
+    for _ in range(25):  # off: a room's noise is sent as always
+        engine.feed(HUM)
+    assert wait_until(lambda: len(server.frames) == 25) and not made and "gate" not in engine.report()
+    engine.saving = True
+    for _ in range(5):
+        engine.feed(HUM)
+    assert wait_until(lambda: made and made[0].heard == 5)
+    assert len(server.frames) == 25 and engine.silence_s == pytest.approx(0.5)
+    engine.saving = False  # and off again: sent once more
+    engine.feed(HUM)
+    assert wait_until(lambda: len(server.frames) == 28)  # the plain rule's pre-roll (the last 2 kept back), the frame
+    assert engine.silence_s == pytest.approx(0.3)
+
+
+def test_unsent_seconds_are_recorded_but_not_billed(live, monkeypatch):
+    ledger = usage.Ledger(None)
+    monkeypatch.setattr(usage, "_ledger", ledger)
+    server = FakeServer()
+    _, factory = gates()
+    engine, _, _ = live([server], gate_factory=factory, save=True)
+    engine.start()
+    assert wait_until(lambda: server.sent)
+    for frame in [VOICE] * 4 + [HUM] * 10:
+        engine.feed(frame)
+    assert wait_until(lambda: engine.silence_s >= 0.95)
+    engine.stop()
+    counted = next(iter(ledger.days.values()))["live_translation|gemini-3.5-live-translate-preview"]
+    assert counted["unsent"] == pytest.approx(1.0) and counted["audio_in"] == 10 and counted["seconds"] == pytest.approx(0.4)
+    assert usage.cost("gemini-3.5-live-translate-preview", "2026-10-23", counted) == pytest.approx(10 * 3.50 / 1e6)

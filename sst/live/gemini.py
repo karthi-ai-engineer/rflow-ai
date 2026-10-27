@@ -7,7 +7,9 @@
                  guide shows them in generationConfig, which the server closes with 1007 "Unknown name")
     audio        {"realtimeInput": {"audio": {"data": <base64 PCM16 16 kHz mono>, "mimeType": "audio/pcm;rate=16000"}}}
     silence      {"realtimeInput": {"audioStreamEnd": true}}: after SILENCE_SEND_S of digital silence no audio is sent
-                 (Google bills the audio streamed); the next sound reopens the stream, after PREROLL_FRAMES of silence
+                 (Google bills the audio streamed); the next sound reopens the stream, after PREROLL_FRAMES of silence.
+                 With the cost saver (`saving`), a speech gate (sst.live.gate) decides instead: only speech is sent,
+                 and its SpeechGate.PREROLL_FRAMES before it when it opens
     answers      serverContent.inputTranscription.text   the words heard, piece by piece
                  serverContent.outputTranscription.text  their translation, piece by piece
                  serverContent.modelTurn.parts[].inlineData  the translation spoken: base64 PCM16 mono, 24 kHz
@@ -58,6 +60,7 @@ VOICE_PAUSE = 0.3  # seconds: the voice has paused, so a translation arriving no
 SILENT_PEAK = 32  # a frame whose samples all stay within this (of 32,768: -60 dBFS) is digital silence
 SILENCE_SEND_S = 2.0  # this much silence is still sent (the model hears the pause and ends its line); after it, none
 PREROLL_FRAMES = 2  # the last 200 ms of silence not sent go first when sound comes back
+_GATE_PREROLL = 10  # with the cost saver: SpeechGate.PREROLL_FRAMES (1 s), if the gate couldn't be made
 RECONNECT_GRACE_S = 45.0  # past reconnect_s, the new connection waits this long at most for a pause (Google's ~10 min)
 QUOTA_TRIES = 3  # a quota refusal that doesn't say when it lifts is tried this often before the captions stop
 QUOTA_WAIT = 30.0  # seconds between those tries
@@ -108,9 +111,14 @@ class GeminiLiveTranslate:
     """Feed it frames from any thread; it calls `on_event` (from its own threads) with LiveEvents."""
 
     def __init__(self, key: str, config: LiveConfig, on_event: Callable[[LiveEvent], None], *,
-                 connect: Callable = _connect, clock: Callable[[], float] = time.monotonic, lane: str = "system"):
+                 connect: Callable = _connect, clock: Callable[[], float] = time.monotonic, lane: str = "system",
+                 gate_factory: Callable | None = None):
         self.key, self.config, self.on_event, self.lane = key, config, on_event, lane
         self._connect, self._clock = connect, clock
+        self.saving = config.save  # the cost saver: may be flipped while running (LiveSession.set_saving)
+        self._gate_factory = gate_factory  # None: sst.live.gate.SpeechGate, made when first needed
+        self._gate = None
+        self._gate_failed = False  # said once in the log
         self._frames: queue.Queue[bytes] = queue.Queue(maxsize=QUEUE_FRAMES)
         self._stop = threading.Event()
         self._lock = threading.Lock()  # the line being built: touched by the receiving and the sending thread
@@ -136,14 +144,14 @@ class GeminiLiveTranslate:
         # for the session's log line (report()): never any text
         self.dropped = 0  # frames dropped because the network fell behind
         self.sent = 0  # frames sent
-        self.silence_s = 0.0  # seconds of silence not sent
+        self.silence_s = 0.0  # seconds not sent (silence, or what the gate kept back)
         self.reconnects = 0
         self.reconnect_s = 0.0  # seconds without a connection between them, in all
         self.resumed = 0  # reconnects that took up the same session
         self.first_words: float | None = None  # seconds from start() to the first words shown
         self.audio_s = 0.0  # seconds of the translation spoken that came (given to on_audio or not)
         self.error = ""  # the last error, as the user saw it
-        self._billed = (0, 0.0)  # (frames sent, seconds of voice received) already in the cost tracker (_bill)
+        self._billed = (0, 0.0, 0.0)  # (frames sent, s of voice received, s not sent) already in the cost tracker (_bill)
         self._usage: dict = {}  # the last usageMetadata Google sent, for the log
 
     # -- the caller's side
@@ -182,9 +190,15 @@ class GeminiLiveTranslate:
         parts = [first, f"{self.sent} frames sent, {self.dropped} dropped", f"{self.silence_s:.0f} s of silence not sent",
                  f"{self.reconnects} reconnects ({self.reconnect_s:.1f} s without a connection, {self.resumed} resumed)",
                  f"{self.audio_s:.0f} s of Gemini's voice"]
+        if self._gate is not None:
+            parts.append(f"gate opened {getattr(self._gate, 'openings', 0)} times")
         if self.error:
             parts.append(f"last error: {self.error}")
         return "; ".join(parts)
+
+    def spend(self) -> tuple[float, float, float]:
+        """(seconds sent, seconds of Gemini's voice received, seconds not sent): what the session costs, and saved."""
+        return self.sent * FRAME_S, self.audio_s, self.silence_s
 
     # -- the connection
 
@@ -248,18 +262,20 @@ class GeminiLiveTranslate:
         """What was streamed since the last time into the cost tracker (sst.usage): the seconds sent and the seconds of
         Google's voice received, at the Live API's 25 tokens a second each way. After each connection, so a long
         session counts as it goes. Google's usageMetadata is only logged, to compare: Google staff on its forum say
-        Live sessions bill more than the price page's footnote, which no one has confirmed."""
+        Live sessions bill more than the price page's footnote, which no one has confirmed. The seconds not sent are
+        counted too (not billed): what was saved."""
         sent, spoken = self.sent - self._billed[0], self.audio_s - self._billed[1]
-        if sent <= 0 and spoken <= 0:
+        unsent = max(0.0, self.silence_s - self._billed[2])  # the pre-roll sent later takes some back: never below 0
+        if sent <= 0 and spoken <= 0 and unsent <= 0:
             return
-        self._billed = (self.sent, self.audio_s)
+        self._billed = (self.sent, self.audio_s, max(self._billed[2], self.silence_s))
         seconds = sent * FRAME_S
         if self._usage:
             log.info("Live captions: Google's last count: %s prompt and %s response tokens (Rflow counts %.0f s sent, "
                      "%.0f s received)", self._usage.get("promptTokenCount"), self._usage.get("responseTokenCount"),
                      self.sent * FRAME_S, self.audio_s)
         usage.record("live_translation", self.config.model, audio_in=round(seconds * costs.LIVE_AUDIO),
-                     audio_out=round(spoken * costs.LIVE_AUDIO), seconds=seconds, calls=0)
+                     audio_out=round(spoken * costs.LIVE_AUDIO), seconds=seconds, calls=0, unsent=unsent)
 
     def _without_extras(self, error: Exception, in_setup: bool, resuming: bool) -> bool:
         """Google refused something this engine adds and can do without: a handle it no longer knows (they last 2 hours),
@@ -337,10 +353,15 @@ class GeminiLiveTranslate:
         """Send a frame, unless it's more of a long digital silence: Google bills every second streamed. Once the
         silence has lasted SILENCE_SEND_S (enough for the model to hear the pause and finish its line), the stream is
         ended (audioStreamEnd: the model finalises what it heard) and frames wait for sound; the last PREROLL_FRAMES of
-        the silence go first then, so the model hears the voice begin."""
+        the silence go first then, so the model hears the voice begin. With the cost saver the speech gate decides,
+        and what it kept back last goes first."""
         seconds = len(frame) / BYTES_PER_S
         self._quiet_bytes = self._quiet_bytes + len(frame) if _silent(frame) else 0
-        if self._quiet_bytes > SILENCE_SEND_S * BYTES_PER_S:
+        saving = self.saving  # read once: the switch may flip on another thread
+        held = not self._gated(frame) if saving else self._quiet_bytes > SILENCE_SEND_S * BYTES_PER_S
+        if self._preroll.maxlen != (keep := self._preroll_frames(saving)):
+            self._preroll = deque(self._preroll, maxlen=keep)
+        if held:
             if not self._skipping:
                 self._skipping = True
                 if self._stream_end:  # without it, the 2 s sent are the pause the model hears
@@ -356,6 +377,25 @@ class GeminiLiveTranslate:
                 self.silence_s -= len(before) / BYTES_PER_S
             self._preroll.clear()
         self._send_audio(ws, frame)
+
+    def _gated(self, frame: bytes) -> bool:
+        """The speech gate's word on a frame (True: send it), made when first asked. A gate that can't be made or fails
+        lets everything through: the captions never lose speech to the saver."""
+        try:
+            if self._gate is None:
+                if self._gate_factory is None:
+                    from sst.live.gate import SpeechGate
+                    self._gate_factory = SpeechGate
+                self._gate = self._gate_factory()
+            return bool(self._gate.process(frame))
+        except Exception:
+            if not self._gate_failed:
+                self._gate_failed = True
+                log.exception("Live captions: the speech gate failed: everything is sent")
+            return True
+
+    def _preroll_frames(self, saving: bool) -> int:
+        return getattr(self._gate, "PREROLL_FRAMES", None) or _GATE_PREROLL if saving else PREROLL_FRAMES
 
     def _send_audio(self, ws, frame: bytes) -> None:
         ws.send(json.dumps({"realtimeInput": {"audio": {

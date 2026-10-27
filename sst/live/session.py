@@ -36,16 +36,23 @@ would hear and ECHO_HANGOVER after (the room's echo; the sound reaches the captu
 not echo-cancelled: Windows' echo cancellation is the device's (many microphones have none), comes with communications
 mode, which lowers the other apps by Windows' own setting and treats the room's voices as noise. The user's words while
 the others speak are lost; theirs are translated by the computer's way anyway.
+
+What the session costs (spend()) is the engines' own count (an engine with `spend()`: Gemini's) at the Live API's price,
+each second sent billed in and Gemini's voice billed out; with the cost saver on (set_saving), what wasn't sent is what
+was saved, priced both ways since Gemini's voice comes back as long as what's sent. quiet_for() says how long no words
+came, for the saver's auto-stop.
 """
 import logging
 import statistics
 import threading
+import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
 
+from sst import costs
 from sst.live.contracts import MIC, RATE, SYSTEM, Kind, LiveConfig, LiveEvent, already_in, language_name
 from sst.live.transcript import Transcript
 
@@ -81,6 +88,15 @@ def _path(capture) -> str:
     return f"{what} at {rate} Hz" if rate else what
 
 
+@dataclass(frozen=True)
+class Spend:
+    """What a session cost so far, all its ways together."""
+    cost: float = 0.0  # USD: the seconds sent and the seconds of Gemini's voice received
+    saved: float = 0.0  # USD: the seconds not sent, priced in and out
+    seconds: float = 0.0  # heard (sent or not), by the way that heard the longest: the session's length
+    unsent_s: float = 0.0  # not sent, all ways
+
+
 @dataclass
 class _Hearing:
     """What a way has heard so far, for its note."""
@@ -107,6 +123,8 @@ class LiveSession:
         self._hearing: dict[str, _Hearing] = {}
         self._lock = threading.Lock()  # the notes: frames come on the capture's thread, events on the engine's
         self._gated = False  # the microphone was silenced for the speakers' sound (said once in the log)
+        self._spent: dict[str, tuple[float, float, float]] = {}  # per way: what its stopped engines streamed (spend())
+        self._words_at: float | None = None  # when words last came, or the session started (quiet_for)
 
     @property
     def running(self) -> bool:
@@ -119,6 +137,8 @@ class LiveSession:
         with self._lock:
             self._hearing[lane] = _Hearing()
         engine = engine_factory(self._event)
+        if hasattr(engine, "saving"):  # the cost saver, as the session has it now
+            engine.saving = self.config.save
         if hasattr(engine, "on_audio"):  # the translation spoken by the engine itself: to the speaker, if one speaks
             engine.on_audio = lambda pcm, rate: self._audio(lane, pcm, rate)
         engine.start()
@@ -133,6 +153,8 @@ class LiveSession:
             with self._lock:
                 self._hearing.pop(lane, None)
             raise
+        if not self.lanes:
+            self._words_at = time.monotonic()
         self.lanes[lane] = (capture, engine)
         config = self.config.for_lane(lane)
         log.info("Live captions started (%s): into %s, %s", lane, config.target, config.model)
@@ -145,6 +167,9 @@ class LiveSession:
         engine.stop()
         with self._lock:
             self._hearing.pop(lane, None)
+        if callable(getattr(engine, "spend", None)):  # kept for spend(): the bar and the page show the last session's
+            done = self._spent.get(lane, (0.0, 0.0, 0.0))
+            self._spent[lane] = tuple(a + b for a, b in zip(done, engine.spend(), strict=True))
         lags, lines = self.lags.get(lane, []), self.lines.get(lane, 0)
         report = getattr(engine, "report", None)  # the engine's numbers (GeminiLiveTranslate.report): never any text
         engine_says = f"; {report()}" if callable(report) else ""
@@ -173,6 +198,33 @@ class LiveSession:
                          old.said, old.unvoiced)
         if speaker is not None:
             speaker.start()
+
+    def set_saving(self, on: bool) -> None:
+        """Turn the cost saver on or off: for the engines running now, and the ways added later."""
+        self.config.save = on
+        for _, engine in list(self.lanes.values()):
+            if hasattr(engine, "saving"):
+                engine.saving = on
+        log.info("Live captions: the cost saver %s", "on" if on else "off")
+
+    def spend(self) -> Spend:
+        """What the session cost so far, and what the saver saved (its ways now, and the ones that stopped)."""
+        lanes = {lane: list(done) for lane, done in self._spent.items()}
+        for lane, (_, engine) in list(self.lanes.items()):
+            if callable(getattr(engine, "spend", None)):
+                lanes[lane] = [a + b for a, b in zip(lanes.get(lane, (0.0, 0.0, 0.0)), engine.spend(), strict=True)]
+        rate_in, rate_out = costs.live_rates(self.config.model)
+        sent = sum(s for s, _, _ in lanes.values())
+        received = sum(r for _, r, _ in lanes.values())
+        unsent = sum(u for _, _, u in lanes.values())
+        heard = max((s + u for s, _, u in lanes.values()), default=0.0)
+        return Spend(cost=sent * rate_in + received * rate_out, saved=unsent * (rate_in + rate_out), seconds=heard,
+                     unsent_s=unsent)
+
+    def quiet_for(self, now: float | None = None) -> float:
+        """Seconds since words last came (heard or translated), or since the session started; 0 if it hasn't."""
+        at = self._words_at
+        return 0.0 if at is None else max(0.0, (time.monotonic() if now is None else now) - at)
 
     def note(self, lane: str, message: str) -> None:
         """Show `message` on the bar's status line for this way (what a capture found out, in plain words), in place of
@@ -282,6 +334,8 @@ class LiveSession:
             speaker.hear_audio(lane, pcm, rate)
 
     def _event(self, event: LiveEvent) -> None:
+        if event.kind in (Kind.SOURCE, Kind.TRANSLATION) and event.text:
+            self._words_at = max(self._words_at or 0.0, event.at)
         if event.kind is Kind.LINE:
             if event.lane == MIC and not event.text and self.config.source == "both":
                 log.debug("Live captions: an untranslated line from the microphone dropped (echo): %s", event.source)

@@ -22,6 +22,9 @@ FRAME_MS = 100  # the frame Google recommends for latency: 3,200 bytes at 16 kHz
 SYSTEM, MIC = "system", "mic"  # the two ways (lanes): what the laptop plays, and what the microphone hears
 # What live translation listens to, as the user chooses it, and the ways each one runs
 SOURCES: dict[str, tuple[str, ...]] = {"computer": (SYSTEM,), "microphone": (MIC,), "both": (SYSTEM, MIC)}
+# The cost saver (LiveConfig.save): a session with no words this long stops by itself, after a warning this long before
+AUTO_STOP_S = 900.0
+AUTO_STOP_WARN_S = 120.0
 
 
 class Kind(enum.Enum):
@@ -58,6 +61,9 @@ class LiveConfig:
     speak: bool = False  # the translation spoken aloud too, by a voice on the laptop (sst.live.speaker)
     speak_speed: float = 1.0
     duck: float = 0.1  # how loud the other apps stay while live translation speaks (1.0: as they are; sst.live.ducking)
+    # The cost saver: audio goes to Google only while someone talks (sst.live.gate; Google bills every second streamed,
+    # both ways), and a session with no words for AUTO_STOP_S stops. Off: silence is left out as it always was
+    save: bool = False
     # Why the bar is still empty (its status line, sst.live.session), judged on the last note_after_s seconds heard: a
     # frame quieter than quiet_dbfs is near silence (a muted microphone is all zeros, a quiet room about -60 dBFS); with
     # sound in sound_share of those seconds or more, it's sound without speech, else nothing heard
