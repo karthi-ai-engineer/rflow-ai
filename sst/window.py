@@ -1073,10 +1073,146 @@ class HistoryRow(QWidget):
         super().leaveEvent(event)
 
 
+class _Share(QWidget):
+    """A thin bar: a feature's part of the month's cost, in Iris on the theme's line."""
+
+    def __init__(self):
+        super().__init__()
+        self.value = 0.0
+        self.setFixedHeight(4)
+
+    def set_value(self, value: float) -> None:
+        self.value = max(0.0, min(1.0, value))
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(tok("line"))
+        p.drawRoundedRect(QRectF(self.rect()), 2, 2)
+        if self.value > 0:  # a sliver at least: a feature that cost something shows it
+            p.setBrush(tok("iris"))
+            p.drawRoundedRect(QRectF(0, 0, max(4.0, self.width() * self.value), self.height()), 2, 2)
+        p.end()
+
+
+class _UsageColumn:
+    """Home's usage: this month's Gemini cost and what it went on, from the same ledger and estimate as AI & models'
+    cost card (sst.usage), which Details opens. Beside the hero, one feature a line; under it, two."""
+
+    SHOWN = 4  # features listed, the costliest first; the rest are in AI & models' card
+    WIDTH = 280  # beside the hero
+
+    def __init__(self, app, go_to):
+        self.app, self.beside = app, False
+        self.frame, layout = card(10, (20, 18, 20, 18))
+        self.frame.setObjectName("usage")
+        self.details = button("Details", lambda _=False: go_to("models"), link=True, size="sm", icon="chevron-right",
+                              icon_after=True)
+        layout.addLayout(row(_caps_label("Usage this month"), self.details, stretch_at=1))
+        self.month = label("", wrap=False)
+        self.month.setFont(font(30, 600, tabular=True))
+        self.month.setAccessibleName("This month's cost")
+        self.today = caption("", "3", wrap=False)
+        totals = QVBoxLayout()
+        totals.setSpacing(0)
+        totals.addWidget(self.month)
+        totals.addWidget(self.today)
+        totals.addStretch()
+        # the total over the features beside the hero; to their left under it, so the card stays low
+        self.body = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        self.body.setSpacing(40)
+        self.body.addLayout(totals)
+        features = QVBoxLayout()
+        features.setSpacing(0)
+        self.lines = QGridLayout()
+        self.lines.setHorizontalSpacing(28)
+        self.lines.setVerticalSpacing(10)
+        features.addLayout(self.lines)
+        self.empty = caption("", "2")
+        features.addWidget(self.empty)
+        features.addStretch()
+        self.body.addLayout(features, 1)
+        layout.addLayout(self.body)
+        layout.addStretch()
+        self.foot = caption("", "3")
+        layout.addWidget(self.foot)
+
+    def set_beside(self, beside: bool) -> None:
+        if beside == self.beside:
+            return
+        self.beside = beside
+        self.body.setDirection(QBoxLayout.Direction.TopToBottom if beside else QBoxLayout.Direction.LeftToRight)
+        self.body.setSpacing(14 if beside else 40)
+        if beside:
+            self.frame.setFixedWidth(self.WIDTH)
+        else:
+            self.frame.setMinimumWidth(0)
+            self.frame.setMaximumWidth(16777215)
+        self.refresh()
+
+    def refresh(self) -> None:
+        ledger = getattr(self.app, "usage", None)
+        summary = ledger.summary() if ledger is not None else usage.Summary()
+        free = bool(getattr(self.app.settings, "gemini_free_tier", False))  # as the cost card: nothing billed
+        self.month.setText("$0.00" if free else dollars(summary.month))
+        self.today.setText(f"{'$0.00' if free else dollars(summary.today)} today")
+        clear(self.lines)
+        lines = sorted(summary.lines, key=lambda line: -line.cost)[:self.SHOWN]
+        columns = 1 if self.beside else 2
+        for i, line in enumerate(lines):
+            self.lines.addWidget(self._line(line, summary.month), i // columns, i % columns)
+        for column in range(2):
+            self.lines.setColumnStretch(column, 1 if column < columns else 0)
+        self.empty.setVisible(not lines)
+        self.empty.setText("Nothing counted yet. Parakeet on this PC is free; each call to Gemini is counted here.")
+        more = len(summary.lines) - len(lines)
+        foot = ["A free key: nothing billed" if free else "Estimate at list prices"]
+        if summary.saved > 0:
+            foot.append(f"{dollars(summary.saved)} saved by the cost saver")
+        if more > 0:
+            foot.append(f"{more} more in Details")
+        self.foot.setText(" · ".join(foot))
+
+    @staticmethod
+    def _line(line: "usage.Line", month: float) -> QWidget:
+        widget = QWidget()
+        widget.setObjectName("usageLine")
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        name = ElidedText(line.title, None, None)
+        name.setFont(font(13, 500))
+        top.addWidget(name, 1)
+        top.addWidget(caption(line.amount.split(" · ")[0], "3", wrap=False))  # what wasn't sent: in Details
+        cost = label(dollars(line.cost), wrap=False)
+        cost.setFont(font(13, 500, mono=True))
+        cost.setMinimumWidth(52)
+        cost.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        top.addWidget(cost)
+        layout.addLayout(top)
+        share = _Share()
+        share.set_value(line.cost / month if month > 0 else 0.0)
+        layout.addWidget(share)
+        widget.setAccessibleName(f"{line.title}: {line.amount}, {dollars(line.cost)}")
+        return widget
+
+
+def greeting(now: datetime, name: str = "") -> str:
+    """Home's hello in the top bar: "Good afternoon, Alex" (no name yet: "Good afternoon")."""
+    part = "morning" if 5 <= now.hour < 12 else "afternoon" if 12 <= now.hour < 18 else "evening"
+    return f"Good {part}, {name.strip()}" if name.strip() else f"Good {part}"
+
+
 class HomePage(Page):
-    """The voice orb and how to dictate (or what Rflow still needs), the stats strip, and the dictations."""
+    """The voice orb and how to dictate (or what Rflow still needs) beside this month's usage, the stats strip, and the
+    dictations."""
 
     SHOWN = 30  # dictations listed before "Show all"
+    BESIDE = 860  # the page's width from which the usage sits beside the hero (the window about 1,080 px wide)
 
     def __init__(self, app, go_to=None):
         super().__init__()
@@ -1149,8 +1285,16 @@ class HomePage(Page):
             actions.addWidget(widget)
         actions.addStretch()
         column.addWidget(self.actions)
+        column.insertStretch(0)  # centred when the usage beside it is taller
+        column.addStretch()
         hero.addLayout(column, 1)
-        self.add(self.hero)
+        # the hero and the month's usage side by side; the usage goes under the hero in the rail layout
+        self.usage = _UsageColumn(app, self.go_to)
+        self.top = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        self.top.setSpacing(24)
+        self.top.addWidget(self.hero, 1)
+        self.top.addWidget(self.usage.frame)
+        self.add(self.top)
 
         # the stats strip: one inset readout
         self.readout, strip = card(0, (20, 0, 20, 0), kind="well", horizontal=True)
@@ -1228,10 +1372,23 @@ class HomePage(Page):
     def set_compact(self, compact: bool) -> None:
         super().set_compact(compact)
         self.compact = compact
-        self.let_go.setVisible(not compact)
         self.search_box.setFixedWidth(180 if compact else 236)
         self.search_keys.setVisible(not compact)
         self.hero.layout().setContentsMargins(*(4 * [20 if compact else 24]))
+        self.arrange()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.arrange()
+
+    def arrange(self) -> None:
+        """The usage beside the hero when the page has room for both (the hero's line on one line), else under it."""
+        width = self.width()
+        beside = not self.compact and width >= self.BESIDE
+        self.top.setDirection(QBoxLayout.Direction.LeftToRight if beside else QBoxLayout.Direction.TopToBottom)
+        self.top.setSpacing(24 if beside else 16 if self.compact else 24)
+        self.let_go.setVisible(not self.compact and (not beside or width >= self.BESIDE + 200))
+        self.usage.set_beside(beside)
 
     def _hero_keys(self, label_text: str) -> None:
         clear(self.hero_caps_layout)
@@ -1253,6 +1410,7 @@ class HomePage(Page):
         self.stat_values["speed"].setText(str(wpm) if wpm else "–")
         self.stat_values["streak"].setText(str(stats.streak(today)))
         self.stat_values["speed"].setToolTip("" if wpm else "Shown after half a minute of dictation.")
+        self.usage.refresh()
         self._fill_history(app.history_entries(), today)
 
     def _show_state(self, label_text: str) -> None:
@@ -7460,6 +7618,18 @@ class MainWindow(QWidget):
         top = QHBoxLayout(self.topbar)
         top.setContentsMargins(32, 16, 32, 0)
         top.setSpacing(12)
+        # Home only: a hello and the date at the bar's left, where the other pages have nothing (their title is below)
+        self.greeting = QWidget()
+        hello = QVBoxLayout(self.greeting)
+        hello.setContentsMargins(0, 0, 0, 0)
+        hello.setSpacing(0)
+        self.greeting_text = ElidedText("", None, None)
+        self.greeting_text.setFont(font(18, 600))
+        self.greeting_date = ElidedText("", "caption", "3")
+        hello.addWidget(self.greeting_text)
+        hello.addWidget(self.greeting_date)
+        top.addWidget(self.greeting, 1, Qt.AlignmentFlag.AlignVCenter)
+        self.greeting.hide()
         top.addStretch()
         self.appearance = Segmented(APPEARANCE_CHOICES, icons=APPEARANCE_ICONS)
         for key, b in self.appearance.buttons.items():
@@ -7628,6 +7798,7 @@ class MainWindow(QWidget):
             page.refresh(self.ready)
         self.stack.setCurrentWidget(page)
         self.sidebar.setVisible(key != "welcome")  # the welcome has the whole window
+        self._show_greeting(key)
         section = SECTION.get(key)
         if section in self.nav:
             self.nav[section].setChecked(True)
@@ -7636,6 +7807,13 @@ class MainWindow(QWidget):
                 b.setAutoExclusive(False)
                 b.setChecked(False)
                 b.setAutoExclusive(True)
+
+    def _show_greeting(self, key: str) -> None:
+        self.greeting.setVisible(key == "home")
+        if key == "home":
+            now = datetime.now()
+            self.greeting_text.setText(greeting(now, self.app.profiles.current.name))
+            self.greeting_date.setText(f"{now:%A}, {now.day} {now:%B}")
 
     def current_section(self) -> str:
         return SECTION.get(self.current_page(), "")
@@ -7707,9 +7885,11 @@ class MainWindow(QWidget):
             self.pages[current].refresh(self.ready)
 
     def usage_changed(self) -> None:
-        """A Gemini call was counted: AI & models' cost card, if it is on screen (it refreshes itself when shown)."""
+        """A Gemini call was counted: AI & models' cost card or Home's usage, if on screen (each refreshes when shown)."""
         if "models" in self.pages.built and self.current_page() == "models":
             self.pages["models"].costs.refresh()
+        elif self.current_page() == "home":
+            self.pages["home"].usage.refresh()
 
     def set_status(self, message: str, ready: bool) -> None:
         self.ready, self.status_message = ready, message
