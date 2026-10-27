@@ -11,12 +11,15 @@ words heard (the user knows what they said). With the microphone alone, words al
 translated into are shown as heard, marked "already English" in the small line. A quiet status line at the bottom says
 why nothing shows yet (the session's notes: listening, nothing heard, sound but no speech). The speaker button turns the
 spoken translation on and off, and the copy button puts the session so far on the clipboard (the app does it, from the
-transcript: the bar never takes the keyboard, so its text can't be selected).
+transcript: the bar never takes the keyboard, so its text can't be selected). The cost saver button sends audio to
+Google only while someone talks (LiveConfig.save); while it's on, the title says what the session cost and saved, and a
+session with no words for 15 minutes stops by itself, after a warning in the status line.
 """
 import ctypes
 import dataclasses
 import html
 import logging
+import math
 from collections.abc import Callable
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
@@ -24,9 +27,12 @@ from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QTextBlockFo
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QTextBrowser, QToolButton, QVBoxLayout, QWidget
 
 from sst import theme
-from sst.live.contracts import MIC, SYSTEM, Kind, LiveConfig, LiveEvent, already_in, language_name
+from sst.costs import money
+from sst.live.contracts import AUTO_STOP_S, AUTO_STOP_WARN_S, MIC, SYSTEM, Kind, LiveConfig, LiveEvent, already_in, language_name
 
 EDGE = 8  # px along the border where a drag resizes instead of moving
+TICK_S = 5.0  # how often the cost is refreshed and a quiet saving session is checked
+SAVE_TIP = "Cost saver: send audio only while someone talks"
 MIN_SIZE, DEFAULT_SIZE = QSize(360, 140), QSize(760, 240)
 KEEP_LINES = 2000  # finished lines kept to scroll back to (a long meeting); the transcript keeps them all
 WDA_NONE, WDA_EXCLUDEFROMCAPTURE = 0x0, 0x11  # Windows 10 2004+: drawn on the screen, left out of screen capture
@@ -71,6 +77,7 @@ class CaptionBar(QWidget):
     moved = Signal(object)  # [x, y, width, height] after a move or a resize, to remember
     speak_toggled = Signal(bool)  # the speaker button: the translation spoken aloud, or not
     copy_requested = Signal()  # the copy button: the session so far onto the clipboard
+    save_toggled = Signal(bool)  # the cost saver button: audio sent only while someone talks, or all of it
 
     def __init__(self, config: LiveConfig | None = None):
         super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
@@ -89,6 +96,8 @@ class CaptionBar(QWidget):
         self.status = "Starting…"
         self.voice_note = ""  # the voice's state in the title while it isn't simply on or off (downloading, loading)
         self.flash_note = ""  # what a click just did ("Copied 42 lines"), in the title for a moment
+        self.spend_note = ""  # what the session cost and saved ("$0.42 · saved $0.26"), while the cost saver is on
+        self.warning = ""  # the cost saver's auto-stop warning, first in the status line
         self._flash_timer = QTimer(self, singleShot=True, interval=2500)
         self._flash_timer.timeout.connect(lambda: self.flash(""))
         self._drag: tuple[QPoint, QRect, tuple] | None = None  # (where the press was, the geometry then, the edges)
@@ -107,10 +116,14 @@ class CaptionBar(QWidget):
         self.copy_button = self._head_button("Copy the translation so far (both languages)")
         self.copy_button.setIcon(QIcon(theme.icon_pixmap("copy", theme.tok("text2", popup=True).name(), 15, 2.0)))
         self.copy_button.clicked.connect(self.copy_requested.emit)
+        self.save_button = self._head_button(SAVE_TIP)
+        self.save_button.setCheckable(True)
+        self.save_button.clicked.connect(lambda on: self.save_toggled.emit(on))
         self.close_button = self._head_button("Stop live translation")
         self.close_button.setIcon(QIcon(theme.icon_pixmap("close", theme.tok("text2", popup=True).name(), 14, 2.0)))
         self.close_button.clicked.connect(self.closed.emit)
         head.addWidget(self.title, 1)
+        head.addWidget(self.save_button)
         head.addWidget(self.copy_button)
         head.addWidget(self.speak_button)
         head.addWidget(self.close_button)
@@ -138,6 +151,7 @@ class CaptionBar(QWidget):
         self.footer.hide()
         outer.addWidget(self.footer)
         self.set_speaking(False)
+        self.set_saving(self.config.save)
         self._update_title()
         self._redraw_tail()
 
@@ -158,6 +172,27 @@ class CaptionBar(QWidget):
         self.speak_button.setIcon(QIcon(theme.icon_pixmap("speaker" if on else "speaker-off", colour, 15, 2.0)))
         self.speak_button.setToolTip(hint or ("Stop speaking the translation" if on else "Speak the translation"))
         self.problems.pop("voice", None)
+
+    def set_saving(self, on: bool) -> None:
+        """The cost saver button shows whether it's on (the accent, like the speaker); off, the cost and the
+        warning go."""
+        self.save_button.setChecked(on)
+        colour = theme.tok("primary" if on else "text2", popup=True).name()
+        self.save_button.setIcon(QIcon(theme.icon_pixmap("cloud", colour, 15, 2.0)))
+        if not on:
+            self.spend_note, self.warning = "", ""
+            self._update_footer()
+        self._update_title()
+
+    def set_spend(self, cost: float, saved: float) -> None:
+        """What the session cost so far, and what the cost saver kept from being sent, in the title."""
+        self.spend_note = f"{_dollars(cost)} · saved {_dollars(saved)}"
+        self._update_title()
+
+    def set_warning(self, text: str) -> None:
+        if text != self.warning:
+            self.warning = text
+            self._update_footer()
 
     def set_voice_note(self, note: str) -> None:
         self.voice_note = note
@@ -204,9 +239,10 @@ class CaptionBar(QWidget):
         self._redraw_tail()
 
     def note(self) -> str:
-        """The status line: each way's note once, the computer's first."""
+        """The status line: the cost saver's warning, then each way's note once, the computer's first."""
         order = [SYSTEM, MIC] + [lane for lane in self.notes if lane not in (SYSTEM, MIC)]
-        return "  ·  ".join(dict.fromkeys(self.notes[lane] for lane in order if self.notes.get(lane)))
+        notes = [self.warning] + [self.notes[lane] for lane in order if self.notes.get(lane)]
+        return "  ·  ".join(dict.fromkeys(n for n in notes if n))
 
     def _update_footer(self) -> None:
         text = self.note()
@@ -251,6 +287,8 @@ class CaptionBar(QWidget):
             parts.append(self.status)
         if self.voice_note:
             parts.append(self.voice_note)
+        if self.spend_note:
+            parts.append(self.spend_note)
         if self.flash_note:
             parts.append(self.flash_note)
         self.title.setText("  ·  ".join(parts))
@@ -448,7 +486,10 @@ class LiveCaptions(QObject):
     moved = Signal(object)  # the bar's new [x, y, width, height], to remember
     speak_toggled = Signal(bool)  # the bar's speaker button
     copy_requested = Signal()  # the bar's copy button
+    save_toggled = Signal(bool)  # the bar's cost saver button
     noted = Signal(str)  # the bar's status line changed (the Live page shows it too)
+    quiet_stop = Signal(str)  # the cost saver stopped a session with no words (why: "no speech for 15 min")
+    spent = Signal()  # the cost of a saving session was refreshed (the Live page shows it too)
 
     def __init__(self, make_session: Callable, make_lane: Callable, make_speaker: Callable | None = None):
         super().__init__()
@@ -458,6 +499,10 @@ class LiveCaptions(QObject):
         self.config = LiveConfig()
         self.bar: CaptionBar | None = None
         self.last_problem = ""
+        self.stopped_why = ""  # "no speech for 15 min": why the cost saver stopped the last session, until the next start
+        self.last_spend = None  # the last saving session's Spend (cost, saved, seconds heard), until the next start
+        self._ticks = QTimer(self, interval=int(TICK_S * 1000))
+        self._ticks.timeout.connect(self.tick)
 
     @property
     def running(self) -> bool:
@@ -473,7 +518,7 @@ class LiveCaptions(QObject):
         go on."""
         if self.session is not None:
             return
-        self.config, self.last_problem = config, ""
+        self.config, self.last_problem, self.stopped_why, self.last_spend = config, "", "", None
         bar = CaptionBar(config)
         session = self._make_session(config, self.event.emit)
         failed = []
@@ -490,11 +535,14 @@ class LiveCaptions(QObject):
         bar.moved.connect(self.moved.emit)
         bar.speak_toggled.connect(self.speak_toggled.emit)
         bar.copy_requested.connect(self.copy_requested.emit)
+        bar.save_toggled.connect(self.save_toggled.emit)
         for lane, error in failed:
             self._couldnt_start(lane, error)
         self._update_speaker()
         bar.place(geometry)
         bar.show()
+        self._ticks.start()
+        self.tick()
         self.changed.emit(True)
 
     def set_source(self, source: str) -> str:
@@ -527,6 +575,52 @@ class LiveCaptions(QObject):
         """The translation spoken aloud, or not: at once if live translation runs, and for the next start."""
         self.config = dataclasses.replace(self.config, speak=on)
         self._update_speaker()
+
+    def set_save(self, on: bool) -> None:
+        """The cost saver on or off: at once if live translation runs (every way's engine), and for the next start."""
+        self.config = dataclasses.replace(self.config, save=on)
+        if self.session is None:
+            return
+        self.session.config = self.config
+        self.session.set_saving(on)
+        self.bar.set_saving(on)
+        self.tick()
+        if not on:
+            self.noted.emit(self.note)  # a warning went with it
+
+    def spend(self):
+        """The running session's Spend (cost, saved, seconds heard, seconds not sent), or None; never raises."""
+        if self.session is None:
+            return None
+        try:
+            return self.session.spend()
+        except Exception as e:  # a cost figure never stops the translation
+            log.warning("Live translation's cost: %s", e)
+            return None
+
+    def tick(self) -> None:
+        """Every TICK_S while it runs: with the cost saver on, what the session cost and saved on the bar, and a session
+        with no words warned at AUTO_STOP_S - AUTO_STOP_WARN_S, then stopped at AUTO_STOP_S."""
+        if self.session is None or self.bar is None or not self.config.save:
+            return
+        spend = self.spend()
+        if spend is not None:
+            self.bar.set_spend(spend.cost, spend.saved)
+            self.spent.emit()
+        quiet = self.session.quiet_for()
+        if quiet >= AUTO_STOP_S:
+            log.info("Live translation: no speech for %.0f min, the cost saver stops it", quiet / 60)
+            self.stopped_why = f"no speech for {round(AUTO_STOP_S / 60)} min"
+            self.stop()
+            self.quiet_stop.emit(self.stopped_why)
+            return
+        warning = ""
+        if quiet >= AUTO_STOP_S - AUTO_STOP_WARN_S:
+            warning = (f"No speech for {int(quiet // 60)} min: stops in "
+                       f"{max(1, math.ceil((AUTO_STOP_S - quiet) / 60))} min")
+        if warning != self.bar.warning:
+            self.bar.set_warning(warning)
+            self.noted.emit(self.note)
 
     def set_speak_speed(self, speed: float) -> None:
         self.config = dataclasses.replace(self.config, speak_speed=speed)
@@ -595,6 +689,9 @@ class LiveCaptions(QObject):
             self.bar.set_hidden_from_capture(hidden)
 
     def stop(self) -> None:
+        self._ticks.stop()
+        if self.session is not None and self.config.save:
+            self.last_spend = self.spend()  # before the engines go: what this session cost and saved, for the Live page
         session, self.session = self.session, None
         if session is not None:
             session.stop()
@@ -619,6 +716,11 @@ class LiveCaptions(QObject):
                 self.session.remove(event.lane)  # the other way goes on; this one's reason stays on the bar
             else:
                 self.stop()  # nothing left: the bar goes; the reason stays in last_problem
+
+
+def _dollars(amount: float) -> str:
+    """$0.42; a little that isn't nothing: "<$0.01" (as the cost card says it)."""
+    return "$0.00" if amount <= 0 else "<$0.01" if amount < 0.005 else money(amount)
 
 
 def _mix(colour: QColor, other: QColor, amount: float) -> str:

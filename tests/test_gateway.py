@@ -524,7 +524,7 @@ def test_a_gemini_cleanup_is_counted_with_the_thinking_as_output(fake, ledger):
     assert fake.polisher(provider="gemini").polish(HEARD) == CLEAN
     # total - prompt is billed as output: 9 written and 60 of thinking, which Gemini leaves out of completion_tokens
     assert ledger.days[next(iter(ledger.days))] == {"cleanup|good": {
-        "audio_in": 0, "text_in": 120, "out": 9, "thoughts": 60, "audio_out": 0, "seconds": 0, "calls": 1}}
+        "audio_in": 0, "text_in": 120, "out": 9, "thoughts": 60, "audio_out": 0, "seconds": 0, "calls": 1, "unsent": 0}}
 
 
 def test_a_backup_model_is_a_call_of_its_own_and_a_failed_one_none(fake, ledger):

@@ -6,6 +6,7 @@ import time
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from datetime import date, datetime, timedelta  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
 
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
@@ -1497,6 +1498,10 @@ def test_the_cost_card_shows_today_this_month_and_each_feature():
                      calls=0)
     window.usage_changed()
     assert "Live translation | 1 min | $0.04" in _shown(card.frame)
+    assert card.saved.isHidden()  # nothing kept from being sent: no line for the cost saver
+    app.usage.record("live_translation", "gemini-3.5-live-translate-preview", seconds=600, calls=0, unsent=600)
+    window.usage_changed()
+    assert card.saved.text().startswith("Saved by the cost saver this month: $") and not card.saved.isHidden()
 
 
 def test_the_cost_card_waits_for_a_gemini_key_and_says_a_free_key_is_billed_nothing():
@@ -1986,6 +1991,25 @@ def test_the_languages_the_shortcut_and_screen_sharing_are_saved():
     s = app.settings
     assert (s.live_target, s.live_mic_target, s.live_shortcut, s.live_hide_from_share) == ("ta", "ko", "win+alt+l", False)
     assert ("set_live_hidden", False) in app.calls  # applied at once, also while it runs
+
+
+def test_the_cost_saver_is_a_switch_and_the_page_says_what_a_session_cost_and_saved():
+    window, app = _live_window()
+    window.show_page("live")
+    page = window.pages["live"]
+    assert not page.save.isChecked() and page.spend.isHidden()  # off by default
+    page.save.setChecked(True)
+    assert ("set_live_save", True) in app.calls and app.settings.live_save
+    app._live, app._live_spend = True, SimpleNamespace(cost=0.42, saved=0.26, seconds=660.0, unsent_s=420.0)
+    window.refresh()
+    assert page.spend.text() == "This session: $0.42 · 11 min · saved $0.26" and not page.spend.isHidden()
+    app._live = False
+    app._live_last, app._live_why = app._live_spend, "no speech for 15 min"  # the cost saver stopped a quiet session
+    window.refresh()
+    assert page.spend.text() == "Stopped: no speech for 15 min. Last session: $0.42 for 11 min, saved $0.26"
+    app.settings = dataclasses.replace(app.settings, live_save=False)  # switched off on the bar: the page follows
+    window.refresh()
+    assert not page.save.isChecked()
 
 
 def test_the_shortcut_is_shown_as_keys_and_one_another_tool_uses_stays_with_it():

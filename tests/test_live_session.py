@@ -8,8 +8,9 @@ import numpy as np
 import pytest
 
 import sst.live
+from sst import costs
 from sst.live.contracts import MIC, SYSTEM, Kind, LiveConfig, LiveEvent, already_in, language_name
-from sst.live.session import LiveSession, dbfs
+from sst.live.session import LiveSession, Spend, dbfs
 from sst.live.speaker import Speaker
 from sst.live.transcript import Transcript, for_copy
 
@@ -413,3 +414,59 @@ def test_the_microphone_alone_is_never_gated():
     session.add(MIC, FakeCapture(), FakeEngine)
     session.lanes[MIC][0].on_frame(b"\x01\x02" * 1600)
     assert engine(session, MIC).frames == [b"\x01\x02" * 1600]
+
+
+# ---- the cost saver: what the session cost and saved, the switch, and how long no words came
+
+class SpendingEngine(FakeEngine):
+    """An engine that counts what it streamed, as GeminiLiveTranslate.spend() does."""
+
+    def __init__(self, on_event, spent=(0.0, 0.0, 0.0)):
+        super().__init__(on_event)
+        self.spent, self.saving = spent, None
+
+    def spend(self):
+        return self.spent
+
+
+def test_spend_adds_up_across_lanes_and_saved_is_priced_in_and_out():
+    config = LiveConfig(source="both")
+    rate_in, rate_out = costs.live_rates(config.model)
+    assert rate_in > 0 and rate_out > 0
+    session = LiveSession(config)
+    assert session.spend() == Spend()
+    session.add(SYSTEM, FakeCapture(), lambda on_event: SpendingEngine(on_event, (600.0, 590.0, 300.0)))
+    session.add(MIC, FakeCapture(), lambda on_event: SpendingEngine(on_event, (100.0, 90.0, 800.0)))
+    spend = session.spend()
+    assert spend.cost == pytest.approx(700 * rate_in + 680 * rate_out)
+    assert spend.saved == pytest.approx(1100 * (rate_in + rate_out)) and spend.unsent_s == 1100
+    assert spend.seconds == 900  # the session's length: the way that heard the longest, not both added up
+    session.remove(MIC)  # a way that stopped still counts, and so does the whole session once it stopped
+    assert session.spend() == spend
+    session.stop()
+    assert session.spend() == spend
+
+
+def test_set_saving_reaches_the_engines_now_and_the_ways_added_later():
+    session = LiveSession(LiveConfig(source="both"))
+    session.add(SYSTEM, FakeCapture(), SpendingEngine)
+    assert engine(session, SYSTEM).saving is False  # off by default
+    session.set_saving(True)
+    assert engine(session, SYSTEM).saving is True and session.config.save
+    session.add(MIC, FakeCapture(), SpendingEngine)
+    assert engine(session, MIC).saving is True
+    session.set_saving(False)
+    assert not engine(session, SYSTEM).saving and not engine(session, MIC).saving
+
+
+def test_quiet_for_counts_from_the_last_words():
+    session = LiveSession(LiveConfig())
+    assert session.quiet_for() == 0.0  # not started
+    session.add(SYSTEM, FakeCapture(), FakeEngine)
+    start = session._words_at
+    assert session.quiet_for(start + 30) == pytest.approx(30)  # since the start, before any words
+    engine(session, SYSTEM).on_event(LiveEvent(Kind.STATUS, "Listening", at=start + 40))
+    engine(session, SYSTEM).on_event(LiveEvent(Kind.SOURCE, "今日は", at=start + 50))
+    assert session.quiet_for(start + 60) == pytest.approx(10)
+    engine(session, SYSTEM).on_event(LiveEvent(Kind.TRANSLATION, "Today", at=start + 70))
+    assert session.quiet_for(start + 75) == pytest.approx(5)  # a status is no words; a translation is

@@ -49,6 +49,7 @@ class Settings:
     live_speak_speed: float = 1.0  # how fast it speaks (faster by itself when it falls behind)
     live_duck: float = 0.1  # how loud the other apps stay while it speaks (0.0: barely, 1.0: as they are; sst.live.ducking)
     live_voice: str = "en_US-danny-low"  # the voice (sst.live.voice VOICES)
+    live_save: bool = False  # the cost saver: audio goes to Google only while someone talks (sst.live LiveConfig.save)
     live_told: bool = False  # the notice (audio goes to Google, the cost) was accepted once
     # The Gemini key is on Google's free tier: the cost card says "$0 billed (would cost $X)". No key can tell its tier,
     # and nothing sets it yet (TODO: the owner decides how it is asked or found out).

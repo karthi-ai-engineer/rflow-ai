@@ -489,6 +489,9 @@ class TrayApp:
         self.live.moved.connect(self._live_moved)
         self.live.speak_toggled.connect(lambda on: self.set_live_speak(on))
         self.live.copy_requested.connect(self._copy_live_from_bar)
+        self.live.save_toggled.connect(lambda on: self.set_live_save(on))
+        self.live.quiet_stop.connect(lambda why: self._notify(APP_NAME, f"Live translation stopped: {why}."))
+        self.live.spent.connect(lambda: self.window.isVisible() and self.window.refresh())  # the Live page shows the cost
         self.live.noted.connect(lambda _: self.window.isVisible() and self.window.refresh())  # the Live page shows it
         self.live_listener = None  # live translation's shortcut (Ctrl+Alt+L)
         self.window = MainWindow(self)
@@ -1069,7 +1072,7 @@ class TrayApp:
         s = self.settings
         return LiveConfig(target=s.live_target, mic_target=s.live_mic_target, source=s.live_source,
                           hide_from_capture=s.live_hide_from_share, speak=s.live_speak, speak_speed=s.live_speak_speed,
-                          duck=s.live_duck)
+                          duck=s.live_duck, save=s.live_save)
 
     # -- the spoken translation (sst.live.voice, sst.live.speaker)
 
@@ -1105,6 +1108,26 @@ class TrayApp:
         self.live.set_speak(on)
         if self.window.isVisible():
             self.window.refresh()
+
+    def set_live_save(self, on: bool) -> None:
+        """The cost saver (audio sent only while someone talks): saved, and at once while it runs; the bar's button and
+        the Live page's toggle stay in step."""
+        self.apply_settings(dataclasses.replace(self.settings, live_save=on))
+        self.live.set_save(on)
+        if self.window.isVisible():
+            self.window.refresh()
+
+    def live_spend(self):
+        """The running session's Spend while the cost saver is on, else None."""
+        return self.live.spend() if self.live.running and self.live.config.save else None
+
+    def live_last_spend(self):
+        """The last saving session's Spend, until the next start, or None."""
+        return self.live.last_spend
+
+    def live_stopped_why(self) -> str:
+        """Why the cost saver stopped the last session ("no speech for 15 min"), or ""."""
+        return self.live.stopped_why
 
     def set_live_speak_speed(self, speed: float) -> None:
         self.apply_settings(dataclasses.replace(self.settings, live_speak_speed=speed))

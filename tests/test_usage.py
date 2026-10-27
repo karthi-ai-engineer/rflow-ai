@@ -92,7 +92,7 @@ def test_saved_a_moment_later_off_the_ui_thread_and_read_back(tmp_path):
     assert saved.wait(2)
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data == {"2026-10-23": {"translate|gemini-3.5-flash-lite": {
-        "audio_in": 0, "text_in": 20, "out": 10, "thoughts": 0, "audio_out": 0, "seconds": 0, "calls": 2}}}
+        "audio_in": 0, "text_in": 20, "out": 10, "thoughts": 0, "audio_out": 0, "seconds": 0, "calls": 2, "unsent": 0}}}
     again = Ledger(path, today=Today(date(2026, 10, 23)))
     assert again.days == ledger.days and again.summary().lines[0].calls == 2
 
@@ -109,7 +109,42 @@ def test_a_damaged_file_is_kept_aside_and_counting_starts_again(tmp_path):
     path.write_text(json.dumps({"2026-10-23": {"dictation|m": {"calls": "x", "seconds": -3, "audio_in": 7},
                                                "nokey": {}}, "junk": 5, "2026-10-24": []}), encoding="utf-8")
     assert Ledger(path).days == {"2026-10-23": {"dictation|m": {
-        "audio_in": 7, "text_in": 0, "out": 0, "thoughts": 0, "audio_out": 0, "seconds": 0, "calls": 0}}}
+        "audio_in": 7, "text_in": 0, "out": 0, "thoughts": 0, "audio_out": 0, "seconds": 0, "calls": 0, "unsent": 0}}}
+
+
+def test_a_file_from_before_the_cost_saver_loads_with_nothing_unsent(tmp_path):
+    path = tmp_path / "usage.json"
+    old = {"audio_in": 1500, "text_in": 0, "out": 0, "thoughts": 0, "audio_out": 1500, "seconds": 60, "calls": 0}
+    path.write_text(json.dumps({"2026-10-23": {"live_translation|gemini-3.5-live-translate-preview": old}}), encoding="utf-8")
+    summary = Ledger(path, today=Today(date(2026, 10, 23))).summary()
+    (line,) = summary.lines
+    assert (line.unsent, line.saved, summary.saved, line.amount) == (0, 0, 0, "1 min")
+    assert line.cost == pytest.approx(0.0368, abs=1e-4)
+
+
+def test_what_the_cost_saver_didn_t_send_is_not_billed_but_priced_as_saved():
+    model = "gemini-3.5-live-translate-preview"
+    second_in, second_out = costs.live_rates(model)
+    today = Today(date(2026, 10, 22))
+    ledger = Ledger(None, today=today)
+    # 72 min heard, 42 of them sent (and as much voice back), 30 not sent; and 10 min last month, all unsent
+    sent = 42 * 60
+    ledger.record("live_translation", model, audio_in=sent * costs.LIVE_AUDIO, audio_out=sent * costs.LIVE_AUDIO,
+                  seconds=50 * 60, calls=0, unsent=20 * 60)
+    today.day = date(2026, 10, 23)
+    ledger.record("live_translation", model, seconds=22 * 60, calls=0, unsent=10 * 60)
+    ledger.record("live_translation", model, seconds=0, calls=0, unsent=-5)  # never negative
+    ledger.days["2026-09-30"] = {f"live_translation|{model}": dict.fromkeys(usage.COUNTS, 0.0) | {"unsent": 600.0}}
+    summary = ledger.summary()
+    (line,) = summary.lines
+    assert line.cost == pytest.approx(sent * (second_in + second_out)) and summary.month == pytest.approx(line.cost)
+    assert summary.today == 0  # today's stretch sent nothing: unsent costs nothing
+    assert line.unsent == 30 * 60 and line.saved == pytest.approx(30 * 60 * (second_in + second_out))
+    assert summary.saved == pytest.approx(line.saved) and line.saved == pytest.approx(30 * 0.0368, rel=0.01)  # this month only
+    assert line.amount == "72 min · 30 min not sent"
+    ledger.record("live_translation", model, seconds=0, calls=0, unsent=20)
+    assert ledger.summary().lines[0].amount == "72 min · 30 min not sent"
+    assert Ledger(None).summary().saved == 0
 
 
 def test_a_call_is_counted_for_the_feature_its_outermost_caller_names(monkeypatch):

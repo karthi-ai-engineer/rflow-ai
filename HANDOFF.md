@@ -11,7 +11,20 @@ _Last updated: 2026-10-23_
 
 ## Start here (a new session, or the owner's other laptop)
 
-**Where things stand (2026-10-26):**
+**Where things stand (2026-10-27):**
+- **Rflow 2.6.4** (phase 48, #221) adds the **Cost saver** for live translation, off by default (`Settings.live_save`,
+  `LiveConfig.save`; the cloud icon on the bar, a switch on the Live page). Live Translate bills every second streamed both
+  ways (about $0.037/min), and Gemini's voice comes back 1:1 with what's sent, silence included (the log's "736 s sent,
+  730 s received"); on a microphone the digital-silence skip never triggered ("0 s of silence not sent" in all nine of the
+  owner's sessions). With it on, `sst/live/gate.py` (`SpeechGate`: band level against a minimum-statistics noise floor,
+  +7/+6 dB hysteresis, 2 s hangover, the first second sent, fails open; numpy only) decides what `GeminiLiveTranslate._stream`
+  sends, with a 1 s pre-roll; a session without words for `AUTO_STOP_S` (15 min) stops, warned 2 min before; the bar and
+  the Live page show the session's cost and what was saved (`LiveSession.spend()`), and the cost card the month's
+  (`usage` counts `unsent` seconds, priced by `costs.live_rates`, never billed). Off, the frames sent are as before.
+  On synthetic sessions from the owner's recordings the gate saved 16-29% of the time in noise with 0-0.7% of speech
+  frames lost, and nothing under music (it stays open). Still to check on a real meeting: first-words time and line lag
+  with it on (the stop log line), and Google's usageMetadata against Rflow's count. Later: Silero VAD for music, a
+  "captions only" mode (Transcribe Live + Flash-Lite, about 70% cheaper).
 - **Rflow 2.6.3** (2026-10-26) fixes in-app updates that rolled back. The installed Rflow is a PyInstaller program whose
   bootloader sets the DLL directory to Rflow's folder (SetDllDirectory), and the programs Rflow starts inherit it: VS
   Code, opened by the Live page's Open, loaded Rflow's VCRUNTIME140.dll and held it, so the silent installer (Restart

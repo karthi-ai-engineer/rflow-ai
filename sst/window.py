@@ -3837,6 +3837,8 @@ class _CostsCard:
         self.empty = caption("Nothing counted this month yet. Each call to Gemini is: speech, AI cleanup, Text Transform, "
                              "Translate and live translation.", "3")
         layout.addWidget(self.empty)
+        self.saved = caption("", "ok")  # what the cost saver kept from being sent this month
+        layout.addWidget(self.saved)
         self.note = caption("", "3")
         layout.addWidget(self.note)
 
@@ -3860,6 +3862,9 @@ class _CostsCard:
             self.lines.addWidget(self._line(line))
         self.table.setVisible(bool(summary.lines))
         self.empty.setVisible(not summary.lines)
+        saved = getattr(summary, "saved", 0.0)
+        self.saved.setText(f"Saved by the cost saver this month: {dollars(saved)}")
+        self.saved.setVisible(saved > 0)
         note = (f"Estimated from what Rflow sent and got back, at Google's list prices as of {nice_day(costs.SEEN)}. "
                 "Google's Billing page has the real figure.")
         if summary.unpriced:
@@ -4299,6 +4304,11 @@ def live_doing(source: str, target: str, mic_target: str) -> str:
     return computer
 
 
+def _minutes(seconds: float) -> str:
+    """11 min; under a minute: "<1 min"."""
+    return "<1 min" if seconds < 30 else f"{round(seconds / 60)} min"
+
+
 class LivePage(Page):
     """Live translation (sst.live), a main feature: a big Start (a Stop while it runs, with a blinking Live light and
     what it's doing), the translation spoken aloud, then what it listens to and into which languages, its shortcut, how
@@ -4341,6 +4351,9 @@ class LivePage(Page):
         self.hearing = caption("", "3")  # the bar's status line while it runs: why nothing shows yet
         self.hearing.hide()
         words.addWidget(self.hearing)
+        self.spend = caption("", "2")  # the cost saver: what this session costs and saves, or what the last one did
+        self.spend.hide()
+        words.addWidget(self.spend)
         words.addStretch()
         top = QHBoxLayout()
         top.setSpacing(20)
@@ -4420,6 +4433,11 @@ class LivePage(Page):
         self.hide_share.toggled.connect(self._apply)
         column.addWidget(setting_row("Hide the bar from screen sharing", "On: screen shares and recordings leave it "
                                      "out. Off: colleagues can read it in your share.", self.hide_share)[0])
+        column.addWidget(divider())
+        self.save = Toggle("Cost saver")
+        self.save.toggled.connect(self._save_toggled)
+        column.addWidget(setting_row("Cost saver", "Sends audio to Google only while someone talks, and stops a session "
+                                     "after 15 minutes without speech. Google bills every second sent.", self.save)[0])
         self.add(options)
 
         sessions, column = card(4, (20, 18, 20, 16))
@@ -4470,6 +4488,9 @@ class LivePage(Page):
         hearing = app.live_note() if running else ""
         self.hearing.setText(hearing)
         self.hearing.setVisible(bool(hearing))
+        spend = self._spend_words(running)
+        self.spend.setText(spend)
+        self.spend.setVisible(bool(spend))
         clash = app.live_shortcut_clash()
         clear(self.how)
         if s.live_shortcut and not clash:
@@ -4497,6 +4518,9 @@ class LivePage(Page):
         self.hide_share.blockSignals(True)
         self.hide_share.setChecked(s.live_hide_from_share)
         self.hide_share.blockSignals(False)
+        self.save.blockSignals(True)
+        self.save.setChecked(s.live_save)
+        self.save.blockSignals(False)
         self._refresh_voice(s, source)
         clear(self.session_rows)
         found = app.live_sessions()
@@ -4517,6 +4541,22 @@ class LivePage(Page):
                 layout.addWidget(copy)
             layout.addWidget(button("Open", lambda _=False, p=path: self.app.open_live_session(p), link=True, size="sm"))
             self.session_rows.addWidget(line)
+
+    def _spend_words(self, running: bool) -> str:
+        """The cost saver's figures: this session's while it runs and saves, else the last saving session's."""
+        if running:
+            spend = self.app.live_spend() if self.app.settings.live_save else None
+            return (f"This session: {dollars(spend.cost)} · {_minutes(spend.seconds)} · saved {dollars(spend.saved)}"
+                    if spend is not None else "")
+        why, spend = self.app.live_stopped_why(), self.app.live_last_spend()
+        words = [f"Stopped: {why}." if why else ""]
+        if spend is not None:
+            words.append(f"Last session: {dollars(spend.cost)} for {_minutes(spend.seconds)}, saved {dollars(spend.saved)}")
+        return " ".join(w for w in words if w)
+
+    def _save_toggled(self, on: bool) -> None:
+        self.app.set_live_save(on)
+        self.refresh()
 
     def _copy_session(self, copy: Button, path, translation_only: bool, words: str) -> None:
         """A session's transcript onto the clipboard; the button says "Copied", or why not, for a moment."""
@@ -7409,6 +7449,23 @@ class PreviewApp:
     def copy_live_session(self, path, translation_only: bool = False) -> str:
         self.calls.append(("copy_live_session", path, translation_only))
         return ""
+
+    _live_spend = None  # the running session's Spend while it saves, for screenshots and tests
+    _live_last = None  # the last saving session's Spend
+    _live_why = ""  # why the cost saver stopped the last session
+
+    def set_live_save(self, on: bool) -> None:
+        self.calls.append(("set_live_save", on))
+        self.apply_settings(dataclasses.replace(self.settings, live_save=on))
+
+    def live_spend(self):
+        return self._live_spend if self._live and self.settings.live_save else None
+
+    def live_last_spend(self):
+        return self._live_last
+
+    def live_stopped_why(self) -> str:
+        return self._live_why
 
     _voice_state: tuple = ("missing", 0, "")  # the voice isn't downloaded in the preview
 

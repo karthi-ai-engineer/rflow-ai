@@ -740,7 +740,7 @@ def test_a_gemini_transcribe_call_is_counted_with_its_usage(fake, ledger):
         "promptTokensDetails": [{"modality": "AUDIO", "tokenCount": 50}, {"modality": "TEXT", "tokenCount": 10}]}}
     fake.engine("gemini", path="/v1beta").transcribe_chunk(AUDIO, RATE)
     assert _entries(ledger) == {"dictation|gemini-3.5-transcribe": {
-        "audio_in": 50, "text_in": 10, "out": 12, "thoughts": 0, "audio_out": 0, "seconds": 2.0, "calls": 1}}
+        "audio_in": 50, "text_in": 10, "out": 12, "thoughts": 0, "audio_out": 0, "seconds": 2.0, "calls": 1, "unsent": 0}}
 
 
 def test_a_flash_answer_without_usage_is_counted_by_the_audio_length(fake, ledger):
