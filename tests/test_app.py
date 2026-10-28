@@ -50,7 +50,8 @@ def test_the_pill_is_small_and_its_time_grows_with_a_long_dictation(monkeypatch)
     pill = sst_app.Pill()
     pill.show_state("recording")
     assert pill.HEIGHT <= 28 and pill._width() <= 120  # about two thirds of the 40 x 176 px it was: it hid things
-    monkeypatch.setattr(sst_app.time, "monotonic", lambda: pill._started + 62 * 60 + 5)
+    # half a second over: "+ 3725" exactly came back as 3724.999... on an ARM runner, shown as 1:02:04
+    monkeypatch.setattr(sst_app.time, "monotonic", lambda: pill._started + 62 * 60 + 5.5)
     assert pill._timer() == "1:02:05"
     short = pill.width()
     pill._animate()  # the time gained digits: the capsule widens to keep it inside
