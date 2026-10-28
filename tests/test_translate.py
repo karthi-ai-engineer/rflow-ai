@@ -95,6 +95,17 @@ def test_translator_asks_the_model_with_the_prompt_and_returns_the_translation()
     assert asked == [(system_prompt("French"), "Can you send the report?")]
 
 
+def test_a_chosen_source_language_is_named_and_the_second_language_is_left_alone():
+    asked = []
+
+    def complete(prompt, text):
+        asked.append(prompt)
+        return "Please send the report."
+    result = Translator(complete).translate("Please send the report.", "English", "Japanese", "Spanish")
+    assert result.target == "English" and "from Spanish into English" in asked[0]
+    assert "from" not in system_prompt("English").split(".")[0]
+
+
 def test_text_in_the_target_language_is_translated_into_the_second_one():
     result = Translator(lambda prompt, text: "レポートを送ってください。").translate("Please send the report.", "English",
                                                                                 "Japanese")

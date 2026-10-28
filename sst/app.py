@@ -1853,15 +1853,16 @@ class TrayApp:
             if event == "press":
                 self.toggle_meeting()
 
-    def run_translation(self, text: str, target: str, second: str = ""):
-        """`text` translated (sst.translate.Translation); raises when the provider can't be asked."""
+    def run_translation(self, text: str, target: str, second: str = "", source: str = ""):
+        """`text` translated (sst.translate.Translation); raises when the provider can't be asked. `source`: the
+        language it is in, when the user chose one (the Translate page's text translator)."""
         s = self.settings
 
         def complete(prompt: str, message: str) -> str:
             return Polisher(self.gateway, s.cleanup_model, [], fallback=s.cleanup_fallback or None,
                             system_prompt=prompt).complete(message)
         with usage.feature("translate"):  # Translate's "Try it" has said "tests" already
-            result = Translator(complete).translate(text, target, second)
+            result = Translator(complete).translate(text, target, second, source)
         log.info("Translated %d characters into %s in %.1f s%s", len(text), result.target, result.seconds,
                  f" ({'; '.join(result.warnings)})" if result.warnings else "")
         return result

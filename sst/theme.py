@@ -190,6 +190,7 @@ ICONS = {
     "chevron-down": '<path d="M6 9.5l6 6 6-6"/>',
     "chevron-right": '<path d="M9.5 6l6 6-6 6"/>',
     "chevron-left": '<path d="M14.5 6l-6 6 6 6"/>',
+    "swap": '<path d="M5 8h13.5M15 4.5 18.5 8 15 11.5M19 16H5.5M9 12.5 5.5 16 9 19.5"/>',
     "arrow-right": '<path d="M5 12h14M13 6l6 6-6 6"/>',
     "download": '<path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19.5h14"/>',
     "cloud": '<path d="M7.5 18.5a4 4 0 0 1-.7-7.94A5.5 5.5 0 0 1 17.4 9.1a4.7 4.7 0 0 1 .1 9.4z"/>',

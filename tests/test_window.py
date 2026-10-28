@@ -1401,25 +1401,112 @@ def test_the_translate_page_sets_the_shortcut_and_the_languages():
     assert app.settings.translate_shortcut == "" and "off" in page.how.text()
 
 
-def test_translate_can_be_tried_on_the_page():
-    window, app = _window(gateway=GatewayConfig(provider="openai", api_key="sk"),
-                          settings=Settings(welcomed=True, cleanup_model="gpt-4o-mini", translate_to="Spanish"))
-    page = window.pages["translate"]
-    page.refresh()
-    page.try_button.click()
-    for _ in range(200):
+def _translated(page, before: int) -> None:
+    """Wait for the text translator's answer (run_in_background) past `before` calls."""
+    for _ in range(300):
         QApplication.processEvents()
-        if not page.result.isHidden():
-            break
+        if len(page.app.calls) > before and page.text.output.toPlainText():
+            return
         time.sleep(0.01)
-    assert "informe" in page.result.toPlainText() and ("run_translation", "Spanish") in app.calls
+
+
+def _text_page(**settings):
+    window, app = _window(gateway=GatewayConfig(provider="openai", api_key="sk"),
+                          settings=Settings(welcomed=True, cleanup_model="gpt-4o-mini", **settings))
+    window.show_page("translate")
+    return window.pages["translate"], app
+
+
+def test_the_translate_page_opens_on_the_text_translator_with_three_tabs():
+    page, _ = _text_page()
+    assert list(page.tabs.buttons) == ["text", "selection", "screen"] and page.tab == "text"
+    assert page.text.widget.isVisibleTo(page) and not page.screen_card.widget.isVisibleTo(page)
+    assert not page.translate_on.isVisibleTo(page)
+    page.tabs.buttons["selection"].click()
+    assert page.translate_on.isVisibleTo(page) and not page.text.widget.isVisibleTo(page)
+    page.tabs.buttons["screen"].click()
+    assert page.screen_card.widget.isVisibleTo(page) and not page.ai.isVisibleTo(page)
+    assert page.subtitle.text() == w.TRANSLATE_SUBTITLES["screen"]
+
+
+def test_the_text_translator_translates_what_is_typed_into_the_chosen_language():
+    page, app = _text_page(text_to="Spanish")
+    text = page.text
+    assert text.source.currentText() == "Detect language" and text.target.currentData() == "Spanish"
+    text.input.setPlainText("Could you send me the updated report by Friday?")
+    assert text.count.text() == "47 / 20,000" and text.timer.isActive()  # it waits for typing to pause
+    text.translate_now()
+    _translated(page, 0)
+    assert "informe" in text.output.toPlainText() and ("run_translation", "Spanish") in app.calls
+    text.copy_button.click()
+    assert text.status.text() == "Copied."
+
+
+def test_the_text_translator_remembers_the_languages_and_says_which_it_found():
+    page, app = _text_page()
+    text = page.text
+    text.source.setCurrentIndex(text.source.findData("English"))
+    text.target.setCurrentIndex(text.target.findData("French"))
+    assert (app.settings.text_from, app.settings.text_to) == ("English", "French")
+    text.source.setCurrentIndex(0)
+    text.input.setPlainText("確認してください")
+    assert text.source.itemText(0) == "Detected: Japanese"
+
+
+def test_the_swap_turns_the_translation_into_the_text():
+    page, app = _text_page(text_from="English", text_to="Spanish")
+    text = page.text
+    text.input.setPlainText("the report")
+    text.translate_now()
+    _translated(page, 0)
+    before = len(app.calls)
+    text.swap.click()
+    assert (text.source.currentData(), text.target.currentData()) == ("Spanish", "English")
+    assert (app.settings.text_from, app.settings.text_to) == ("Spanish", "English")
+    assert "informe" in text.input.toPlainText()
+    _translated(page, before)
+    assert ("run_translation", "English", "Spanish") in app.calls[before:]
+
+
+def test_detect_language_swaps_as_the_language_it_found():
+    page, _ = _text_page(text_to="English")
+    text = page.text
+    text.input.setPlainText("確認してください")
+    text.swap.click()
+    assert (text.source.currentData(), text.target.currentData()) == ("English", "Japanese")
+
+
+def test_an_old_answer_never_replaces_a_newer_one():
+    page, _ = _text_page()
+    text = page.text
+    text.input.setPlainText("first")
+    text.translate_now()
+    text.input.setPlainText("")  # cleared before the answer came back
+    for _ in range(50):
+        QApplication.processEvents()
+        time.sleep(0.01)
+    assert text.output.toPlainText() == "" and text.status.text() == ""
+
+
+def test_the_text_translator_says_what_it_cant_do():
+    page, app = _text_page(text_from="Spanish", text_to="Spanish")
+    text = page.text
+    text.input.setPlainText("hola")
+    text.translate_now()
+    assert text.output.toPlainText() == "hola" and "Already in Spanish" in text.status.text()
+    text.input.setPlainText("x" * (w.TEXT_MAX + 1))
+    text.translate_now()
+    assert "Too long" in text.status.text() and not any(c[0] == "run_translation" for c in app.calls)
 
 
 def test_translate_without_an_ai_model_points_to_the_setup():
     window, _ = _window()
     window.show_page("translate")
     page = window.pages["translate"]
-    assert not page.setup.isHidden() and not page.try_button.isEnabled()
+    assert not page.setup.isHidden() and not page.text.button.isEnabled()
+    page.text.input.setPlainText("hello")
+    page.text.translate_now()
+    assert "needs an AI connection" in page.text.status.text()
 
 
 # ---- Text Transform
@@ -1810,6 +1897,7 @@ def test_translate_says_how_to_use_it_and_shows_examples():
     window, app = _window(settings=Settings(welcomed=True, translate_to="German", translate_second="English"))
     window.show_page("translate")
     page = window.pages["translate"]
+    page.tabs.buttons["selection"].click()
     steps = _shown(page.steps)
     assert "shows it in German" in steps and "already in German goes into English" in steps
     assert _keys(page.steps) == ["Ctrl", "C", "C", "C", "↵"]
