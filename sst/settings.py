@@ -39,6 +39,8 @@ class Settings:
     translate_shortcut: str = "ctrl+c+c"  # Translate's popup for the copied text (sst.translateui); "" = off
     translate_to: str = "English"  # the language Translate writes in
     translate_second: str = ""  # for text already in translate_to: this language instead ("" = none)
+    text_from: str = ""  # the Translate page's text translator: from this language ("" = detect it)
+    text_to: str = "Japanese"  # ...into this one
     # Screen translator (sst.screen): a frame over any app, its Japanese covered with English
     screen_shortcut: str = "ctrl+alt+s"  # starts and stops it from any app ("" = none)
     screen_lens: list[int] = field(default_factory=list, metadata={"items": int})  # the frame's [x, y, w, h], where left

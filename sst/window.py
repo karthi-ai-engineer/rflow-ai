@@ -107,6 +107,7 @@ from sst.snippets import protect as protect_snippets
 from sst.theme import font, surface, tok
 from sst.transform import GROUPS, TRANSFORMS, menu_items
 from sst.translate import LANGUAGES as TRANSLATE_LANGUAGES
+from sst.translate import detect as detect_language
 from sst.translate import fallback_second, system_language
 from sst.ui import (
     BlinkLamp,
@@ -5780,9 +5781,181 @@ class ScreenCard:
         self.refresh()
 
 
+TRANSLATE_TABS = [("text", "Text"), ("selection", "Selected text"), ("screen", "Screen")]
+TRANSLATE_SUBTITLES = {
+    "text": "Type or paste a word or a text, and read it in another language. Names, numbers, dates and links stay as "
+            "written.",
+    "selection": "Read or answer text in another language without leaving the app you're in: select it and press the "
+                 "shortcut.",
+    "screen": "Read an app that's in another language: its text is covered with your language, in the same place.",
+}
+TEXT_MAX = 20_000  # characters: pages of text are fine; past this, one answer would take too long to wait for
+TEXT_PAUSE_MS = 800  # it translates when typing stops this long (Google Translate's way); Ctrl+Enter or the button: now
+
+
+class TextTranslator:
+    """Translate's text translator (the owner's idea of 2026-10-28, like Google Translate; the card itself: .widget):
+    From (or Detect language), a swap, To; what's typed on the left, its translation on the right. It translates when
+    typing pauses, on Ctrl+Enter and on its button. Every request has a number (`asked`): an answer that comes back
+    after newer typing is dropped, so an old translation never replaces a newer one."""
+
+    def __init__(self, app):
+        self.app = app
+        self.asked = 0  # the latest request's number
+        self.shown: tuple[str, str, str] | None = None  # (text, from, to) of the translation on the right
+        self.widget, layout = card(12, (20, 18, 20, 20))
+        self.source = Choice(search=True, small=True)
+        self.source.addItem("Detect language", "")
+        self.target = Choice(search=True, small=True)
+        for name in TRANSLATE_LANGUAGES:
+            self.source.addItem(name, name)
+            self.target.addItem(name, name)
+        self.swap = icon_button("swap", "Swap the languages", self._swap)
+        self.source.currentIndexChanged.connect(self._languages)
+        self.target.currentIndexChanged.connect(self._languages)
+        head = QHBoxLayout()
+        head.setSpacing(12)
+        head.addWidget(self.source, 1)
+        head.addWidget(self.swap)
+        head.addWidget(self.target, 1)
+        layout.addLayout(head)
+
+        self.input = QPlainTextEdit()
+        self.input.setPlaceholderText("Type or paste a word or a text")
+        self.output = QPlainTextEdit()
+        self.output.setReadOnly(True)
+        self.output.setPlaceholderText("Translation")
+        for box in (self.input, self.output):
+            field(box, "well")
+            fixed_height(box, 200)
+        self.count = caption("", "3", wrap=False)
+        self.clear_button = icon_button("close", "Clear", self.clear, flat=True)
+        self.button = button("Translate", self.translate_now, primary=True, size="sm")
+        self.status = caption("", "3")
+        self.copy_button = icon_button("copy", "Copy the translation", self._copy, flat=True)
+        left, right = QVBoxLayout(), QVBoxLayout()
+        for column, box, foot in ((left, self.input, row(self.count, self.clear_button, self.button, stretch_at=1)),
+                                  (right, self.output, row(self.status, self.copy_button, stretch_at=1))):
+            column.setSpacing(8)
+            column.addWidget(box)
+            column.addLayout(foot)
+        panes = QHBoxLayout()
+        panes.setSpacing(12)
+        panes.addLayout(left, 1)
+        panes.addLayout(right, 1)
+        layout.addLayout(panes)
+
+        self.timer = QTimer(self.widget, singleShot=True, interval=TEXT_PAUSE_MS, timeout=self._paused)
+        self.input.textChanged.connect(self._typed)
+        for sequence in ("Ctrl+Return", "Ctrl+Enter"):
+            QShortcut(QKeySequence(sequence), self.input, activated=self.translate_now,
+                      context=Qt.ShortcutContext.WidgetShortcut)
+        self.refresh()
+        self._typed()
+
+    def refresh(self) -> None:
+        """The languages as saved (the profile's), and whether there is a model to ask."""
+        s = self.app.settings
+        for box, value in ((self.source, s.text_from), (self.target, s.text_to)):
+            box.blockSignals(True)
+            box.setCurrentIndex(max(0, box.findData(value)))
+            box.blockSignals(False)
+        self.button.setEnabled(bool(self.app.transform_model()))
+
+    def clear(self) -> None:
+        self.input.clear()
+        self.input.setFocus()
+
+    def _languages(self, *_) -> None:
+        """A language chosen: saved, and the text translated again into it."""
+        source, target = self.source.currentData(), self.target.currentData()
+        s = self.app.settings
+        if (s.text_from, s.text_to) != (source, target):
+            self.app.apply_settings(dataclasses.replace(s, text_from=source, text_to=target))
+        self.translate_now()
+
+    def _swap(self) -> None:
+        """From becomes To and To becomes From; the translation becomes the text. "Detect language" swaps as the
+        language it found (or, when it found none, as the language it wasn't translated into)."""
+        source = self.source.currentData() or detect_language(self.input.toPlainText())
+        target = self.target.currentData()
+        if not source or source == target:
+            source = next((n for n in (self.app.settings.translate_to, "English") if n != target), "Japanese")
+        translation = self.output.toPlainText()
+        for box, value in ((self.source, target), (self.target, source)):
+            box.blockSignals(True)
+            box.setCurrentIndex(max(0, box.findData(value)))
+            box.blockSignals(False)
+        if translation:
+            self.input.setPlainText(translation)  # its textChanged translates it (after the pause)
+        self._languages()
+
+    def _typed(self) -> None:
+        text = self.input.toPlainText()
+        n = len(text)
+        self.count.setText(f"{n:,} / {TEXT_MAX:,}" if n else "")
+        self.clear_button.setVisible(bool(n))
+        found = detect_language(text) if not self.source.currentData() else ""
+        self.source.setItemText(0, f"Detected: {found}" if found else "Detect language")
+        if not text.strip():
+            self.asked += 1  # an answer still on its way is for text that's gone
+            self.timer.stop()
+            self.output.clear()
+            self.shown = None
+            self._say("")
+            return
+        self.timer.start()
+
+    def _paused(self) -> None:
+        self.translate_now(again=False)
+
+    def translate_now(self, *_, again: bool = True) -> None:
+        """Translate what's typed now; `again`: even when that's what's shown (the button, Ctrl+Enter)."""
+        self.timer.stop()
+        text = self.input.toPlainText().strip()
+        source, target = self.source.currentData(), self.target.currentData()
+        if not text:
+            return
+        if not self.app.transform_model():
+            self._say("Translate needs an AI connection: connect one at the top of the page.")
+            return
+        if len(text) > TEXT_MAX:
+            self._say(f"Too long: at most {TEXT_MAX:,} characters at a time (this is {len(text):,}).")
+            return
+        if source and source == target:
+            self.output.setPlainText(text)  # nothing to ask: it is in that language already
+            self._say(f"Already in {target}.")
+            return
+        key = (text, source, target)
+        if key == self.shown and not again:
+            return
+        self.asked += 1
+        number = self.asked
+        self._say("Translating…")
+
+        def done(result, error) -> None:
+            if number != self.asked:  # newer typing asked again meanwhile
+                return
+            if error:
+                self._say(f"Didn't work: {error}")
+                return
+            self.shown = key
+            self.output.setPlainText(result.text)
+            self._say(f"{result.seconds:.1f} s" + (": " + "; ".join(result.warnings) if result.warnings else ""))
+        run_in_background(self.widget, lambda: self.app.run_translation(text, target, "", source), done)
+
+    def _copy(self) -> None:
+        if translation := self.output.toPlainText():
+            copy_text(translation)
+            self._say("Copied.")
+
+    def _say(self, message: str) -> None:
+        self.status.setText(message)
+
+
 class TranslatePage(Page):
-    """Translate (sst.translateui): on or off, how it's used (select, the shortcut, the popup's keys), examples, the
-    shortcut and the languages, and a box to try it in."""
+    """Translate, in three tabs: Text (TextTranslator: type and read it in another language), Selected text
+    (sst.translateui: on or off, how it's used, examples, the shortcut and the languages) and Screen (ScreenCard)."""
 
     def __init__(self, app, go_to):
         super().__init__("Translate", "Read or answer text in another language without leaving the app you're in. "
@@ -5792,6 +5965,11 @@ class TranslatePage(Page):
         self.ai = AiNeeded(go_to, "Translate")
         self.model, self.setup = self.ai.words, self.ai.setup
         self.add(self.ai)
+        self.tabs = Segmented(TRANSLATE_TABS)
+        self.tabs.changed.connect(self._tab_chosen)
+        self.add(self.tabs)
+        self.text = TextTranslator(app)
+        self.add(self.text.widget)
 
         how, layout = card(0, (20, 4, 20, 4))
         self.translate_on = Toggle("Translate")
@@ -5839,27 +6017,22 @@ class TranslatePage(Page):
         layout.addWidget(self.how)
         self.add(frame)
 
-        trial, layout = card(10, (20, 18, 20, 20))
-        layout.addWidget(label("Try it", "heading"))
-        self.sample = QPlainTextEdit()
-        self.sample.setPlainText("Could you send me the updated report by Friday? The budget is $25,000.")
-        field(self.sample, "well")
-        fixed_height(self.sample, 72)
-        layout.addWidget(self.sample)
-        self.try_button = button("Translate", self._try, primary=True, size="sm")
-        layout.addLayout(row(self.try_button, stretch_at=1))
-        self.result = QTextBrowser()
-        field(self.result, "well")
-        self.result.setFixedHeight(90)
-        self.result.hide()
-        layout.addWidget(self.result)
-        self.note = caption("", "3")
-        self.note.hide()
-        layout.addWidget(self.note)
-        self.add(trial)
         self.screen_card = ScreenCard(app)
         self.add(self.screen_card.widget)
         self.body.addStretch()
+        self.parts = {"text": [self.text.widget], "selection": [how, examples, frame], "screen": [self.screen_card.widget]}
+        self._tab_chosen("text")
+
+    def _tab_chosen(self, tab: str) -> None:
+        self.tab = tab
+        self.tabs.set_current(tab)
+        self.subtitle.setText(TRANSLATE_SUBTITLES[tab])
+        self.ai.setVisible(tab != "screen")  # the Screen translator uses the Gemini key, not the AI connection
+        for key, widgets in self.parts.items():
+            for widget in widgets:
+                widget.setVisible(key == tab)
+        if tab == "text":
+            self.text.input.setFocus()
 
     def _second(self) -> str:
         s = self.app.settings
@@ -5892,7 +6065,7 @@ class TranslatePage(Page):
         for before, after in TRANSLATE_EXAMPLES:
             self.examples.addWidget(Example(before, html.escape(after), "You select", "The window shows"))
         self.ai.show_model(model)
-        self.try_button.setEnabled(bool(model))
+        self.text.refresh()
         self.screen_card.refresh()
 
     def _steps(self, second: str) -> list:
@@ -5918,33 +6091,6 @@ class TranslatePage(Page):
                                                     translate_to=self.target.currentText(),
                                                     translate_second=self.second.currentData()))
         self.refresh()
-
-    def _say(self, message: str) -> None:
-        self.note.setText(message)
-        self.note.setVisible(bool(message))
-
-    def _try(self) -> None:
-        sample = self.sample.toPlainText().strip()
-        if not sample:
-            self._say("Type or paste some text first.")
-            return
-        s = self.app.settings
-        self.try_button.setEnabled(False)
-        self._say(f"Translating into {s.translate_to}…")
-
-        def done(result, error) -> None:
-            self.refresh()
-            if error:
-                self.result.hide()
-                self._say(f"Didn't work: {error}")
-                return
-            self.result.setPlainText(result.text)
-            self.result.show()
-            self._say(f"{result.target} in {result.seconds:.1f} s" + (": " + "; ".join(result.warnings)
-                                                                        if result.warnings else ""))
-        second = self._second()
-        run_in_background(self, lambda: usage.within("tests", self.app.run_translation, sample, s.translate_to, second),
-                          done)
 
 
 # ---------------------------------------------------------------- Formatting
@@ -8376,9 +8522,9 @@ class PreviewApp:
     def open_wake_setup(self, parent=None) -> None:
         self.calls.append(("open_wake_setup",))  # the dialog itself is tested on its own (tests/test_wakeui.py)
 
-    def run_translation(self, text: str, target: str, second: str = ""):
+    def run_translation(self, text: str, target: str, second: str = "", source: str = ""):
         from sst.translate import Translation
-        self.calls.append(("run_translation", target))
+        self.calls.append(("run_translation", target) + ((source,) if source else ()))
         return Translation("¿Podrías enviarme el informe actualizado antes del viernes? El presupuesto es de $25,000.",
                            target, text, 0.9)
 
