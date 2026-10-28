@@ -3,8 +3,9 @@
 A dictation is a command only when the whole of it is one command phrase (with at most a filler or "please" around it):
 "make it concise" transforms the last dictation or the selected text, "make it concise and send it to John" is typed as
 dictated. Each transform has default phrases; the user can replace them with their own on the Text Transform page
-(Settings.command_phrases: transform -> phrases separated by commas or new lines). Phrases of one word aren't offered by
-default ("professional" alone is a word people dictate), but a user may add them.
+(Settings.command_phrases: transform -> phrases separated by commas or new lines). One word is a command too when it is
+the whole dictation ("Professional.", "Concise."): the owner said them that way and saw them typed (2026-10-28), while
+"bullet points" alone already worked. A sentence with the word in it is still dictation.
 
 Japanese phrases work the same way ("英語にして", "校正してください"): their polite endings and fillers are said around the
 command (ください, お願いします, えっと), like "please". Translate also takes a language and a register in its phrase:
@@ -20,17 +21,17 @@ from sst.translate import LANGUAGES
 UNDO = "undo"
 
 DEFAULT_PHRASES: dict[str, tuple[str, ...]] = {
-    "concise": ("make it concise", "make it more concise", "make it shorter", "shorten it", "make it short",
+    "concise": ("concise", "shorter", "make it concise", "make it more concise", "make it shorter", "shorten it", "make it short",
                 "make it brief", "concise version"),
-    "professional": ("make it professional", "make it more professional", "make it formal", "make it more formal",
-                     "professional version", "formal version"),
+    "professional": ("professional", "formal", "make it professional", "make it more professional", "make it formal",
+                     "make it more formal", "professional version", "formal version"),
     "bullets": ("make it bullet points", "bullet points", "make it a list", "turn it into bullet points",
                 "turn it into a list", "bullet list", "make it bullets"),
     "actions": ("action items", "make it action items", "turn it into action items", "make it a to do list",
                 "to do list", "make it a task list", "task list"),
-    "rewrite": ("rewrite it", "make it clearer", "rewrite it more clearly"),
-    "grammar": ("fix the grammar", "fix grammar", "fix the typos", "fix typos", "proofread it", "correct the grammar",
-                "校正して", "誤字を直して", "文法を直して"),
+    "rewrite": ("rewrite", "rewrite it", "make it clearer", "rewrite it more clearly"),
+    "grammar": ("proofread", "fix the grammar", "fix grammar", "fix the typos", "fix typos", "proofread it",
+                "correct the grammar", "校正して", "誤字を直して", "文法を直して"),
     "teams": ("make it a teams message", "make it a japanese teams message", "teams message", "japanese teams message",
               "translate to japanese for teams", "translate it to japanese for teams", "make it a teams chat",
               "Teams用にして", "チャット用にして", "社内チャットにして"),

@@ -26,6 +26,11 @@ DEFAULTS = phrases_for({})
     ("Make it consise.", "concise"),  # misheard a little
     ("Make it profesional.", "professional"),
     ("MAKE IT CONCISE!", "concise"),
+    ("Professional.", "professional"),  # one word, the whole dictation (the owner's way, 2026-10-28)
+    ("Concise.", "concise"),
+    ("Formal", "professional"),
+    ("Shorter.", "concise"),
+    ("Proofread.", "grammar"),
 ])
 def test_command_phrases_are_found(said, command):
     assert match_command(said, DEFAULTS) == command
@@ -34,8 +39,8 @@ def test_command_phrases_are_found(said, command):
 @pytest.mark.parametrize("said", [
     "Make it concise and send it to John.",  # more than the command: dictation
     "Please make it concise before the meeting on Monday.",
-    "Professional.",  # one word people dictate: not a default phrase
-    "Concise.",
+    "We need a professional.",  # the word in a sentence is dictation
+    "Concise and clear is how I like it.",
     "Make it.",  # a fragment of a phrase is not the phrase
     "The action items are on the board.",
     "Can you make it shorter for the client?",
