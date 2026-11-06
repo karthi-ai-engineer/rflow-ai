@@ -568,8 +568,8 @@ def _level(rms: float) -> float:
 class WakeTools:
     """What the setup borrows for a while, loaded on its threads when first needed and let go of with it: the spotter's
     model as a recogniser (spellings learned from the tries) and the synthetic voice (the check of a typed keyword).
-    `api` is sst.wake; voice() makes the voice (sst.live.voice.PiperVoice), or None when it isn't downloaded: then the
-    check is skipped."""
+    `api` is sst.wake; voice() makes the voice (an object with `rate` and synthesize(text, speed)), or None when there
+    is none: then the check is skipped. Rflow has none since live translation's voice on the laptop went (#264)."""
 
     def __init__(self, api, voice: Callable[[], object | None]):
         self._api, self._voice = api, voice

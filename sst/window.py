@@ -82,8 +82,7 @@ from sst.engines.whisper import LANGUAGES
 from sst.gateway import PROVIDERS, SPEECH_SERVER, GatewayConfig, Polisher, offered
 from sst.hotkey import parse_hotkey
 from sst.live.contracts import LANGUAGES as LIVE_LANGUAGES
-from sst.live.contracts import LiveConfig, language_name
-from sst.live.voice import LOCAL as LOCAL_VOICE
+from sst.live.contracts import language_name
 from sst.meeting.apps import IN_PERSON
 from sst.pipeline.contracts import VoiceConfig
 from sst.pipeline.dictionary import speech_hints
@@ -157,7 +156,6 @@ LIVE_SOURCE_WORDS = {
     "both": "An online meeting: the others from your laptop, and your own words from the microphone, marked “You”. "
             "Use headphones, or the microphone hears the meeting too.",
 }
-LIVE_SPEEDS = [("Normal", 1.0), ("A little faster", 1.15), ("Faster", 1.3)]
 LIVE_SHORTCUTS = [("Ctrl+Alt+L", "ctrl+alt+l"), ("Ctrl+Shift+L", "ctrl+shift+l"), ("Win+Alt+L", "win+alt+l"), ("Off", "")]
 MEETING_SHORTCUTS = [("Ctrl+Alt+M", "ctrl+alt+m"), ("Ctrl+Shift+M", "ctrl+shift+m"), ("Win+Alt+M", "win+alt+m"),
                      ("Off", "")]
@@ -4563,7 +4561,7 @@ class LivePage(Page):
         column.addWidget(self.note)
         self.add(self.start_card)
 
-        # Hear it: the translation spoken aloud in Gemini's voice, or the laptop's (sst.live.voice), a row of its own
+        # Hear it: the translation spoken aloud in Gemini's own voice (sst.live.speaker), a row of its own
         self.voice_card, column = card(6, (20, 18, 20, 18))
         self.speak = Toggle("Speak the translation")
         self.speak.toggled.connect(self._speak_toggled)
@@ -4573,20 +4571,11 @@ class LivePage(Page):
         column.addLayout(head)
         self.speak_caption = caption("", "2")
         column.addWidget(self.speak_caption)
-        self.speed = Choice(small=True)
-        for label_text, value in LIVE_SPEEDS:
-            self.speed.addItem(label_text, value)
-        self.speed.setMinimumWidth(200)
-        self.speed.currentIndexChanged.connect(self._speed_chosen)
-        self.speed_row = QWidget()  # the speed, under a line: only while it speaks
-        speed = QVBoxLayout(self.speed_row)
-        speed.setContentsMargins(0, 10, 0, 0)
-        speed.setSpacing(0)
-        speed.addWidget(divider())
-        line = setting_row("Speed", "Of the voice on this laptop; it speeds up by itself when it falls behind. Gemini's "
-                                    "own voice keeps its pace.", self.speed)[0]
-        line.layout().setContentsMargins(0, 14, 0, 0)
-        speed.addWidget(line)
+        self.duck_row = QWidget()  # under a line: only while it speaks
+        below = QVBoxLayout(self.duck_row)
+        below.setContentsMargins(0, 10, 0, 0)
+        below.setSpacing(0)
+        below.addWidget(divider())
         # How loud the other apps stay while it runs: lowered like under an interpreter, the whole time, back when it stops
         self.duck = Slider(0, 100, 5)
         self.duck.setAccessibleName("Other sounds while it runs")
@@ -4597,8 +4586,8 @@ class LivePage(Page):
         self.duck.sliderReleased.connect(self._duck_chosen)
         line, _, self.duck_caption = setting_row("Other sounds while it runs", " ", self.duck, self.duck_value)
         line.layout().setContentsMargins(0, 14, 0, 0)
-        speed.addWidget(line)
-        column.addWidget(self.speed_row)
+        below.addWidget(line)
+        column.addWidget(self.duck_row)
         self.add(self.voice_card)
 
         self.source_card, column = card(6, (20, 20, 20, 10))
@@ -4771,49 +4760,24 @@ class LivePage(Page):
             pass
 
     def _refresh_voice(self, s, source: str) -> None:
-        voice, (state, percent, problem) = self.app.live_voice(), self.app.live_voice_state()
-        speaks = language_name(voice.language)
-        spoken = LiveConfig(target=s.live_target, mic_target=s.live_mic_target, source=source).spoken_lanes(voice.language)
         self.speak_icon.setPixmap(theme.icon_pixmap("speaker" if s.live_speak else "speaker-off", tok("text2").name(), 18,
                                                     self.devicePixelRatioF()))
         self.speak.blockSignals(True)
         self.speak.setChecked(s.live_speak)
         self.speak.blockSignals(False)
-        self.speed.blockSignals(True)
-        self.speed.setCurrentIndex(max(0, self.speed.findData(s.live_speak_speed)))
-        self.speed.blockSignals(False)
         if not self.duck.isSliderDown():
             self.duck.blockSignals(True)
             self.duck.setValue(round(s.live_duck * 100))
             self.duck.blockSignals(False)
             self._show_duck(self.duck.value())
-        # Gemini says the translation in its own voice, in any language; the voice on this laptop stands in for it
-        gemini = "Gemini says the translation in its own voice as it's translated."
-        if state == "downloading":
-            words = (f"Downloading {LOCAL_VOICE.name}, the voice on this laptop: {percent}%. {gemini} {LOCAL_VOICE.name} "
-                     f"stands in when Gemini's voice doesn't come.")
-        elif problem:
-            words = (f"The voice on this laptop couldn't be downloaded ({problem}). {gemini} Switch it on again to try "
-                     f"once more.")
-        elif not spoken:
-            words = (f"{gemini} {voice.name}, the voice on this laptop, speaks only {speaks}: it stands in when Gemini's "
-                     f"doesn't come only for what's translated into {speaks}.")
-        elif state == "missing":
-            words = (f"{gemini} {voice.name}, an {speaks} voice that runs on this laptop, stands in when Gemini's "
-                     f"doesn't come. Downloaded the first time ({round(voice.size / 1e6)} MB).")
-        else:
-            words = f"{gemini} {voice.name}, an {speaks} voice on this laptop, stands in when Gemini's doesn't come."
-            if source != "computer":
-                words += " Through speakers the microphone pauses while it speaks; headphones keep it listening."
+        words = "Gemini says the translation in its own voice as it's translated, in any language."
+        if source != "computer":
+            words += " Through speakers the microphone pauses while it speaks; headphones keep it listening."
         self.speak_caption.setText(words)
-        self.speed_row.setVisible(s.live_speak)
+        self.duck_row.setVisible(s.live_speak)
 
     def _speak_toggled(self, on: bool) -> None:
         self.app.set_live_speak(on)
-        self.refresh()
-
-    def _speed_chosen(self, *_) -> None:
-        self.app.set_live_speak_speed(self.speed.currentData())
         self.refresh()
 
     def _duck_moved(self, value: int) -> None:
@@ -8414,21 +8378,9 @@ class PreviewApp:
     def live_stopped_why(self) -> str:
         return self._live_why
 
-    _voice_state: tuple = ("missing", 0, "")  # the voice isn't downloaded in the preview
-
-    def live_voice(self):
-        return LOCAL_VOICE
-
-    def live_voice_state(self) -> tuple:
-        return self._voice_state
-
     def set_live_speak(self, on: bool) -> None:
         self.calls.append(("set_live_speak", on))
         self.apply_settings(dataclasses.replace(self.settings, live_speak=on))
-
-    def set_live_speak_speed(self, speed: float) -> None:
-        self.calls.append(("set_live_speak_speed", speed))
-        self.apply_settings(dataclasses.replace(self.settings, live_speak_speed=speed))
 
     def set_live_duck(self, depth: float) -> None:
         self.calls.append(("set_live_duck", depth))

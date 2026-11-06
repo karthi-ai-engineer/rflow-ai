@@ -94,7 +94,6 @@ class CaptionBar(QWidget):
         self.problems: dict[str, str] = {}  # way -> what went wrong, until words come again
         self.notes: dict[str, str] = {}  # way -> why it shows nothing yet (the status line), until the session clears it
         self.status = "Starting…"
-        self.voice_note = ""  # the voice's state in the title while it isn't simply on or off (downloading, loading)
         self.flash_note = ""  # what a click just did ("Copied 42 lines"), in the title for a moment
         self.spend_note = ""  # what the session cost and saved ("$0.42 · saved $0.26"), while the cost saver is on
         self.warning = ""  # the cost saver's auto-stop warning, first in the status line
@@ -165,12 +164,12 @@ class CaptionBar(QWidget):
                         "QToolButton:hover { background: rgba(255, 255, 255, 28); }")
         return b
 
-    def set_speaking(self, on: bool, hint: str = "") -> None:
-        """The speaker button shows whether the translation is spoken; `hint` says why nothing is (its tooltip)."""
+    def set_speaking(self, on: bool) -> None:
+        """The speaker button shows whether the translation is spoken."""
         self.speak_button.setChecked(on)
         colour = theme.tok("primary" if on else "text2", popup=True).name()
         self.speak_button.setIcon(QIcon(theme.icon_pixmap("speaker" if on else "speaker-off", colour, 15, 2.0)))
-        self.speak_button.setToolTip(hint or ("Stop speaking the translation" if on else "Speak the translation"))
+        self.speak_button.setToolTip("Stop speaking the translation" if on else "Speak the translation")
         self.problems.pop("voice", None)
 
     def set_saving(self, on: bool) -> None:
@@ -193,10 +192,6 @@ class CaptionBar(QWidget):
         if text != self.warning:
             self.warning = text
             self._update_footer()
-
-    def set_voice_note(self, note: str) -> None:
-        self.voice_note = note
-        self._update_title()
 
     def flash(self, note: str) -> None:
         """Say in the title what a click just did, for a moment."""
@@ -285,8 +280,6 @@ class CaptionBar(QWidget):
                 parts.append(f"you into {language_name(c.mic_target)}")
         if self.status not in ("Listening", ""):
             parts.append(self.status)
-        if self.voice_note:
-            parts.append(self.voice_note)
         if self.spend_note:
             parts.append(self.spend_note)
         if self.flash_note:
@@ -622,11 +615,6 @@ class LiveCaptions(QObject):
             self.bar.set_warning(warning)
             self.noted.emit(self.note)
 
-    def set_speak_speed(self, speed: float) -> None:
-        self.config = dataclasses.replace(self.config, speak_speed=speed)
-        if self.session is not None and self.session.speaker is not None:
-            self.session.speaker.set_speed(speed)
-
     def set_duck(self, depth: float) -> None:
         """How loud the other apps stay while live translation speaks: at once if it runs, and for the next start."""
         self.config = dataclasses.replace(self.config, duck=depth)
@@ -644,11 +632,6 @@ class LiveCaptions(QObject):
         if self.bar is not None:
             self.bar.flash(note)
 
-    def set_voice_note(self, note: str) -> None:
-        """The voice's state in the bar's title (downloading, loading), or "" when it's simply on or off."""
-        if self.bar is not None:
-            self.bar.set_voice_note(note)
-
     def _update_speaker(self) -> None:
         """The voice while speaking is on: started, told which ways it speaks now; stopped when speaking is off."""
         session = self.session
@@ -662,17 +645,10 @@ class LiveCaptions(QObject):
         elif not self.config.speak and speaker is not None:
             session.set_speaker(None)
             speaker = None
-        hint = ""
         if speaker is not None:
-            # Gemini speaks every way spoken itself, in any language; the laptop's voice stands in only in its own
-            lanes, own = self.config.spoken_lanes(speaker.language), self.config.spoken_lanes()
-            speaker.set_lanes(lanes, own)
-            speaker.set_speed(self.config.speak_speed)
-            if not lanes:
-                hint = (f"Stop speaking the translation (Gemini's voice; the voice on this laptop speaks only "
-                        f"{language_name(speaker.language)}, so it can't stand in for it here)")
+            speaker.set_lanes(self.config.spoken_lanes())  # Gemini speaks every way spoken itself, in any language
         if self.bar is not None:
-            self.bar.set_speaking(speaker is not None, hint)
+            self.bar.set_speaking(speaker is not None)
 
     def _couldnt_start(self, lane: str, error: Exception) -> str:
         log.warning("Live translation: the %s didn't start: %s", "microphone" if lane == MIC else "computer's sound",

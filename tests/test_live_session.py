@@ -11,7 +11,6 @@ import sst.live
 from sst import costs
 from sst.live.contracts import MIC, SYSTEM, Kind, LiveConfig, LiveEvent, already_in, language_name
 from sst.live.session import LiveSession, Spend, dbfs
-from sst.live.speaker import Speaker
 from sst.live.transcript import Transcript, for_copy
 
 
@@ -103,21 +102,16 @@ def test_untranslated_lines_from_the_microphone_are_echo_and_dropped(tmp_path):
     assert "本日" not in session.transcript.path.read_text(encoding="utf-8")
 
 
-def test_with_the_microphone_alone_lines_already_in_its_language_are_shown_and_kept_but_not_spoken(tmp_path):
+def test_with_the_microphone_alone_lines_already_in_its_language_are_shown_and_kept(tmp_path):
     shown = []
     config = LiveConfig(source="microphone", mic_target="en")
     session = LiveSession(config, Transcript(tmp_path, config), shown.append)
     session.add(MIC, FakeCapture(), FakeEngine)
-    speaker = Speaker(lambda: None, player=None, lanes=config.spoken_lanes("en"), language="en")
-    session.speaker = speaker  # not started: what it would say waits in its queue
     mic = engine(session, MIC)
     mic.on_event(LiveEvent(Kind.SOURCE, "Let's set the budget", language="en", lane=MIC))
     mic.on_event(LiveEvent(Kind.LINE, "", source="Let's set the budget next week.", language="en", lane=MIC))
     assert [e.kind for e in shown if e.kind is not Kind.NOTE] == [Kind.SOURCE, Kind.LINE] and session.lines == {MIC: 1}
     assert "Let's set the budget next week." in session.transcript.path.read_text(encoding="utf-8")
-    assert not speaker._queue  # the voice says translations only
-    mic.on_event(LiveEvent(Kind.LINE, "Thank you.", source="ありがとう。", language="ja", lane=MIC))
-    assert [sentence for _, _, sentence in speaker._queue] == ["Thank you."]
 
 
 def test_a_line_already_in_the_target_language_is_told_from_one_whose_translation_didnt_come():
@@ -310,10 +304,10 @@ def test_live_captions_import_nothing_from_dictation():
 class FakeSpeaker:
     def __init__(self, speaking=True, private=False):
         self.speaking, self.private, self.heard, self.started, self.stopped = speaking, private, [], False, False
-        self.said, self.skipped, self.repeats = 7, 1, 3
+        self.sound_s, self.sound_skipped_s, self.quiet_s, self.holes, self.cushion = 41.0, 1.5, 12.0, 2, 0.6
 
-    def hear(self, event):
-        self.heard.append(event)
+    def hear_audio(self, lane, pcm, rate):
+        self.heard.append((lane, pcm, rate))
 
     def start(self):
         self.started = True
@@ -339,20 +333,27 @@ def test_a_way_that_could_hear_the_voice_gets_silence_while_it_speaks(lane, hear
     assert engine(session, lane).frames == [bytes(3200) if silenced else b"\x01\x02" * 1600]
 
 
-def test_the_speaker_hears_what_is_shown_and_stops_with_the_session(tmp_path, caplog):
+class SpeakingEngine(FakeEngine):
+    """An engine that speaks its translation itself, as Gemini's does: the session sets on_audio."""
+    on_audio = None
+
+
+def test_the_speaker_gets_the_engines_own_voice_and_stops_with_the_session(tmp_path, caplog):
     caplog.set_level("INFO", logger="sst.live.session")
     config = LiveConfig(source="both", target="en", mic_target="ja")
     session = LiveSession(config, Transcript(tmp_path, config))
-    session.add(MIC, FakeCapture(), FakeEngine)
+    session.add(SYSTEM, FakeCapture(), SpeakingEngine)
+    system = engine(session, SYSTEM)
+    system.on_audio(b"" * 2400, 24_000)  # nobody speaks it yet: dropped
     speaker = FakeSpeaker()
     session.set_speaker(speaker)
-    mic = engine(session, MIC)
-    mic.on_event(LiveEvent(Kind.LINE, "", source="本日は。", lane=MIC))  # echo: dropped before anyone hears it
-    mic.on_event(LiveEvent(Kind.TRANSLATION, "予算は", lane=MIC))
-    assert speaker.started and [e.text for e in speaker.heard] == ["予算は"]
+    system.on_event(LiveEvent(Kind.TRANSLATION, "The budget", lane=SYSTEM))  # its words are for the bar, not the voice
+    system.on_audio(b"" * 2400, 24_000)
+    assert speaker.started and speaker.heard == [(SYSTEM, b"" * 2400, 24_000)]
     session.stop()
     assert speaker.stopped and session.speaker is None
-    assert "The voice said 7 sentences (1 skipped to keep up); the voice skipped a repeat 3 times" in caplog.text
+    assert ("Gemini's voice: 41 s played (2 s left out to keep up, 12 s of its silence not played); 2 holes inside "
+            "words, the cushion 0.6 s") in caplog.text
 
 
 class ReportingEngine(FakeEngine):
