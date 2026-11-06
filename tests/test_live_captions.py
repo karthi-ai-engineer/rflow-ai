@@ -347,16 +347,11 @@ def test_a_way_switched_off_on_purpose_doesnt_stop_the_rest():
 # ---- the spoken translation on the bar
 
 class FakeSpeaker:
-    language = "en"
-
     def __init__(self, config):
-        self.lanes, self.own, self.speed, self.config = None, None, None, config
+        self.lanes, self.config = None, config
 
-    def set_lanes(self, lanes, own=None):
-        self.lanes, self.own = tuple(lanes), tuple(own or ())
-
-    def set_speed(self, speed):
-        self.speed = speed
+    def set_lanes(self, lanes):
+        self.lanes = tuple(lanes)
 
 
 def speaking_captions(ready=True):
@@ -372,14 +367,13 @@ def speaking_captions(ready=True):
     return live, made, speakers
 
 
-def test_speaking_starts_with_the_session_gemini_says_any_language_the_laptops_voice_its_own():
+def test_speaking_starts_with_the_session_and_gemini_says_any_language():
     live, made, speakers = speaking_captions()
-    live.start(LiveConfig(source="both", target="en", mic_target="ja", speak=True, speak_speed=1.15))
-    assert made[0].speaker is speakers[0] and speakers[0].lanes == speakers[0].own == (SYSTEM,)  # not the user's words
-    assert speakers[0].speed == 1.15 and live.bar.speak_button.isChecked()
-    live.set_source("microphone")  # into Japanese: Gemini says it; nothing for an English voice on the laptop
-    assert speakers[0].lanes == () and speakers[0].own == (MIC,)
-    assert "speaks only English" in live.bar.speak_button.toolTip()
+    live.start(LiveConfig(source="both", target="en", mic_target="ja", speak=True))
+    assert made[0].speaker is speakers[0] and speakers[0].lanes == (SYSTEM,)  # not the user's words
+    assert live.bar.speak_button.isChecked()
+    live.set_source("microphone")  # into Japanese: Gemini says that too
+    assert speakers[0].lanes == (MIC,) and live.bar.speak_button.toolTip() == "Stop speaking the translation"
     live.set_speak(False)
     assert made[0].speaker is None and not live.bar.speak_button.isChecked()
     live.stop()
@@ -402,10 +396,8 @@ def test_the_speaker_button_asks_for_speaking_and_the_bar_follows_what_happened(
     live.start(LiveConfig())
     live.bar.speak_button.click()
     assert asked == [True]
-    live.set_speak(True)  # the voice isn't downloaded yet: nothing speaks, the button stays off
+    live.set_speak(True)  # nothing can speak it: the button stays off
     assert made[0].speaker is None and not live.bar.speak_button.isChecked()
-    live.set_voice_note("Downloading the voice: 40%")
-    assert live.bar.title.text().endswith("Downloading the voice: 40%")
     live.stop()
 
 

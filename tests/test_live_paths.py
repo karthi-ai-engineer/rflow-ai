@@ -62,18 +62,6 @@ class Air:
         self.closed = True
 
 
-class FakeVoice:
-    """The laptop's voice: what it was asked to say."""
-    rate = 16_000
-
-    def __init__(self):
-        self.said = []
-
-    def synthesize(self, text, speed=1.0):
-        self.said.append(text)
-        return np.full(int(0.5 * self.rate), 0.2, dtype=np.float32)
-
-
 class Voice(Speaker):
     """The Speaker as it is, counting what it was handed, so a test knows when it has played or dropped all of it."""
 
@@ -82,12 +70,12 @@ class Voice(Speaker):
         self.handed = 0.0
 
     def hear_audio(self, lane, pcm, rate):
-        if lane in self.own and not self.muted and not self._stop.is_set():
+        if lane in self.lanes and not self.muted and not self._stop.is_set():
             self.handed += len(pcm) // 2 / rate
         super().hear_audio(lane, pcm, rate)
 
     def caught_up(self) -> bool:
-        return not self._queue and abs(self.sound_s + self.sound_skipped_s + getattr(self, "quiet_s", 0.0) - self.handed) < 1e-6
+        return not self._queue and abs(self.sound_s + self.sound_skipped_s + self.quiet_s - self.handed) < 1e-6
 
 
 def pcm(level: int, seconds: float = 0.1, rate: int = VOICE_RATE) -> bytes:
@@ -217,13 +205,13 @@ class Run:
             self.session.add(lane, capture, lambda emit, lane=lane: engine(emit, lane, self.config, self.clock))
             self.captures[lane] = capture
         self.engines = {lane: engine for lane, (_, engine) in self.session.lanes.items()}
-        self.air, self.laptop, self.voice = Air(self.clock, private=private), FakeVoice(), None
+        self.air, self.voice = Air(self.clock, private=private), None
         if speak:
             self.speak()
 
     def speak(self):
-        self.voice = Voice(lambda: self.laptop, self.air, self.config.spoken_lanes("en"), "en", clock=self.clock,
-                           own=self.config.spoken_lanes())
+        self.voice = Voice(self.air, self.config.spoken_lanes(), clock=self.clock)
+        self.voice.cushion = 0.0  # each step waits until the voice has played what came: its cushion is test_live_voice's
         self.session.set_speaker(self.voice)
 
     def silent(self):
@@ -268,7 +256,6 @@ def test_a_long_meeting_is_translated_and_spoken_to_its_last_sentence(hears_self
     run.play(meeting(SENTENCES))
     assert run.lines() == [said(n) for n in range(1, SENTENCES + 1)]  # every sentence, in order, to the last
     voice = run.voice
-    assert voice.voiced == SENTENCES and voice.said == 0 and voice.unvoiced == 0  # Gemini's voice said them all
     if hears_self:  # what's said under the voice and its TAIL is lost (it can't be told from it): no more
         assert run.lost() and run.lost_per_sentence() <= UNDER_VOICE and 0 not in run.lost()
         assert run.air.heard_s >= SENTENCES * (1 - UNDER_VOICE / 10) - 1e-6
@@ -297,7 +284,7 @@ def test_speaking_turned_off_and_on_in_a_meeting_goes_on_where_it_is():
     run.speak()
     run.play(meeting(10))
     assert run.lines() == [said(n) for n in range(1, 31)]
-    assert run.voice.voiced == 11 and run.voice.said == 0  # the new voice: the line still coming, and the 10 after it
+    assert run.voice.sound_s >= 10 * (1 - UNDER_VOICE / 10)  # the new voice: the 10 sentences after it came
     run.stop()
 
 
@@ -335,7 +322,6 @@ def test_the_microphone_alone_is_silenced_under_the_voice_only_on_speakers(priva
     run = Run(source="microphone", private=private)
     run.play(meeting(20))
     assert run.lines(MIC) == [said(n, MIC) for n in range(1, 21)]
-    assert run.laptop.said == []  # into Japanese: Gemini's voice says it, the laptop's (English) never
     if private:
         assert run.lost(MIC) == [] and run.air.heard_s == pytest.approx(20.0)
     else:  # out loud in the room: what's said under the voice and its echo is lost
@@ -350,7 +336,7 @@ def test_both_on_headphones_speaks_the_others_and_never_the_user():
     others, me = meeting(10), [quiet()] * 10 + meeting(10)[:-10]  # the user answers in the others' pauses
     run.play({SYSTEM: others, MIC: me})
     assert run.lines(SYSTEM) == [said(n) for n in range(1, 11)] and run.lines(MIC) == [said(n, MIC) for n in range(1, 11)]
-    assert run.voice.own == {SYSTEM} and run.voice.voiced == 10  # the user's words are for the others: not spoken
+    assert run.voice.lanes == {SYSTEM}  # the user's words are for the others: not spoken
     assert run.air.heard_s == pytest.approx(10.0) and run.lost(MIC) == []  # headphones: nothing gated
     run.stop()
 
@@ -445,7 +431,7 @@ def test_geminis_answers_are_shown_and_spoken_with_and_without_the_cost_saver(sa
     run.play(frames, lambda: settled(run, servers))
     assert wait_until(lambda: len(run.lines()) == 12)
     assert run.lines() == [said(n) for n in range(1, 13)]
-    assert run.voice.voiced == 12 and run.voice.said == 0
+    assert run.air.heard_s > 6  # spoken: 12 sentences of a second, less what the whole mix loses under the voice
     if hears_self:
         assert run.lost_per_sentence(period=50) <= UNDER_VOICE
     else:
@@ -468,6 +454,7 @@ def test_a_reconnect_in_a_long_meeting_loses_no_frame_and_the_voice_goes_on():
     assert wait_until(lambda: first.sent)
     frames = meeting(20)
     run.play(frames[:205], lambda: settled(run, servers))
+    before = run.air.heard_s
     first.incoming.put({"goAway": {"timeLeft": "10s"}})  # Google ends the connection soon: a new one, the same session
     assert wait_until(lambda: second.sent)
     run.play(frames[205:], lambda: settled(run, servers))
@@ -475,5 +462,5 @@ def test_a_reconnect_in_a_long_meeting_loses_no_frame_and_the_voice_goes_on():
     assert first.closed and engine.reconnects == 1 and first.received + second.received == engine.sent
     lines = run.lines()
     assert lines == [said(n) for n in range(1, len(lines) + 1)] and len(lines) >= 19  # the one cut in two at most
-    assert run.voice.voiced == len(lines) and run.voice.said == 0
+    assert run.air.heard_s > before + 4  # and the voice went on after it
     run.stop()

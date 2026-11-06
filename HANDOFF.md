@@ -7,11 +7,21 @@ Rach_flow or Rach_Darling_Flow:** installed copies up to 2.3.0 (and up to 1.6.0)
 which GitHub redirects only while they stay free (checked after each rename: the old API names answer 301 and
 reach the latest release). Locally: `git remote set-url origin https://github.com/karthi-ai-engineer/rflow-ai.git`.
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-11-06_
 
 ## Start here (a new session, or the owner's other laptop)
 
-**Where things stand (2026-10-27):**
+**Where things stand (2026-11-06):**
+- **Rflow 2.8.2** (2026-11-06) = **phase 53, the spoken translation in Gemini's own voice** (#264; the owner: "if
+  Gemini says the translation in its own voice then we will just use it. We don't want the Ryan"). Measured first on
+  the Surface, then three changes. See **The spoken translation in Gemini's own voice**.
+  - #265: the capture turned to the output's whole mix (Rflow's own voice in it) at every pause, because a 16-bit
+    output's last bit (-90 dBFS) counted as sound process loopback missed. `wasapi.last_bit` reads the device's own
+    format; the mix at or under 3 x that isn't sound.
+  - #267: `sst/live/speaker.py` plays Gemini's voice only, with a cushion of 0.5 s at each start of the voice.
+    `sst/live/voice.py` (Piper), its download, the speed setting, `Settings.live_speak_speed` and `live_voice` are gone.
+  - Still open, #268: where the whole mix really is the only way to hear a call (Teams on Bluetooth earbuds), the call
+    is silenced while the voice speaks.
 - **Rflow 2.8.1** (2026-10-28) = one-word voice commands ("Professional", "Concise": #258) and phase 52, the text translator (#256): the Translate page has three tabs, **Text** (`TextTranslator` in `sst/window.py`: From, or Detect language, a swap, To; typed text on the left, its translation on the right, after an 800 ms pause, Ctrl+Enter or the button; `asked` drops an answer older than the typing; languages saved as `Settings.text_from`/`text_to`; up to 20,000 characters), **Selected text** (Ctrl+C+C, as before; its "Try it" box went: the Text tab does that) and **Screen**. `Translator.translate(..., source_language)` names the chosen language in the prompt.
 - **Rflow 2.8.0** (2026-10-27) = phase 50 (#225, #226), phase 51 Screen translator (#231, Ctrl+Alt+S, `sst/screen/`), the spoken-translation stall fix (#227), long dictation up to 1 h and a smaller pill (#239, #240), long Text Transform (#243-#248), the Home usage card and Formatting examples (#237, #238), and Meeting mode's Spoken translation (#233-#235). Phase 50: Meeting mode has two tabs, **Online** and **In person**
   (`Settings.meeting_place`, which the shortcut and tray also follow).
@@ -1859,7 +1869,62 @@ ask whether the start/stop beep stopped. Not done: Home's own long microphone la
   back after; turn the video's own volume (or Windows') right down: captions go on. Mute Windows' sound on the other
   PC: the bar says so.
 
+## The spoken translation in Gemini's own voice (phase 53, the owner's report of 2026-11-06)
+
+- **The owner's report:** live translation is good; Speak the translation "is kind of not working good", maybe
+  because of Ryan; Gemini's own voice alone should be used.
+- **Measured first** (the owner's Surface; a minute of speech sent straight to `GeminiLiveTranslate`, then end to end
+  with a recording played by another process; the scripts were scratch files, not in git):
+  - Gemini 3.5 Live Translate sends its voice as 24 kHz PCM in pieces of 250 ms, one every 250 ms, as long as what it
+    was sent (54 s in, 54 s back), silence for silence, and a few seconds behind the speaker.
+  - A piece comes late now and then: up to 125 ms from the connection alone, up to 320 ms with the whole app running.
+    Played the moment it came, that left 4 to 5 holes of 15 to 30 ms inside words a minute.
+  - Ryan said nothing in any run: Gemini's voice came for every sentence.
+  - The real fault: after the voice had played, or in any pause of a video, the log said "process loopback misses
+    what the output plays", and Rflow heard the whole mix, its own voice too. The Surface's speakers play 16-bit
+    sound (`PKEY_AudioEngine_DeviceFormat`), so with any stream open the mix carries the last bit: peak and RMS
+    -90.3 dBFS (1/32768), while process loopback is digital silence. `WHOLE_SOUND` is -100 dBFS. On the mix the
+    session silences what it hears while the voice speaks: the speaker's next words were lost.
+- **#265, `sst/live/wasapi.py`:** `_Stream.floor` = `last_bit(...)` of the device's format (0 for float or unknown);
+  `_Checked` counts a read of the mix as sound only above `NOISE` (3) x that. A recording with two pauses: two
+  switches before, none after; 28 s of silence no longer sent to Google in a 78 s run (on the mix, the raised noise was
+  streamed and billed).
+- **#267, `sst/live/speaker.py`** (`Speaker(player, lanes, on_problem, clock, ducker)`; `hear_audio` only, no text):
+  - Each time the voice starts (the first piece after a pause) that piece waits `cushion` (0.5 s), so what follows
+    plays that far ahead of its arrival and Gemini's pauses keep their length.
+  - A pause is played while the voice was heard within `TAIL`; after that it's dropped (and never makes it
+    `speaking`: #227 still holds).
+  - A hole anyway (the output ran dry inside the voice): `CUSHION` again at once, and `cushion` doubles for the next
+    starts, up to `MAX_CUSHION` (1.5 s). The session's log line says the holes and the cushion.
+  - Behind (a piece played more than `LATE` past its cushion): pauses are kept to `PAUSE_S` until it's caught up; with
+    more than `BEHIND_S` waiting the pauses inside pieces are shortened too; older than `STALE`, skipped.
+  - `_take(now)` and `_play(sound)` are the thread's two steps, so `tests/test_live_voice.py` runs them in its own
+    time against an output with a 0.2 s buffer (`Line`), on the lateness measured: no hole with the cushion, holes in
+    every sentence without it.
+- **Gone with Ryan:** the download and its progress on the bar and the page, the Speed row (Gemini's voice never
+  followed it), `LiveConfig.speak_speed`, `LiveConfig.spoken_lanes(language)` (now without an argument: Gemini speaks
+  any language), the Piper notices. An older Rflow's voice folders (`%LOCALAPPDATA%\sst\models\piper-*`,
+  `espeak-ng-data-en`, about 65 MB) are left on the disk: nothing reads them.
+- **The wake word's setup** borrowed that voice to check a typed keyword when it happened to be downloaded
+  (`WakeTools.hearing`). The app gives it no voice now, so the check is always skipped, as it was without the download.
+  The owner hasn't decided whether that check should go or get another voice.
+- **Checked on the Surface** (speakers, into English, speaking on; the same parts the app builds, run from a script:
+  the installed Rflow was running, and only one Rflow can):
+  - a Japanese recording played by another process: every sentence translated and spoken to the last
+  - the owner's YouTube video (two people talking in Japanese, in Chrome), 2 minutes: 10 lines, 111 s spoken, the
+    capture on process loopback throughout, nothing sent as silence under the voice, 1 hole (the connection held a
+    piece 1.9 s)
+  - Meeting mode's parts together (`MeetingSession` on a window found as Google Meet, the recorder's two tracks, live
+    translation spoken; minutes and frames off), source Computer and source Both: 0 holes; `others.wav` at digital
+    silence while the voice spoke alone (the voice isn't in the recording the minutes are made from); with Both on
+    speakers no line from the microphone (the meeting and the voice aren't taken for the user's words)
+  - **Not checked:** a real Teams or Meet call, a Bluetooth headset, the minutes after a spoken meeting. On speakers
+    `you.wav` records the room, the voice in it: headphones in a real meeting.
+
 ## Known limitations
+- Live translation spoken aloud, where only the output's whole mix carries the call (Teams on Bluetooth earbuds, or
+  before Windows 11): the call is silenced while the voice speaks, so only the start of each stretch of talk is
+  translated (#268).
 - Apps running as administrator don't receive the text, because Windows blocks input from normal programs into them.
 - Ctrl+Win isn't sent through the real hook in automated tests (Wispr Flow on the dev laptop would react). The hook
   plumbing is tested with the Menu key, Esc and Ctrl+Alt+X, and Ctrl+Win by the Matcher unit tests. The owner
@@ -1875,6 +1940,11 @@ ask whether the start/stop beep stopped. Not done: Home's own long microphone la
 
 ## Next steps
 
+1. **Owner: update to 2.8.2 and try Speak the translation** on a video and in a real meeting, on speakers and on
+   headphones. The log's line "Gemini's voice: ... holes inside words, the cushion ..." says how it went; "process
+   loopback misses what the output plays" should appear only in a call on Bluetooth earbuds.
+1. **#268**: take Rflow's own voice out of the whole mix (it knows the samples it plays) instead of silencing the
+   call. And the owner's choice for the wake word's typed-keyword check (see the phase 53 section).
 1. **Owner: update to 2.4.0 and try phase 37** on the PC where the translation stopped: a video, speaking on; the
    video should get quieter while Danny speaks and come back after; turn the video (or Windows) right down and the
    captions should go on. If the original should go lower or stay louder, the slider is under Speed.

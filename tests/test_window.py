@@ -2241,15 +2241,11 @@ def test_hearing_the_translation_is_switched_on_in_the_section():
     window, app = _live_window()
     window.show_page("live")
     page = window.pages["live"]
-    assert not page.speak.isChecked() and page.speed_row.isHidden()
-    assert "Downloaded the first time (64 MB)" in page.speak_caption.text()
-    page.speak.setChecked(True)
-    assert ("set_live_speak", True) in app.calls and app.settings.live_speak and not page.speed_row.isHidden()
-    page.speed.setCurrentIndex(page.speed.findData(1.3))
-    assert app.settings.live_speak_speed == 1.3
-    app._voice_state = ("downloading", 37, "")
-    page.refresh()
-    assert page.speak_caption.text().startswith("Downloading Ryan, the voice on this laptop: 37%")
+    assert not page.speak.isChecked() and page.duck_row.isHidden()
+    assert page.speak_caption.text() == "Gemini says the translation in its own voice as it's translated, in any language."
+    page.speak.setChecked(True)  # at once: nothing to download, no speed to choose (Gemini's voice keeps its own pace)
+    assert ("set_live_speak", True) in app.calls and app.settings.live_speak and not page.duck_row.isHidden()
+    assert not hasattr(page, "speed")
 
 
 def test_how_low_the_other_apps_stay_while_it_runs_is_a_slider_from_0_to_100():
@@ -2275,12 +2271,14 @@ def test_how_low_the_other_apps_stay_while_it_runs_is_a_slider_from_0_to_100():
     assert page.duck.value_at(0) == 0 and page.duck.value_at(80) == 50  # whole steps where the pointer is
 
 
-def test_the_section_says_when_the_voice_cant_speak_the_language_chosen():
+def test_the_section_says_gemini_speaks_any_language_and_what_speakers_do_to_the_microphone():
     window, _ = _live_window(live_target="ja")
     window.show_page("live")
     words = window.pages["live"].speak_caption.text()
-    assert words.startswith("Gemini says the translation in its own voice")
-    assert "Ryan, the voice on this laptop, speaks only English" in words
+    assert words.startswith("Gemini says the translation in its own voice") and "laptop" not in words
+    window, _ = _live_window(live_source="both")
+    window.show_page("live")
+    assert "Through speakers the microphone pauses while it speaks" in window.pages["live"].speak_caption.text()
 
 
 # ---- Meeting mode (phase 49)

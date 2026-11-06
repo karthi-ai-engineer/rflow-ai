@@ -152,20 +152,10 @@ def cmd_live(args) -> None:
     if args.speak:
         from sst.live.ducking import Ducker
         from sst.live.speaker import Speaker
-        from sst.live.voice import LOCAL, PiperVoice, install, local
         from sst.live.wasapi import Player
-        if not LOCAL.ready():  # the voice on this laptop, for when Gemini's own voice doesn't come
-            print(f"Downloading the voice {LOCAL.name} ({round(LOCAL.size / 1e6)} MB, once)...")
-            install(LOCAL, progress=lambda done, total: print(f"\r  {done * 100 // total}%", end="", flush=True))
-            print()
-        voice = local()
-        lanes = config.spoken_lanes(voice.language)
-        if not lanes:
-            print(f"  (Gemini speaks the translation; {voice.name} speaks only {language_name(voice.language)}, so "
-                  f"can't stand in for it here.)")
-        session.set_speaker(Speaker(lambda: PiperVoice(voice), Player(), lanes, voice.language, settings.live_speak_speed,
+        session.set_speaker(Speaker(Player(), config.spoken_lanes(),  # Gemini's own voice, as it streams
                                     on_problem=lambda message: print(f"\n  ! {message}", flush=True),
-                                    ducker=Ducker(settings.live_duck), own=config.spoken_lanes()))
+                                    ducker=Ducker(settings.live_duck)))
     try:
         stopped.wait(args.seconds or None)
     finally:
@@ -254,7 +244,7 @@ def main() -> None:
                         help="what to translate: what the laptop plays, the microphone, or both (default: as set in Rflow)")
     p_live.add_argument("--mic-to", help="language code for what the microphone hears (default: as set in Rflow, ja)")
     p_live.add_argument("--speak", action="store_true",
-                        help="speak the translation aloud too (an English voice on this laptop, downloaded the first time)")
+                        help="speak the translation aloud too, in Gemini's own voice")
     p_web = sub.add_parser("web", help="open the record/stop page in your browser")
     p_web.add_argument("--port", type=int, default=8765)
     p_web.add_argument("--no-browser", action="store_true", help="don't open the browser automatically")

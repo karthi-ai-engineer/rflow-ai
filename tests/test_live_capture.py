@@ -1,7 +1,9 @@
 """What the laptop plays, as live captions get it: the device's format to 16 kHz mono frames, silence filled in, a new
 output device followed. Windows is faked; no sound is played or captured."""
+import struct
 import threading
 import time
+import uuid
 
 import numpy as np
 import pytest
@@ -502,6 +504,49 @@ def test_the_check_holds_when_the_apps_are_lowered_to_inaudible():
     checked, *_ = checked_with([], low)
     read_all(checked, 20)
     assert checked.switched
+
+
+def last_bit_noise(seconds, rate=48_000):
+    """What a 16-bit output's mix carries while a stream is open and nothing plays: its last bit, up or down."""
+    bit = np.float32(2.0 ** -15)
+    return [np.where(np.random.default_rng(i).random(rate // 10) < 0.5, -bit, bit) for i in range(int(seconds * 10))]
+
+
+def test_a_16_bit_outputs_own_noise_in_a_pause_isnt_sound_process_loopback_missed():
+    """#265, the owner's Surface: its output plays 16-bit sound, so in every pause the mix carried the last bit (-90
+    dBFS) and process loopback digital silence, and after 1.5 s the capture turned to the mix, Rflow's voice in it."""
+    speech = [sine(300, 0.1, 16_000)] * 20
+    main, whole = Loopback(speech), Whole([sine(300, 0.1, 48_000)] * 20 + last_bit_noise(6))
+    whole.floor = wasapi.last_bit(sixteen_bit())
+    checked = wasapi._Checked(main, whole, clock=Ticks())
+    _, turns = read_all(checked, 80)  # 2 s of speech both hear, then a 6 s pause
+    assert turns == [] and not checked.hears_self
+    main, whole = Loopback(speech), Whole([sine(300, 0.1, 48_000)] * 20 + last_bit_noise(6))  # as it was: it turned
+    _, turns = read_all(wasapi._Checked(main, whole, clock=Ticks()), 80)
+    assert [on for _, on in turns] == [True]
+
+
+def test_a_call_only_the_mix_carries_is_still_found_on_a_16_bit_output():
+    main, whole = Loopback(), Whole(last_bit_noise(3) + [sine(300, 0.1, 48_000) * 0.01] * 40)  # a quiet call: -40 dBFS
+    whole.floor = wasapi.last_bit(sixteen_bit())
+    checked = wasapi._Checked(main, whole, clock=Ticks())
+    _, turns = read_all(checked, 30 + 20)
+    assert turns == [(30 + 14, True)]  # 1.5 s into the call, as on any output
+
+
+def sixteen_bit(bits=16, valid=16, kind=None):
+    """A WAVEFORMATEXTENSIBLE as Windows gives a device's own format: 2 channels, 48 kHz."""
+    pcm = uuid.UUID("00000001-0000-0010-8000-00AA00389B71").bytes_le
+    return struct.pack("<HHIIHHHHI", 0xFFFE, 2, 48_000, 48_000 * 2 * bits // 8, 2 * bits // 8, bits, 22, valid, 3) + (kind or pcm)
+
+
+def test_the_outputs_last_bit_is_read_from_the_format_it_plays():
+    assert wasapi.last_bit(sixteen_bit()) == 2.0 ** -15
+    assert wasapi.last_bit(sixteen_bit(32, 24)) == 2.0 ** -23  # 24 bits that count, in 32
+    assert wasapi.last_bit(sixteen_bit(32, 32, wasapi._FLOAT)) == 0.0  # float sound has no last bit to speak of
+    assert wasapi.last_bit(struct.pack("<HHIIHHH", 1, 2, 44_100, 176_400, 4, 16, 0)) == 2.0 ** -15  # a plain WAVEFORMATEX
+    assert wasapi.last_bit(struct.pack("<HHIIHHH", 3, 2, 48_000, 384_000, 8, 32, 0)) == 0.0
+    assert wasapi.last_bit(None) == wasapi.last_bit(b"") == 0.0  # not known: every sound in the mix counts, as before
 
 
 def test_rflows_own_voice_in_the_mix_doesnt_count_as_a_sound_process_loopback_missed(monkeypatch):
