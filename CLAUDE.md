@@ -92,9 +92,9 @@ dictation's: `wasapi.py` (`Capture.speakers()` in loopback and `Capture.micropho
 `gemini.py` (Gemini Live Translate over a websocket), `session.py` (the ways of the chosen source, `SOURCES`: `SYSTEM`,
 what the laptop plays, and `MIC`, the microphone, each its own engine; untranslated `MIC` lines are dropped),
 `transcript.py`, `captions.py` (the translation bar: moved, resized and scrolled with the mouse, never activated;
-`LiveCaptions`), `voice.py` (the Piper voice, downloaded and prepared for sherpa-onnx) and `speaker.py` (sentences
-spoken as they're whole; the ways that could hear the voice get silence meanwhile; `wasapi.Player` plays it, and
-`Capture.speakers()` leaves Rflow's own sound out through process loopback); `tests/test_live_session.py` fails if anything there imports `sst.pipeline`, `sst.dictate` or
+`LiveCaptions`) and `speaker.py` (the spoken translation: Gemini's own voice played as it streams, with a cushion,
+and no other voice, the owner's choice of 2026-11-06; the ways that could hear the voice get silence meanwhile;
+`wasapi.Player` plays it, and `Capture.speakers()` leaves Rflow's own sound out through process loopback); `tests/test_live_session.py` fails if anything there imports `sst.pipeline`, `sst.dictate` or
 `sst.audio`. Settings, keys, history, stats and
 reading tests belong to a profile (`Profiles` in `sst/settings.py`): read and write them through the profile's paths
 (`TrayApp.profile.settings_file`...), never the module's default paths. The Windows-only parts are `sst/app.py`, `sst/dictate.py`, `sst/hotkey.py`,
