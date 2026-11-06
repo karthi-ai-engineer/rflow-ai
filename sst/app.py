@@ -51,10 +51,6 @@ from sst.live.gemini import GeminiLiveTranslate
 from sst.live.session import LiveSession
 from sst.live.speaker import Speaker
 from sst.live.transcript import Transcript, for_copy
-from sst.live.voice import LOCAL as LOCAL_VOICE
-from sst.live.voice import PiperVoice, Voice
-from sst.live.voice import install as install_voice
-from sst.live.voice import local as local_voice
 from sst.live.wasapi import Capture, Player
 from sst.pipeline.asr import ASRScheduler, EngineBackend
 from sst.pipeline.contracts import VoiceConfig
@@ -472,8 +468,6 @@ class _Signals(QObject):
     update_failed = Signal(str, bool)  # (message, tell the user)
     download_progress = Signal(str, int, int)  # (speech model, bytes done, bytes in all)
     download_done = Signal(str, str)  # (speech model, "" or "cancelled" or why it failed)
-    voice_progress = Signal(int)  # percent of live translation's voice downloaded
-    voice_done = Signal(str)  # "" or why the voice couldn't be downloaded
     wake_progress = Signal(int)  # percent of the wake word's models downloaded
     wake_done = Signal(str)  # "" or "cancelled" or why they couldn't be downloaded
     scan_progress = Signal(str)
@@ -510,8 +504,6 @@ class TrayApp:
         self.scanning = ""  # what the scan is doing now, while it runs
         self.last_scan = scan.load()
         self._cancel_download = threading.Event()
-        self.voice_downloading: int | None = None  # percent, while live translation's voice downloads
-        self.voice_problem = ""  # why the voice couldn't be downloaded, until it's tried again
         self.listener: HotkeyListener | None = None
         self.quiet_start = quiet_start
         self._cleanup_notice = -1e9  # when the user was last told that the cleanup couldn't help
@@ -536,8 +528,6 @@ class TrayApp:
         self.signals.update_failed.connect(self._on_update_failed)
         self.signals.download_progress.connect(self._on_download_progress)
         self.signals.download_done.connect(self._on_download_done)
-        self.signals.voice_progress.connect(self._on_voice_progress)
-        self.signals.voice_done.connect(self._on_voice_done)
         self.signals.wake_progress.connect(self._on_wake_progress)
         self.signals.wake_done.connect(self._on_wake_done)
         self.signals.scan_progress.connect(self._on_scan_progress)
@@ -1170,8 +1160,8 @@ class TrayApp:
     def live_config(self) -> LiveConfig:
         s = self.settings
         return LiveConfig(target=s.live_target, mic_target=s.live_mic_target, source=s.live_source,
-                          hide_from_capture=s.live_hide_from_share, speak=s.live_speak, speak_speed=s.live_speak_speed,
-                          duck=s.live_duck, save=s.live_save)
+                          hide_from_capture=s.live_hide_from_share, speak=s.live_speak, duck=s.live_duck,
+                          save=s.live_save)
 
     def room_live_config(self) -> LiveConfig:
         """Live translation in a meeting in person: the microphone hears the room, whose words go into the user's own
@@ -1197,37 +1187,17 @@ class TrayApp:
         if session is None or self.live.session is session:
             self.stop_live()
 
-    # -- the spoken translation (sst.live.voice, sst.live.speaker)
+    # -- the spoken translation (sst.live.speaker)
 
-    def live_voice(self) -> Voice:
-        """The voice on this laptop (Ryan; an older Rflow's Danny until Ryan is downloaded): Gemini speaks the
-        translation in its own voice, this one stands in when Gemini's audio doesn't come."""
-        return local_voice()
-
-    def live_voice_state(self) -> tuple[str, int, str]:
-        """("ready" / "downloading" / "missing", the percent downloaded, why the last download failed)."""
-        if self.voice_downloading is not None:
-            return "downloading", self.voice_downloading, ""
-        return ("ready" if self.live_voice().ready() else "missing"), 0, self.voice_problem
-
-    def _live_speaker(self, config: LiveConfig) -> Speaker | None:
-        """What says the translation aloud: Gemini's own voice at once, the laptop's in its place once downloaded (the
-        voice is looked for at each load: a download finished meanwhile is used)."""
-        language = self.live_voice().language
-
-        def load() -> PiperVoice | None:
-            voice = local_voice()
-            return PiperVoice(voice) if voice.ready() else None
-        return Speaker(load, Player(), config.spoken_lanes(language), language, config.speak_speed,
+    def _live_speaker(self, config: LiveConfig) -> Speaker:
+        """What plays the translation aloud: Gemini's own voice, as it streams (no other voice: #264)."""
+        return Speaker(Player(), config.spoken_lanes(),
                        on_problem=lambda message: self.live.event.emit(LiveEvent(Kind.ERROR, message, lane="voice")),
-                       ducker=Ducker(config.duck), own=config.spoken_lanes())
+                       ducker=Ducker(config.duck))
 
     def set_live_speak(self, on: bool) -> None:
-        """The translation spoken aloud, or not: saved, at once while it runs; the laptop's voice is downloaded the
-        first time (Ryan also where an older Rflow has Danny), to stand in when Gemini's audio doesn't come."""
+        """The translation spoken aloud (in Gemini's own voice), or not: saved, at once while it runs."""
         self.apply_settings(dataclasses.replace(self.settings, live_speak=on))
-        if on and not LOCAL_VOICE.ready():
-            self.download_live_voice()
         if self._meeting_bar() is None:  # a meeting's bar speaks by the meeting's switch (#234)
             self.live.set_speak(on)
         if self.window.isVisible():
@@ -1246,11 +1216,8 @@ class TrayApp:
             self.set_meeting_speak(on)
 
     def set_meeting_speak(self, on: bool) -> None:
-        """Meeting mode's Spoken translation: saved, and at once on a running online meeting's bar; the laptop's voice is
-        downloaded the first time, as on the Live page."""
+        """Meeting mode's Spoken translation: saved, and at once on a running online meeting's bar."""
         self.apply_settings(dataclasses.replace(self.settings, meeting_speak=on))
-        if on and not LOCAL_VOICE.ready():
-            self.download_live_voice()
         meeting = self._meeting_bar()
         if meeting is not None and not meeting.in_person:
             self.live.set_speak(on)
@@ -1277,56 +1244,10 @@ class TrayApp:
         """Why the cost saver stopped the last session ("no speech for 15 min"), or ""."""
         return self.live.stopped_why
 
-    def set_live_speak_speed(self, speed: float) -> None:
-        self.apply_settings(dataclasses.replace(self.settings, live_speak_speed=speed))
-        self.live.set_speak_speed(speed)
-
     def set_live_duck(self, depth: float) -> None:
         """How loud the other apps stay while the voice speaks (1.0: as they are): saved, and at once."""
         self.apply_settings(dataclasses.replace(self.settings, live_duck=depth))
         self.live.set_duck(depth)
-
-    def download_live_voice(self) -> None:
-        """Download and prepare the voice in the background (once; the progress shows on the bar and the page)."""
-        if self.voice_downloading is not None:
-            return
-        voice, last = LOCAL_VOICE, [-1]
-        self.voice_downloading, self.voice_problem = 0, ""
-
-        def progress(done: int, total: int) -> None:
-            percent = done * 100 // total if total else 0
-            if percent != last[0]:  # the window needn't redraw for every megabyte
-                last[0] = percent
-                self.signals.voice_progress.emit(percent)
-
-        def work() -> None:
-            try:
-                install_voice(voice, progress)
-                self.signals.voice_done.emit("")
-            except Exception as e:
-                log.exception("Downloading the voice %s failed", voice.key)
-                self.signals.voice_done.emit(str(e) or type(e).__name__)
-        threading.Thread(target=work, name="voice-download", daemon=True).start()
-        self.live.set_voice_note("Downloading the voice…")
-
-    def _on_voice_progress(self, percent: int) -> None:
-        self.voice_downloading = percent
-        self.live.set_voice_note(f"Downloading the voice: {percent}%")
-        if self.window.isVisible():
-            self.window.refresh()
-
-    def _on_voice_done(self, error: str) -> None:
-        self.voice_downloading, self.voice_problem = None, error
-        self.live.set_voice_note("")
-        if error:
-            self._notify(APP_NAME, f"The voice couldn't be downloaded: {error}", QSystemTrayIcon.MessageIcon.Warning)
-        else:
-            log.info("The voice %s is ready", LOCAL_VOICE.name)
-            # here now: it speaks if speaking is still wanted, by the running bar's own setting (a meeting's, never the
-            # room's: #234), else the Live page's
-            self.live.set_speak(self.live.config.speak if self.live.running else self.settings.live_speak)
-        if self.window.isVisible():
-            self.window.refresh()
 
     # -- Start with your voice (sst.wakeui; the keyword spotting, voice check and turns are sst.wake)
 
@@ -1413,9 +1334,8 @@ class TrayApp:
             self.window.refresh()
 
     def open_wake_setup(self, parent=None) -> None:
-        """The 10-try setup (a dialog): the keyword typed (checked with live translation's voice, when it's downloaded),
-        then said ten ways; kept when heard often enough. It records on the microphone the wake word listens on (a
-        Bluetooth headset's only when the user lets it), in memory only."""
+        """The 10-try setup (a dialog): the keyword typed, then said ten ways; kept when heard often enough. It records
+        on the microphone the wake word listens on (a Bluetooth headset's only when the user lets it), in memory only."""
         try:
             api = wake_api()
         except Exception as e:
@@ -1428,10 +1348,9 @@ class TrayApp:
             recorder.raw = self.settings.raw_audio
             recorder.keep_call_quality = True  # a headset's only when the wake word listens there: open for the tries
             return recorder
-        def english_voice() -> PiperVoice | None:  # the laptop's voice (Ryan, or Danny until it's here): English, as the spotter
-            voice = local_voice()
-            return PiperVoice(voice) if voice.ready() else None
-        tools = WakeTools(api, english_voice)
+        # No synthetic voice: the typed keyword's check by one is skipped (it borrowed live translation's voice on the
+        # laptop, which went with #264)
+        tools = WakeTools(api, lambda: None)
         dialog = WakeSetupDialog(parent, microphone=name, problem=problem, check=api.check_keyword,
                                  enroll=lambda keyword: api.Enrollment(keyword, transcribe=tools.transcribe),
                                  hearing=tools.hearing, new_recorder=new_recorder, save=self.save_wake_setup,
@@ -1482,8 +1401,6 @@ class TrayApp:
                 return "Not started."
             self.apply_settings(dataclasses.replace(s, live_told=True))
         config = config or self.live_config()
-        if config.speak and not self.voice_problem and not LOCAL_VOICE.ready():
-            self.download_live_voice()  # e.g. an older Rflow's Danny here: Ryan comes in the background, once a run
         try:
             self.live.start(config, geometry=list(self.settings.live_bar) or None)
         except Exception as e:  # e.g. no output device or microphone to listen to

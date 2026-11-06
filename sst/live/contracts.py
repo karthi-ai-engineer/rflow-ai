@@ -58,8 +58,7 @@ class LiveConfig:
     hide_from_capture: bool = True  # the caption bar isn't in screen shares and recordings
     source: str = "computer"  # a key of SOURCES: what's translated (the laptop, the microphone, or both)
     mic_target: str = "ja"  # the language what the microphone hears is translated into
-    speak: bool = False  # the translation spoken aloud too, by a voice on the laptop (sst.live.speaker)
-    speak_speed: float = 1.0
+    speak: bool = False  # the translation spoken aloud too, in the engine's own voice (sst.live.speaker)
     duck: float = 0.1  # how loud the other apps stay while live translation speaks (1.0: as they are; sst.live.ducking)
     # The cost saver: audio goes to Google only while someone talks (sst.live.gate; Google bills every second streamed,
     # both ways), and a session with no words for AUTO_STOP_S stops. Off: silence is left out as it always was
@@ -81,11 +80,10 @@ class LiveConfig:
         microphone alone it hears everyone in the room, so nothing is marked."""
         return self.source == "both"
 
-    def spoken_lanes(self, language: str | None = None) -> tuple[str, ...]:
-        """The ways a voice speaking `language` reads aloud: what's translated into that language (None: any, the
-        engine's own voice). With both, only the others' words: the user's own are for the people they talk to."""
-        lanes = (SYSTEM,) if self.source == "both" else self.lanes
-        return tuple(lane for lane in lanes if language is None or self.for_lane(lane).target == language)
+    def spoken_lanes(self) -> tuple[str, ...]:
+        """The ways whose translation is spoken aloud. With both, only the others' words: the user's own are for the
+        people they talk to."""
+        return (SYSTEM,) if self.source == "both" else self.lanes
 
     def for_lane(self, lane: str) -> "LiveConfig":
         """The settings one way's engine works with: what the microphone hears goes into mic_target."""

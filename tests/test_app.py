@@ -5,6 +5,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import dataclasses  # noqa: E402
+import json  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 import numpy as np  # noqa: E402
@@ -824,31 +825,32 @@ def test_the_live_transcript_is_copied_from_the_bar_and_the_live_page(tray_app, 
     assert app.copy_live_session(path.with_name("gone.txt")) == "The transcript couldn't be read"
 
 
-def test_gemini_speaks_at_once_and_the_laptops_voice_is_downloaded_to_stand_in(tray_app, monkeypatch):
+def test_the_translation_is_spoken_in_geminis_own_voice_alone(tray_app, monkeypatch):
     app, _, _ = tray_app
-    from sst.live import voice as voices
     from sst.live.contracts import MIC, SYSTEM, LiveConfig
     from sst.live.speaker import Speaker
-    have = set()
-    monkeypatch.setattr(sst_app.Voice, "ready", lambda self, root=None: self.key in have)
     speaker = app._live_speaker(LiveConfig(source="microphone", mic_target="ja", speak=True))
-    assert speaker.own == {MIC} and speaker.lanes == set()  # Gemini says Japanese; the laptop's voice speaks English
-    assert speaker._load() is None and app.live_voice_state()[0] == "missing"  # nothing to stand in yet
-    started = []
-    monkeypatch.setattr(app, "download_live_voice", lambda: started.append(True))
-    app.set_live_speak(True)
-    assert app.settings.live_speak and started == [True]
-    have.add(voices.DANNY.key)  # an older Rflow's Danny: speaks until Ryan is here, and Ryan is still downloaded
-    assert app.live_voice() is voices.DANNY and app.live_voice_state() == ("ready", 0, "")
-    app.set_live_speak(True)
-    assert started == [True, True]
-    have.add(voices.RYAN.key)
-    speaker = app._live_speaker(LiveConfig(target="en", speak=True, speak_speed=1.3, duck=0.25))
-    assert isinstance(speaker, Speaker) and speaker.lanes == speaker.own == {SYSTEM} and speaker.speed == 1.3
+    assert isinstance(speaker, Speaker) and speaker.lanes == {MIC}  # Gemini says any language: nothing else speaks
+    speaker = app._live_speaker(LiveConfig(source="both", target="en", speak=True, duck=0.25))
+    assert speaker.lanes == {SYSTEM}  # with both, the others' words: the user's own are for them
     assert speaker.ducker.depth == 0.25  # like an interpreter: the other apps kept lower while it runs
-    assert app.live_voice() is voices.RYAN and app.live_voice_state() == ("ready", 0, "")
-    app.set_live_speak(True)
-    assert started == [True, True]  # here: nothing more to download
+    spoken = []
+    monkeypatch.setattr(app.live, "set_speak", spoken.append)
+    app.set_live_speak(True)  # saved and at once: no voice to download first
+    assert app.settings.live_speak and spoken == [True]
+    assert sst_app.Settings.load(app.profile.settings_file).live_speak
+    assert not hasattr(app.settings, "live_speak_speed") and not hasattr(app.settings, "live_voice")
+
+
+def test_an_older_rflows_voice_settings_are_let_go(tmp_path):
+    """Until 2.8.1 the profile kept the laptop's voice and its speed: read without them, the rest stays."""
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"live_speak": True, "live_speak_speed": 1.3, "live_voice": "en_US-ryan-medium",
+                                "live_duck": 0.6}), encoding="utf-8")
+    settings = sst_app.Settings.load(path)
+    assert settings.live_speak and settings.live_duck == 0.6
+    settings.save(path)
+    assert "live_voice" not in path.read_text(encoding="utf-8") and "live_speak_speed" not in path.read_text(encoding="utf-8")
 
 
 def test_how_low_the_other_apps_stay_while_it_runs_is_saved_and_used_at_once(tray_app, monkeypatch):
@@ -908,21 +910,6 @@ def test_the_cost_saver_is_saved_used_at_once_and_the_bar_and_page_stay_in_step(
     app.start_live()
     assert app.live.config.save and app.live.bar.save_button.isChecked()  # the next start saves too
     app.stop_live()
-
-
-def test_the_voices_download_shows_its_progress_and_speaks_when_done(tray_app, monkeypatch):
-    app, _, _ = tray_app
-    notes, speak = [], []
-    monkeypatch.setattr(app.live, "set_voice_note", notes.append)
-    monkeypatch.setattr(app.live, "set_speak", speak.append)
-    app.settings = dataclasses.replace(app.settings, live_speak=True)
-    app.voice_downloading = 0
-    app._on_voice_progress(42)
-    assert app.live_voice_state() == ("downloading", 42, "") and notes[-1] == "Downloading the voice: 42%"
-    app._on_voice_done("")
-    assert app.voice_downloading is None and notes[-1] == "" and speak == [True]
-    app._on_voice_done("the model server answered 503")
-    assert app.live_voice_state()[2] == "the model server answered 503"
 
 
 # ---- never lose work (phase 30)
@@ -1350,11 +1337,9 @@ def test_it_listens_on_the_bluetooth_headset_when_the_user_lets_it(wake_app, mon
 
 def test_the_setup_records_where_the_wake_word_listens_and_learns_from_the_tries(wake_app, monkeypatch):
     from sst import audio
-    from sst.live import voice
     app, wake = wake_app.app, wake_app.wake
     monkeypatch.setattr(audio, "call_quality", lambda device: device in ("Headset (Buds)", None))
     monkeypatch.setattr(audio, "input_device_names", lambda refresh=True: ["Headset (Buds)", "Mic A"])
-    monkeypatch.setattr(voice.Voice, "ready", lambda self, root=None: False)  # no synthetic voice: no check
     recorders, shown = [], []
     monkeypatch.setattr(sst_app, "Recorder", lambda device: recorders.append(SimpleNamespace(device=device)) or recorders[-1])
 
@@ -1375,7 +1360,7 @@ def test_the_setup_records_where_the_wake_word_listens_and_learns_from_the_tries
     assert recorder.device == "Headset (Buds)" and recorder.keep_call_quality
     assert (options["tries"], options["passes"], options["misses"], options["quiet_db"]) == (
         wake.TRIES, wake.PASS, wake.MISSES, wake.QUIET_DB)
-    assert options["hearing"]("karthi") is None  # skipped without the voice
+    assert options["hearing"]("karthi") is None  # skipped: Rflow has no synthetic voice (#264)
     assert isinstance(options["enroll"]("karthi"), wake.Enrollment)
     assert shown[0].setting_up and not app.wake.setting_up  # the tries never start a dictation
     app.apply_settings(dataclasses.replace(app.settings, wake_bluetooth=False))
@@ -1628,10 +1613,10 @@ def test_ctrl_alt_m_starts_and_stops_the_meeting_found_from_any_app(meeting_app,
 
 class MeetingSpeaker:
     """The voice (a Speaker's surface), faked: nothing is played, nothing is ducked."""
-    language, said, skipped, repeats, private, speaking = "en", 0, 0, 0, False, False
+    private, speaking, sound_s, sound_skipped_s, quiet_s, holes, cushion = False, False, 0.0, 0.0, 0.0, 0, 0.3
 
     def __init__(self, config):
-        self.config, self.started, self.stopped, self.lanes, self.own, self.speed = config, False, False, set(), set(), 1.0
+        self.config, self.started, self.stopped, self.lanes = config, False, False, set()
 
     def start(self):
         self.started = True
@@ -1639,27 +1624,23 @@ class MeetingSpeaker:
     def stop(self):
         self.stopped = True
 
-    def hear(self, event):
+    def hear_audio(self, lane, pcm, rate):
         pass
 
-    def set_lanes(self, lanes, own=None):
-        self.lanes, self.own = set(lanes), set(own or ())
-
-    def set_speed(self, speed):
-        self.speed = speed
+    def set_lanes(self, lanes):
+        self.lanes = set(lanes)
 
 
 @pytest.fixture
 def live_meeting(meeting_app, monkeypatch):
     """meeting_app with live translation's real bar and LiveSession; each way a fake capture and engine (no device,
-    no Google), each engine having spent a minute more than the last; the voice faked; nothing downloaded."""
+    no Google), each engine having spent a minute more than the last; the voice faked."""
     from tests.test_live_session import FakeCapture, SpendingEngine
     app = meeting_app.app
     monkeypatch.setattr(app, "start_live", sst_app.TrayApp.start_live.__get__(app))  # the fixture's fakes undone
     monkeypatch.setattr(app, "stop_live", sst_app.TrayApp.stop_live.__get__(app))
-    app.settings = dataclasses.replace(app.settings, live_told=True, meeting_told=True, live_duck=0.3,
-                                       live_speak_speed=1.15)
-    lanes, speakers, downloads = [], [], []
+    app.settings = dataclasses.replace(app.settings, live_told=True, meeting_told=True, live_duck=0.3)
+    lanes, speakers = [], []
 
     def lane(name, config):
         capture = FakeCapture()
@@ -1668,10 +1649,8 @@ def live_meeting(meeting_app, monkeypatch):
         return capture, lambda emit: SpendingEngine(emit, spent)
     monkeypatch.setattr(app, "_live_lane", lane)
     monkeypatch.setattr(app, "_live_speaker", lambda config: speakers.append(MeetingSpeaker(config)) or speakers[-1])
-    monkeypatch.setattr(app, "download_live_voice", lambda: downloads.append(True))
-    monkeypatch.setattr(sst_app.Voice, "ready", lambda self, root=None: False)
     monkeypatch.setattr(sst_app.QMessageBox, "question", lambda *args: sst_app.QMessageBox.StandardButton.Yes)
-    meeting_app.lanes, meeting_app.speakers, meeting_app.downloads = lanes, speakers, downloads
+    meeting_app.lanes, meeting_app.speakers = lanes, speakers
     yield meeting_app
     if app.meeting is not None:
         app.stop_meeting()
@@ -1685,12 +1664,12 @@ def test_an_online_meeting_speaks_by_its_own_switch_whatever_the_live_page_says(
     app.apply_settings(dataclasses.replace(app.settings, live_speak=True, meeting_speak=False))
     assert app.start_meeting(m.teams) == "" and app.live.running
     assert not app.live.config.speak and app.live.session.speaker is None and not m.speakers  # silent captions
-    assert not app.live.bar.speak_button.isChecked() and m.downloads == []  # nothing to download for it
+    assert not app.live.bar.speak_button.isChecked()
     app.set_meeting_option("speak", True)  # the page's row: at once on the meeting's bar
-    assert app.settings.meeting_speak and app.settings.live_speak and m.downloads == [True]
+    assert app.settings.meeting_speak and app.settings.live_speak
     speaker = app.live.session.speaker
     assert speaker is m.speakers[-1] and speaker.started and app.live.bar.speak_button.isChecked()
-    assert speaker.config.duck == 0.3 and speaker.speed == 1.15  # ducked and paced as set on Live translation
+    assert speaker.config.duck == 0.3  # the other apps as low as set on Live translation
     app.set_live_speak(False)  # the Live page's switch: saved for Live translation, the meeting's bar keeps speaking
     assert not app.settings.live_speak and app.live.session.speaker is speaker and app.settings.meeting_speak
     app.live.bar.speak_button.click()  # the bar's button on a meeting's bar: the meeting's switch
@@ -1713,14 +1692,13 @@ def test_a_meeting_in_person_is_never_spoken_aloud(live_meeting):
     app = m.app
     app.apply_settings(dataclasses.replace(app.settings, live_speak=True, meeting_speak=True))
     assert app.start_meeting(apps.IN_PERSON) == "" and app.live.running
-    assert app.live.config.source == "microphone" and not app.live.config.speak and m.downloads == []
+    assert app.live.config.source == "microphone" and not app.live.config.speak
     flashed = []
     app.live.flash = flashed.append
     app.live.bar.speak_button.click()  # the bar's button
     assert app.live.session.speaker is None and not app.live.bar.speak_button.isChecked()
     assert flashed == ["Not spoken aloud in a meeting in person"] and app.settings.meeting_speak
     app.set_live_speak(True)  # the Live page's switch
-    app._on_voice_done("")  # the voice downloaded meanwhile: it re-applies the bar's own setting
     assert app.live.session.speaker is None and not m.speakers
 
 
