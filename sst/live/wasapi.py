@@ -42,6 +42,7 @@ mode lets both have it open.
 import ctypes
 import logging
 import os
+import struct
 import threading
 import time
 import uuid
@@ -305,7 +306,8 @@ _FLOAT = uuid.UUID("00000003-0000-0010-8000-00AA00389B71").bytes_le
 _FORM_FACTOR = (_GUID.of("1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E"), 0)  # PKEY_AudioEndpoint_FormFactor
 _FRIENDLY_NAME = (_GUID.of("A45C254E-DF1C-4EFD-8020-67D146A850E0"), 14)  # PKEY_Device_FriendlyName
 _RAW_SUPPORTED = (_GUID.of("8943B373-388C-4395-B557-BC6DBAFFAFDB"), 2)  # PKEY_Devices_AudioDevice_RawProcessingSupported
-_VT_BOOL, _VT_UI4, _VT_LPWSTR = 11, 19, 31
+_DEVICE_FORMAT = (_GUID.of("F19F064D-082C-4E27-BC73-6882A1BB8E4C"), 0)  # PKEY_AudioEngine_DeviceFormat: a WAVEFORMATEX
+_VT_BOOL, _VT_UI4, _VT_LPWSTR, _VT_BLOB = 11, 19, 31, 65
 _ACTIVE = 0x1  # DEVICE_STATE_ACTIVE
 _RAW = 0x1  # AUDCLNT_STREAMOPTIONS_RAW: none of the device's effects (AudioCategory_Other: no ducking of other apps)
 _PRIVATE = {3, 5, 6}  # Headphones, Headset, Handset: what they play, no microphone hears
@@ -395,7 +397,7 @@ def _activate(device, iid: _GUID = _IID_AUDIO_CLIENT) -> c_void_p:
 
 
 def _property(device, key: tuple):
-    """A device property: a number, a bool, a string, or None (not set, or another kind)."""
+    """A device property: a number, a bool, a string, bytes (a blob), or None (not set, or another kind)."""
     store, value = c_void_p(), _PropVariant()
     try:
         _method(device, 4, wintypes.DWORD, POINTER(c_void_p))(0, byref(store))  # OpenPropertyStore(STGM_READ)
@@ -407,6 +409,8 @@ def _property(device, key: tuple):
         if value.vt == _VT_LPWSTR:  # its pointer is the union's first member, at offset 8
             text = c_void_p.from_buffer(value, 8).value
             return ctypes.wstring_at(text) if text else ""
+        if value.vt == _VT_BLOB:
+            return ctypes.string_at(value.pointer, value.value) if value.pointer else b""
         return None
     except OSError:
         return None
@@ -417,6 +421,21 @@ def _property(device, key: tuple):
 
 def _name(device) -> str:
     return _property(device, _FRIENDLY_NAME) or ""
+
+
+def last_bit(fmt: bytes | None) -> float:
+    """The level of the last bit of a device's own format (a WAVEFORMATEX or WAVEFORMATEXTENSIBLE as bytes), 1.0 being
+    full scale: 2 ** -15 for 16-bit sound; 0.0 for float sound, or when the format isn't known."""
+    if not fmt or len(fmt) < 16:
+        return 0.0
+    tag, bits = struct.unpack_from("<H", fmt)[0], struct.unpack_from("<H", fmt, 14)[0]
+    if tag == 0xFFFE and len(fmt) >= 40:  # WAVEFORMATEXTENSIBLE: the bits that count, and the real format
+        if fmt[24:40] == _FLOAT:
+            return 0.0
+        bits = struct.unpack_from("<H", fmt, 18)[0] or bits
+    elif tag != 1:  # not integer PCM
+        return 0.0
+    return 2.0 ** -(bits - 1) if 8 <= bits <= 32 else 0.0
 
 
 def _output_muted(enumerator) -> bool:
@@ -532,6 +551,7 @@ class _Capturing:
     """What both kinds of capture stream share: reading packets, following the default device, closing (call from one
     thread, with COM set up there)."""
     hears_self = False  # Rflow's own voice can be in what it captures
+    floor = 0.0  # the last bit of the format the output itself plays (last_bit): its mix carries it as noise
     flow, role = E_RENDER, E_CONSOLE  # the default device it follows
     rate = channels = bits = block = 0
     is_float = False
@@ -604,6 +624,8 @@ class _Stream(_Capturing):
             self.enumerator = _enumerator()
             self.device = _default_device(self.enumerator, flow, role)
             self.device_id = _device_id(self.device)
+            if flow == E_RENDER:
+                self.floor = last_bit(_property(self.device, _DEVICE_FORMAT))
             self._open()
             self._start()
         except Exception:
@@ -763,6 +785,7 @@ CARRIES = 0.5  # and over this share (3 dB under at most): it carries it again (
 BUFFERED = 4.0  # seconds of the whole mix kept while process loopback is used, sent on a switch
 WHOLE_EVERY = 0.05  # seconds between reads of the mix while it's only compared (its buffer holds 0.2 s): less work
 WHOLE_SOUND = 1e-5  # a peak above this (-100 dBFS) is something playing; x the factor the Ducker lowers the apps by
+NOISE = 3.0  # x the last bit of the format the output plays: the mix at or under this is the output's own noise
 VOICE_MARGIN = 0.5  # seconds after Rflow's own voice was last queued during which the whole mix may still carry it
 _voice_until = 0.0  # time.monotonic() until which Rflow's own voice may be playing (Player.play)
 _voice_device = ""  # the output Rflow's voice plays on (Player), "" before it has played
@@ -842,6 +865,12 @@ class _Checked:
     ratio, so it holds at any volume (the apps lowered while the voice speaks are lowered in both); the gap between the
     two and a fresh window after each switch keep it from flapping. A notification heard early no longer ends the check.
 
+    The mix's own noise isn't sound (#265). An output that plays 16-bit sound (the owner's Surface, 2026-11-06) carries
+    its last bit in the mix while any stream is open, a paused video or Rflow's own voice: peak and RMS -90 dBFS, with
+    process loopback at digital silence. Counted as sound, every pause of WHOLE_AFTER turned the capture to the mix (37
+    times in a 27-minute session), where Rflow's voice is heard and the meeting silenced while it speaks. So a read of
+    the mix counts as sound only above NOISE x that bit (`whole.floor`).
+
     While process loopback is used, the last BUFFERED seconds of the mix it didn't carry are kept (16 kHz, as sent):
     on a switch they are sent first, so the start of the call isn't lost; what process loopback carried itself (a ding)
     isn't kept, so it isn't sent twice. On the mix Rflow's voice is in it when it plays on that same output
@@ -852,6 +881,7 @@ class _Checked:
         self.rate, self.channels, self.bits, self.is_float = main.rate, main.channels, main.bits, main.is_float
         self.device_id, self.note = getattr(main, "device_id", ""), getattr(main, "note", "")
         self._resample = Resampler(whole.rate, main.rate)
+        self._noise = NOISE * getattr(whole, "floor", 0.0)  # the mix at or under this: the output's own last bit
         self._bins: dict[int, list[float]] = {}  # bin -> [process loopback's energy, the mix's, seconds of sound in each]
         self._kept: deque[np.ndarray] = deque()  # the mix process loopback didn't carry, BUFFERED seconds at most
         self._kept_len = 0
@@ -905,7 +935,7 @@ class _Checked:
         cell[1] += _energy(b)
         floor = WHOLE_SOUND * lowering.factor()  # the apps lowered while the voice speaks are as quiet in both
         cell[2] += len(a) / self.rate if _peak(a) > floor else 0.0
-        cell[3] += len(b) / self.rate if _peak(b) > floor else 0.0
+        cell[3] += len(b) / self.rate if _peak(b) > max(floor, self._noise) else 0.0
 
     def _decide(self, now: float, back: bool) -> bool:
         first = int(now // CHECK_BIN) - CHECK_WINDOW / CHECK_BIN
