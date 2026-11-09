@@ -1,19 +1,23 @@
 """Render Rflow's demo videos from its parts:
 
-- docs/media/demo.mp4, the tour (1920x1080), and its dictation scene as the README's GIF (docs/media/demo.gif);
+- docs/media/demo.mp4, the tour (1920x1080, about a minute: every feature), and its dictation scene as the README's GIF
+  (docs/media/demo.gif);
 - docs/media/demo-linkedin.mp4, the cut for LinkedIn (1080x1350, portrait). LinkedIn plays videos muted and people
   decide in two seconds, so it starts with the text being dictated, big captions say what happens, each feature gets a
   short clip, and the end card comes last.
 
 The pill, the Translate popup, the translation bar and the window are the app's own widgets with example data, drawn off
 the screen like scripts/make_site_screenshots.py: nothing appears, takes focus, presses keys or touches the clipboard.
-The editor, the meeting and the captions around them are painted here, in the app's colours and fonts. The frames are
+The editor, the meeting and the captions around them are painted here, in the app's colours and fonts. The newer
+features (the wake word, the Text tab, the Screen translator, Meeting mode) are stretches of their website clips
+(scripts/make_feature_clips_c.py and _d.py), imported and shown as a screen. The frames are
 composed with QPainter (30 fps) and encoded with PyAV (H.264, no sound). Each video is made in a process of its own (the
 portrait cut draws Rflow's parts larger, so Qt starts at another scale); writing the GIF needs Pillow, which Rflow
 itself doesn't use, so it's added only for this run:
 
   uv run --no-sync --with pillow python scripts/make_demo_video.py [demo | linkedin]
 """
+import importlib
 import math
 import os
 import shutil
@@ -477,20 +481,6 @@ def translate_popups() -> tuple[list[QImage], QImage]:
     return busy, popup.grab().toImage()
 
 
-@lru_cache(maxsize=1)
-def models_window() -> QImage:
-    """The real window on AI & models: the setups and what each costs a month (narrow in the portrait cut: the setups
-    two by two)."""
-    from sst import window as w
-    window = w.MainWindow(site.preview())
-    window.apply_theme("dark")
-    window.resize(*((1000, 680) if STAGE is WIDE else (780, 1000)))
-    window.set_status("Ready: hold Ctrl+Win · cleanup: gemini-3.5-flash-lite", True)
-    window.show_page("models")
-    settle()
-    return window.grab().toImage()
-
-
 def line_events(start: float, end: float, heard: str, said: str) -> list:
     """A line of a meeting as the translation bar gets it: the words heard as they come, the translation close behind,
     then the finished line."""
@@ -604,7 +594,7 @@ class Title(Scene):
             draw_logo(p, 640, 228, mix(132, 144, k))
         for start, y, text, px, weight, colour in [(0.25, 372, "Rflow", 64, 600, T["text"]),
                                                    (0.5, 440, "Speak anywhere. It types.", 30, 500, T["text"]),
-                                                   (0.75, 492, "Free, open-source dictation for Windows", 19, 500,
+                                                   (0.75, 492, "Dictation, translation and meeting notes for Windows", 19, 500,
                                                     T["text2"])]:
             k = ramp(t, start, 0.55)
             with faded(p, k):
@@ -705,7 +695,8 @@ class Live(Scene):
     captions = [(0.15, "Live translation: meetings translated as people speak")]
     CALL = QRectF(150, 24, 980, 552)
 
-    def __init__(self):
+    def __init__(self, **changes):
+        super().__init__(**changes)
         self.feed = Feed([e for line in LIVE_LINES for e in line_events(*line)], (760, 240))
 
     def draw(self, p, t):
@@ -732,7 +723,9 @@ class Meeting(Scene):
     SPLIT = 9.95  # the screen share beside the screen
     FRAME = QRectF(20, 168, 500, 482)  # the meeting and the bar: what the screen shows
 
-    def __init__(self):
+    def __init__(self, **changes):
+        super().__init__(**changes)
+
         def speaking(on: bool):
             return lambda bar: bar.set_speaking(on)
         events = [e for line in MEETING_LINES for e in line_events(*line)]
@@ -857,13 +850,73 @@ class WindowShot(Scene):
         p.drawImage(QRectF(0, STAGE.sh - band.height() / STAGE.s, STAGE.sw, band.height() / STAGE.s), band)
 
 
-class Setups(WindowShot):
-    duration = 5.0
-    captions = [(0.15, "Pick a setup. See what it costs.")]
-    start, end = (500, 340, 0.85, 640, 312), (545, 290, 1.1, 640, 331)  # from the whole window to the setups
+class Clip(Scene):
+    """A stretch of a feature clip (scripts/make_feature_clips_c.py and _d.py: their CLIPS, name -> (seconds, frame)),
+    from `start`, shown as a screen: in the tour above the caption, in the portrait cut under it. The clip draws itself
+    (its own stage, its own widgets): this only places its frames. `crop`, in fractions of the clip's frame, shows a part
+    of it: the portrait cut's narrow screen would make the whole 16:9 frame too small to read on a phone."""
+    start = 0.0
+    crop = QRectF(0, 0, 1, 1)
+
+    def __init__(self, script: str, name: str, **changes):
+        super().__init__(**changes)
+        self.script, self.name = script, name
+
+    def draw(self, p, t):
+        _, frame = clips(self.script)[self.name]
+        image = frame(self.start + t)
+        c = self.crop
+        source = QRectF(c.x() * image.width(), c.y() * image.height(), c.width() * image.width(), c.height() * image.height())
+        width = 1050 if STAGE is WIDE else STAGE.sw - 40  # in the tour, 82% of the stage: the caption stays clear
+        rect = QRectF(0, 0, width, width * source.height() / source.width())
+        rect.moveCenter(QPointF(STAGE.sw / 2, 311 if STAGE is WIDE else STAGE.sh / 2 + 40))
+        theme.outer_shadow(p, rect, 16, [(0, 18, 44, theme.rgba(0, 0, 0, .55))], STAGE.s)
+        p.save()
+        p.setClipPath(theme.rounded(rect, 16))
+        p.drawImage(rect, image, source)
+        p.restore()
+        p.setPen(QPen(theme.rgba(255, 255, 255, .10), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 16, 16)
+
+
+@lru_cache(maxsize=4)
+def clips(script: str) -> dict:
+    """A clip script's CLIPS, imported when first shown (after Qt has started: the script uses Rflow's widgets)."""
+    return importlib.import_module(script).CLIPS
+
+
+class Home(WindowShot):
+    """The real window's Home: the month's usage card in view, zoomed in, then the theme switched to light."""
+    duration = 5.5
+    captions = [(0.15, "See what you spend, in light or dark")]
+    start, end = (500, 330, 0.85, 640, 318), (600, 360, 1.3, 640, 300)  # from the whole window to the usage card
+    MOVE, LIGHT = (0.3, 2.6), (3.0, 0.8)
 
     def image(self, t):
-        return models_window()
+        dark, light = home_window("dark"), home_window("light")
+        k = ramp(t, *self.LIGHT)
+        if k <= 0 or k >= 1:
+            return light if k >= 1 else dark
+        image = dark.copy()
+        p = QPainter(image)
+        p.setOpacity(k)
+        p.drawImage(0, 0, light)
+        p.end()
+        return image
+
+
+@lru_cache(maxsize=2)
+def home_window(theme_name: str) -> QImage:
+    """The real window on Home, with a month of example use on its usage card (make_site_screenshots.spend)."""
+    from sst import window as w
+    window = w.MainWindow(site.preview())
+    window.apply_theme(theme_name)
+    window.resize(1000, 680)
+    window.set_status("Ready: hold Ctrl+Win · cleanup: gemini-3.5-flash-lite", True)
+    window.show_page("home")
+    settle()
+    return window.grab().toImage()
 
 
 class End(Scene):
@@ -913,28 +966,42 @@ def button(p: QPainter, label: str, cx: float, cy: float, px: float, height: flo
 # ---------------------------------------------------------------- the videos
 
 def tour() -> list[Scene]:
-    return [Title(), Dictation(), Transform(), Translate(), Live(), Setups(), End()]
+    """About a minute, every feature: voice typing (with the keys, then the wake word), Text Transform by one word,
+    translating selected text, typed text and the screen, live translation, Meeting mode and its minutes, the costs."""
+    c, d = "make_feature_clips_c", "make_feature_clips_d"
+    return [
+        Title(),
+        Dictation(duration=8.0, HIDE=7.3),
+        Clip(d, "wake", duration=6.8, start=1.0, captions=[(0.15, "Or say your wake word: no keys at all")]),
+        Transform(captions=[(0.15, "Select text and say “concise”")]),
+        Translate(duration=5.0),
+        Clip(c, "text", duration=5.5, start=1.5, captions=[(0.15, "Or type it on Translate's Text tab")]),
+        Clip(c, "screen", duration=6.8, start=0.6, captions=[(0.15, "Ctrl+Alt+S translates anything on the screen")]),
+        Live(captions=[(0.15, "Live translation: meetings and videos, as people speak")]),
+        Clip(d, "meeting", duration=5.5, start=3.0, captions=[(0.15, "Meeting mode translates and records the meeting")]),
+        Clip(d, "meeting", duration=5.4, start=10.8, captions=[(0.15, "Then it writes the minutes for you")]),
+        Home(),
+        End(),
+    ]
 
 
 def linkedin() -> list[Scene]:
-    """About 12 s of voice typing from the first frame, 12 s of live translation, the setups' costs, the end card."""
+    """About 12 s of voice typing from the first frame, the screen translated, 10 s of live translation, a meeting's
+    minutes, the end card."""
     return [
         Dictation(duration=4.3, text=site.EXAMPLES[1][1], KEYS=-1, DOWN=-1.6, UP=1.25, TYPED=1.55, HIDE=3.0,
                   SPEECH=(-1.4, 1.1), captions=[(-1, "Hold Ctrl + Win"), (0.7, "Speak"), (1.5, "It types. Anywhere.")]),
         Transform(duration=4.2, SELECT=0.05, KEYS=0.35, DOWN=0.55, UP=1.85, DONE=2.6, SPEECH=(0.75, 1.65),
-                  captions=[(-1, "Make it concise")]),
+                  captions=[(-1, "Say “concise”")]),
         Translate(duration=3.9, SELECT=0.05, KEYS=0.5, CTRL=0.6, FIRST=0.8, SECOND=1.08, KEYS_OFF=1.3, OPEN=1.45, DONE=2.1,
                   captions=[(-1, "Translate any text")]),
-        Meeting(),
-        brief_setups(),
+        Clip("make_feature_clips_c", "screen", duration=4.2, start=2.8, crop=QRectF(0.12, 0.05, 0.5, 0.7),
+             captions=[(-1, "Translate the screen")]),
+        Meeting(duration=9.6),
+        Clip("make_feature_clips_d", "meeting", duration=5.0, start=11.6, crop=QRectF(0.18, 0.03, 0.64, 0.75),
+             captions=[(-1, "Then the minutes, written for you")]),
         EndCard(),
     ]
-
-
-def brief_setups() -> Setups:
-    """The setups, briefly: the cards two by two in the narrow window, their monthly costs in view."""
-    return Setups(duration=2.1, captions=[(-1, "See the cost before you choose")], view=QRectF(20, 168, 500, 430),
-                  start=(427, 380, 0.742, 270, 383), end=(427, 380, 0.752, 270, 383), MOVE=(0.0, 2.1))
 
 
 # ---------------------------------------------------------------- frames and files
