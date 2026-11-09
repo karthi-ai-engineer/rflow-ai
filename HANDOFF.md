@@ -12,6 +12,17 @@ _Last updated: 2026-11-09_
 ## Start here (a new session, or the owner's other laptop)
 
 **Where things stand (2026-11-06):**
+- **Phase 55, the website for 2.8** (#275, the owner's words of 2026-11-09: Rflow "is not a dictation application", it's
+  for "ppl who in japanese work but dont know japanese"; their choices: the headline "Work in any language.", English only,
+  a hero showing languages at work). `site/index.html`: who it's for, See it work with the seven current clips, then
+  Understand (live translation, Screen translator, Translate), Meeting mode (an example minutes.md as a card), Speak and
+  write, pricing per feature (voice typing $1.05/month, live $2.20/hour, minutes $0.26/hour, translations under 1¢, from
+  `sst.costs`, `sst.setups` and `sst.meeting.minutes.estimate`), the 1-minute tour and the FAQ. Light and dark: the
+  tokens follow Windows unless the header's switch (`data-theme` on `<html>`, `localStorage` "rflow-theme", set by a
+  script in `<head>` before drawing) says otherwise; `.only-dark` / `.only-light` screenshots. The lens (`lens.js`)
+  plays a meeting, a screen, a Japanese reply and voice typing (`split` for speech without spaces, `out_lang`). The
+  link preview says it too (`make_brand.og()`). Checked in headless Edge at 1366 px and in a 390 px frame (Edge won't
+  go under 496 px wide), both themes, and with the switch against Windows' setting.
 - **Phase 54, the demo media for 2.8** (#273, the owner's request of 2026-11-09: silent videos with captions, a tour of
   about a minute, a clip of its own for each new feature). Screenshots from 2.8.2 (`scripts/make_site_screenshots.py`:
   Home's usage card filled by `spend()`, `translate.png` and `translate-light.png` on the Text tab, `meeting.png`); new
@@ -19,8 +30,8 @@ _Last updated: 2026-11-09_
   (`_d.py`), each script's `CLIPS` (name -> seconds, frame function) importable; `clip-live` with the cost saver and copy,
   `clip-transform` with one-word commands; the tour (`docs/media/demo.mp4` and `site/media/demo.mp4`, 67 s: the newer
   features are stretches of their clips, `Clip` in `make_demo_video.py`, and Home's usage card going light) and the
-  LinkedIn cut (34 s, clips cropped to stay readable); the README's tour GIF with Meeting mode and the Text tab. Not yet
-  on the website: its page still says "Rflow in 40 seconds" and shows five clips (the next phase: the website).
+  LinkedIn cut (34 s, clips cropped to stay readable); the README's tour GIF with Meeting mode and the Text tab. The website
+  uses them since phase 55.
 - **Rflow 2.8.2** (2026-11-06) = **phase 53, the spoken translation in Gemini's own voice** (#264; the owner: "if
   Gemini says the translation in its own voice then we will just use it. We don't want the Ryan"). Measured first on
   the Surface, then three changes. See **The spoken translation in Gemini's own voice**.
