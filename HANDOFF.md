@@ -7,11 +7,20 @@ Rach_flow or Rach_Darling_Flow:** installed copies up to 2.3.0 (and up to 1.6.0)
 which GitHub redirects only while they stay free (checked after each rename: the old API names answer 301 and
 reach the latest release). Locally: `git remote set-url origin https://github.com/karthi-ai-engineer/rflow-ai.git`.
 
-_Last updated: 2026-11-06_
+_Last updated: 2026-11-09_
 
 ## Start here (a new session, or the owner's other laptop)
 
 **Where things stand (2026-11-06):**
+- **Phase 54, the demo media for 2.8** (#273, the owner's request of 2026-11-09: silent videos with captions, a tour of
+  about a minute, a clip of its own for each new feature). Screenshots from 2.8.2 (`scripts/make_site_screenshots.py`:
+  Home's usage card filled by `spend()`, `translate.png` and `translate-light.png` on the Text tab, `meeting.png`); new
+  clips with posters: `clip-screen` and `clip-text` (`scripts/make_feature_clips_c.py`), `clip-meeting` and `clip-wake`
+  (`_d.py`), each script's `CLIPS` (name -> seconds, frame function) importable; `clip-live` with the cost saver and copy,
+  `clip-transform` with one-word commands; the tour (`docs/media/demo.mp4` and `site/media/demo.mp4`, 67 s: the newer
+  features are stretches of their clips, `Clip` in `make_demo_video.py`, and Home's usage card going light) and the
+  LinkedIn cut (34 s, clips cropped to stay readable); the README's tour GIF with Meeting mode and the Text tab. Not yet
+  on the website: its page still says "Rflow in 40 seconds" and shows five clips (the next phase: the website).
 - **Rflow 2.8.2** (2026-11-06) = **phase 53, the spoken translation in Gemini's own voice** (#264; the owner: "if
   Gemini says the translation in its own voice then we will just use it. We don't want the Ryan"). Measured first on
   the Surface, then three changes. See **The spoken translation in Gemini's own voice**.
