@@ -41,7 +41,7 @@
 /* What was said: words drift in from the left, a little messy; fillers dimmed, then struck */
 .lens-say, .lens-box { font-size: 14px; line-height: 1.65; }
 .lens-say { color: var(--t2); align-items: center; }
-.lens-say [lang="ja"] { font-family: "Geist", "Yu Gothic UI", "Yu Gothic", Meiryo, "Hiragino Sans", "Noto Sans JP", sans-serif; line-height: 1.8; }
+.lens-say [lang="ja"], .lens-text [lang="ja"] { font-family: "Geist", "Yu Gothic UI", "Yu Gothic", Meiryo, "Hiragino Sans", "Noto Sans JP", sans-serif; line-height: 1.8; }
 .lens .w { display: inline-block; position: relative; margin: 0 .07em; opacity: 0; transform: translate(-16px, var(--dy)) rotate(var(--r));
   text-decoration: underline 1.5px transparent; text-underline-offset: 4px;
   transition: opacity .7s var(--ease), transform .9s var(--ease), color .6s var(--ease), text-decoration-color .6s var(--ease); }

@@ -3,30 +3,33 @@
    [data-lens]); without JavaScript lens.css shows the first example still. Pauses off-screen and in hidden tabs. */
 (function () {
   "use strict";
-  // say: the words; _filler, !misheard word, ^number, *name kept (sel: text selected or copied, not spoken).
-  // clean: the text typed, {highlighted}. chips: colour token, then the label.
+  // say: the words; _filler, !misheard word, ^number, *name kept (sel: text selected or copied, not spoken; split: speech
+  // without spaces, in the phrases it arrives in, joined with nothing). clean: the text typed, {highlighted}; out_lang: its
+  // language. chips: colour token, then the label.
   var DICT = '<span>Hold <kbd>Ctrl</kbd>+<kbd>Win</kbd> and speak</span>';
   var EX = [
-    {tab: "Dictation", mode: "Dictation", hint: DICT, cap: "You say", out: "At the cursor", done: "Typed", wave: 1,
+    {tab: "Meeting", mode: "Live translation", hint: "<span><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>L</kbd> in any call</span>",
+      cap: "They say", out: "On the bar", done: "As they speak", wave: 1, lang: "ja", split: "|",
+      say: "来週の|リリースは|木曜日に|延期します。|" +
+        "資料は|金曜日までに|お願いします。",
+      clean: "We’re moving next week’s release to {Thursday}. Please send the materials by {Friday}.",
+      chips: ["ir:Japanese → English", "vi:Read aloud, if you like"]},
+    {tab: "Screen", mode: "Screen translator", hint: "<span><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd> over any app</span>",
+      cap: "On screen", out: "In its place", done: "Translated in place", lang: "ja", sel: 1,
+      say: "申請は月末までに提出してください。" +
+        "領収書の画像を添付する必要があります。",
+      clean: "Please submit by the {end of the month}. A photo of each {receipt} is required.",
+      chips: ["ir:Japanese → English", "okc:Same place, same colours"]},
+    {tab: "Reply", mode: "Text Transform", hint: "<span>Select, then say <b>“Japanese Teams message”</b></span>",
+      cap: "You wrote", out: "Ready to send", done: "Replaced", wave: 1, sel: 1, out_lang: "ja",
+      say: "Thursday works for me. I’ll send the approval request today.",
+      clean: "木曜日で問題ありません。" +
+        "{本日中}に承認依頼をお送りします。",
+      chips: ["vi:English → Japanese", "okc:Polite, for Teams"]},
+    {tab: "Dictation", mode: "Voice typing", hint: DICT, cap: "You say", out: "At the cursor", done: "Typed", wave: 1,
       say: "_um so tell *Priya the !post !grass migration is _uh done and _like ^twenty ^five ^percent of the users are on it",
       clean: "Tell {Priya} the {PostgreSQL} migration is done, and {25%} of the users are on it.",
-      chips: ["vi:Filler removed", "ir:Your word: PostgreSQL", "wr:Number: 25%", "okc:Name kept: Priya"]},
-    {tab: "Numbers", mode: "Dictation", hint: DICT, cap: "You say", out: "At the cursor", done: "Typed", wave: 1,
-      say: "the budget is ^twenty ^five ^thousand ^dollars and the review is at ^three ^thirty ^pm",
-      clean: "The budget is {$25,000} and the review is at {3:30 PM}.",
-      chips: ["wr:Money: $25,000", "wr:Time: 3:30 PM"]},
-    {tab: "Concise", mode: "Text Transform", hint: "<span>Select, then say <b>\u201cmake it concise\u201d</b></span>",
-      cap: "Selected", out: "In its place", done: "Replaced", wave: 1, sel: 1,
-      say: "I checked the deployment and everything looks good, but we still have one issue with the database migration, " +
-        "and I think we should fix that before production.",
-      clean: "Deployment looks good, but the database migration issue needs to be fixed before production.",
-      chips: ["vi:Make it concise", "okc:Facts kept"]},
-    {tab: "Translate", mode: "Translate", hint: "<span>Select, then <kbd>Ctrl</kbd>+<kbd>C</kbd> twice</span>",
-      cap: "Copied", out: "Popup", done: "Copy or Replace", lang: "ja", sel: 1,
-      say: "\u6765\u9031\u306e\u5b9a\u4f8b\u4f1a\u8b70\u306f\u6728\u66dc\u65e5\u306e\u5348\u5f8c3\u6642\u304b\u3089\u306b" +
-        "\u5909\u66f4\u306b\u306a\u308a\u307e\u3057\u305f\u3002",
-      clean: "Next week\u2019s regular meeting has moved to Thursday at {3 PM}.",
-      chips: ["ir:Japanese \u2192 English"]}
+      chips: ["vi:Filler removed", "ir:Your word: PostgreSQL", "wr:Number: 25%", "okc:Name kept: Priya"]}
   ];
   var CHECK = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
   var KIND = {_: "f", "!": "x", "^": "n", "*": "k"};
@@ -66,13 +69,13 @@
     var X = EX.map(function (d) {  // this lens's own copy: a page may have more than one (lens-preview.html)
       var ex = Object.create(d), p = el("p");
       if (ex.lang) p.lang = ex.lang;
-      ex.w = (ex.sel ? [ex.say] : ex.say.split(" ")).map(function (t, i) {
+      ex.w = (ex.sel ? [ex.say] : ex.say.split(ex.split || " ")).map(function (t, i) {
         var k = ex.sel ? "s" : KIND[t[0]], w = el("span", "w" + (k ? " " + k : ""));
         w.textContent = k && !ex.sel ? t.slice(1) : t;
         // a little messy, the same way every time
         w.style.cssText = "--dx:" + (Math.sin(i * 1.3) * .8).toFixed(1) + "px;--dy:" + (Math.sin(i * 2.7) * 2).toFixed(1) +
           "px;--r:" + (Math.sin(i * 4.1) * .7).toFixed(2) + "deg";
-        if (i) p.appendChild(document.createTextNode(" "));
+        if (i && !ex.split) p.appendChild(document.createTextNode(" "));
         return p.appendChild(w);
       });
       ex.p = p;
@@ -81,6 +84,7 @@
       });
       ex.len = ex.segs.reduce(function (n, s) { return n + s.t.length; }, 0);
       ex.text = el("p", "", typed(ex.segs, ex.len));
+      if (ex.out_lang) ex.text.lang = ex.out_lang;
       ex.chipBox = el("div");
       ex.c = ex.chips.map(function (c) {
         var at = c.indexOf(":"), chip = el("span", "c");
@@ -149,7 +153,7 @@
         if (j !== i) ex.w.concat(ex.c).forEach(function (e) { e.classList.remove("in"); });
       });
       var ex = X[i];
-      view.setAttribute("aria-label", label + " Example, " + ex.tab + ": \u201c" + ex.say.replace(/[_!^*]/g, "") +
+      view.setAttribute("aria-label", label + " Example, " + ex.tab + ": \u201c" + ex.say.replace(/[_!^*|]/g, "") +
         "\u201d becomes \u201c" + ex.clean.replace(/[{}]/g, "") + "\u201d");
       flag("lens--still", still);
       draw(still ? 1e9 : 0);
