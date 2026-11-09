@@ -121,6 +121,114 @@
 .lens .c.in { opacity: 1; transform: none; }
 .lens .c::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--k); box-shadow: 0 0 5px var(--k); }
 
+/* Two examples are scenes, not words through the lens: a call with Rflow's translation bar, and a Japanese chat under the
+   Screen translator's frame. The lens and the scenes share one place, so the card keeps one size. */
+.lens-body { display: grid; }
+.lens-body > * { grid-area: 1 / 1; align-self: center; }
+.lens-stage, .lens-scenes { transition: opacity .45s var(--ease), visibility 0s; }
+.lens.is-scene .lens-stage, .lens:not(.is-scene) .lens-scenes { opacity: 0; visibility: hidden; transition: opacity .45s var(--ease), visibility 0s .45s; }
+.sc-win { position: relative; overflow: hidden; border-radius: 14px; background: var(--wl); box-shadow: var(--in); font-size: 12px; line-height: 1.4; }
+.sc-top { display: flex; align-items: center; gap: 10px; height: 26px; padding: 0 12px; border-bottom: 1px solid var(--ln); color: var(--t3);
+  font-size: 11.5px; font-weight: 500; white-space: nowrap; }
+.sc-dots { display: flex; gap: 5px; }
+.sc-dots i { width: 7px; height: 7px; border-radius: 50%; background: color-mix(in srgb, var(--t3) 35%, transparent); }
+.sc-rec { margin-left: auto; display: flex; align-items: center; gap: 5px; color: var(--lv); font-size: 10.5px; font-weight: 600;
+  letter-spacing: .06em; text-transform: uppercase; }
+.sc-rec i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: lens-dot 1.6s var(--ease) infinite; }
+.sc-av { flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; font-size: 10.5px; font-weight: 600;
+  color: var(--k); background: color-mix(in srgb, var(--k) 18%, transparent); }
+.sc-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 14px; min-height: 28px; }
+.lens .sc-cur { position: absolute; width: 18px; height: 18px; fill: var(--t1); stroke: var(--wl); stroke-width: 1.5; filter: drop-shadow(0 2px 3px rgba(0,0,0,.35)); }
+
+/* The call: Yui's tile and three others; what you hear on her tile; Rflow's bar floating over the bottom */
+.sc-call { display: grid; grid-template-columns: 1.7fr 1fr; grid-template-rows: repeat(3, 1fr); gap: 6px; height: 166px; padding: 8px; }
+.sc-tile { position: relative; display: grid; place-items: center; min-width: 0; border-radius: 10px; background: var(--sf); box-shadow: var(--eg); }
+.sc-tile em { position: absolute; left: 8px; top: 5px; font-style: normal; font-size: 10.5px; color: var(--t3); white-space: nowrap; }
+.sc-tile .sc-av { width: 24px; height: 24px; font-size: 9.5px; }
+.sc-tile.sc-talk { grid-row: 1 / 4; align-content: start; justify-items: center; gap: 8px; padding: 18px 10px 0; }
+.sc-talk .sc-av { width: 42px; height: 42px; font-size: 13px; transition: box-shadow .3s var(--ease); }
+.sc-talk.is-talk .sc-av { box-shadow: 0 0 0 2px var(--okc), 0 0 0 6px color-mix(in srgb, var(--okc) 22%, transparent); }
+.sc-bub { display: grid; max-width: 100%; padding: 4px 10px; border-radius: 10px; background: var(--wl); box-shadow: var(--in); color: var(--t2);
+  font-size: 12.5px; text-align: center; opacity: 0; transition: opacity .4s var(--ease); }
+.sc-bub.on { opacity: 1; }
+.sc-bub > span { grid-area: 1 / 1; visibility: hidden; }
+.sc-bub > span.on { visibility: visible; }
+.sc-bub s, .sc-l s { text-decoration: none; visibility: hidden; }
+.sc-bub[lang="ja"], .sc-win [lang="ja"] { font-family: "Geist", "Yu Gothic UI", "Yu Gothic", Meiryo, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+/* what you hear: the voice in Japanese, then Gemini's in English once Speak the translation is on */
+.sc-heard { position: absolute; right: 8px; top: 5px; display: flex; align-items: center; gap: 5px; color: var(--t3); font-size: 10.5px; font-weight: 600; }
+.lens .sc-heard svg, .lens .sc-speak svg { width: 14px; height: 14px; stroke: currentColor; stroke-width: 2; }
+.sc-heard b { font-weight: 600; }
+.sc-heard::before { content: "You hear"; font-weight: 500; }
+.sc-heard b + b, .sc-en .sc-heard b:first-of-type { display: none; }
+.sc-en .sc-heard b + b { display: inline; }
+.sc-en .sc-heard { color: var(--okc); }
+.sc-eq { display: flex; align-items: center; gap: 2px; height: 12px; }
+.sc-eq i { width: 2px; height: 3px; border-radius: 1px; background: currentColor; opacity: .5; }
+.sc-voice .sc-eq i { opacity: 1; animation: lens-bar .7s var(--ease) infinite alternate; }
+
+/* Rflow's translation bar: dark in both themes, as captions over a call are */
+.sc-bar { position: relative; z-index: 1; width: min(94%, 470px); margin: -14px auto 10px; padding: 7px 12px 8px; border-radius: 12px;
+  background: rgba(30, 33, 41, .96); color: #ECEEF3; border: 1px solid rgba(255,255,255,.1); box-shadow: 0 10px 26px rgba(0,0,0,.32); }
+.sc-bar-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 3px; color: #8A91A1;
+  font-size: 10.5px; font-weight: 600; white-space: nowrap; }
+.sc-from { display: flex; align-items: center; gap: 6px; }
+.sc-from i { width: 6px; height: 6px; border-radius: 50%; background: #8C9DFF; box-shadow: 0 0 6px #8C9DFF; }
+.sc-speak { position: relative; display: flex; align-items: center; gap: 6px; transition: color .3s; }
+.sc-on .sc-speak { color: #ECEEF3; }
+.sc-switch { position: relative; width: 24px; height: 14px; border-radius: 99px; background: rgba(255,255,255,.14); transition: background .25s; }
+.sc-switch::after { content: ""; position: absolute; left: 2px; top: 2px; width: 10px; height: 10px; border-radius: 50%; background: #A6ACBA;
+  transition: transform .25s var(--ease), background .25s; }
+.sc-on .sc-switch { background: #5BE3A6; }
+.sc-on .sc-switch::after { transform: translateX(10px); background: #0D0F14; }
+.sc-speak .sc-cur { right: -6px; top: 8px; opacity: 0; transform: translate(26px, 22px); transition: opacity .3s, transform .6s var(--ease); }
+.sc-aim .sc-speak .sc-cur { opacity: 1; transform: none; }
+.sc-l { font-size: 13px; line-height: 1.45; transition: opacity .4s var(--ease); }
+.sc-l.old { opacity: .55; }
+.sc-l .lens-caret { opacity: 1; background: #8C9DFF; }
+
+/* The chat, and the Screen translator's frame moved onto it: a scan, then English in the same place */
+.sc-body { display: flex; }
+.sc-rail { flex: none; display: flex; flex-direction: column; align-items: center; gap: 9px; width: 38px; padding-top: 12px; border-right: 1px solid var(--ln); }
+.sc-rail i { width: 16px; height: 16px; border-radius: 5px; background: color-mix(in srgb, var(--t3) 22%, transparent); }
+.sc-rail i:first-child { background: color-mix(in srgb, var(--vi) 55%, transparent); }
+.sc-msgs { position: relative; flex: 1; min-width: 0; display: grid; gap: 9px; margin: 12px 14px 14px; }
+.sc-msg { display: flex; align-items: flex-start; gap: 9px; }
+.sc-msg em { display: block; margin-bottom: 2px; font-style: normal; font-size: 10.5px; color: var(--t3); }
+.sc-msg p { display: inline-block; padding: 4px 10px; border-radius: 4px 10px 10px 10px; background: var(--sf); box-shadow: var(--eg); color: var(--t1); font-size: 13px; }
+.sc-x { display: inline-grid; }
+.sc-x > * { grid-area: 1 / 1; border-radius: 3px; transition: opacity .35s var(--ease); }
+.sc-x > .sc-en { opacity: 0; }
+.tr .sc-x > [lang] { opacity: 0; }
+.tr .sc-x > .sc-en { opacity: 1; animation: sc-flash 1.4s var(--ease); }
+@keyframes sc-flash { from { background: color-mix(in srgb, var(--ir) 32%, transparent); } to { background: transparent; } }
+.sc-frame { position: absolute; inset: -7px -8px; border: 2px solid var(--ir); border-radius: 10px; pointer-events: none;
+  box-shadow: 0 0 22px color-mix(in srgb, var(--ir) 28%, transparent); opacity: 0; transform: translate(42%, 70%) scale(.4); transform-origin: 100% 100%;
+  transition: transform 1.1s cubic-bezier(.3,.9,.3,1), opacity .4s var(--ease); }
+.sc-go .sc-frame { opacity: 1; transform: none; }
+.sc-glass { position: absolute; inset: 0; overflow: hidden; border-radius: 8px; }
+.sc-scan { position: absolute; left: 0; right: 0; top: 0; height: 34%; opacity: 0; border-bottom: 2px solid var(--ir);
+  background: linear-gradient(transparent, color-mix(in srgb, var(--ir) 20%, transparent)); }
+.sc-scanning .sc-scan { animation: sc-scan 1s var(--ease) forwards; }
+@keyframes sc-scan { 0% { opacity: 0; transform: translateY(-100%); } 15%, 85% { opacity: 1; } 100% { opacity: 0; transform: translateY(200%); } }
+.sc-tag { position: absolute; right: 10px; top: -10px; padding: 1px 8px; border-radius: 99px; background: var(--ir); color: var(--wl);
+  font-size: 10.5px; font-weight: 600; white-space: nowrap; }
+.sc-frame .sc-cur { right: -12px; bottom: -15px; }
+.sc-go .sc-frame .sc-cur { animation: sc-leave .5s var(--ease) 1.3s forwards; }
+@keyframes sc-leave { to { opacity: 0; transform: translate(10px, 10px); } }
+.lens--still .sc-frame .sc-cur { opacity: 0; }
+
+@container (max-width: 499px) {
+  .sc-call { height: 184px; }
+  .sc-tile:not(.sc-talk) em { display: none; }
+  .sc-heard { position: static; margin-top: -2px; }
+  .sc-talk { gap: 6px; padding-top: 14px; }
+  .sc-bar-head { flex-wrap: wrap; row-gap: 2px; }
+  .sc-rail { display: none; }
+  .sc-msgs { margin: 12px 12px 14px; }
+  .sc-chips { gap: 6px; margin-top: 12px; }
+}
+
 /* Which example is playing: tabs with a thin progress line */
 .lens-tabs { display: flex; justify-content: center; gap: 4px; padding: 12px 14px 16px; }
 .lens-tabs button { position: relative; height: 28px; padding: 0 11px; border: 0; border-radius: 99px; background: none; cursor: pointer;
