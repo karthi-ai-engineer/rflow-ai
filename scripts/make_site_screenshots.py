@@ -271,11 +271,13 @@ def main() -> None:
     shot("app-light.png", "home", "light")
     shot("models.png", "models")
     shot("live.png", "live")
+    shot("live-light.png", "live", "light")
     shot("transform.png", "transform")
     shot("words.png", "dictionary")
     shot("translate.png", "translate", setup=text_translator)
     shot("translate-light.png", "translate", "light", setup=text_translator)
     shot("meeting.png", "meeting", app=meeting_app())
+    shot("meeting-light.png", "meeting", "light", app=meeting_app())
     app = preview()
     app.settings.welcomed = False
     shot("welcome.png", "welcome", app=app)
