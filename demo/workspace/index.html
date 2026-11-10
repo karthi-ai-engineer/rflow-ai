@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workspace</title>
+<!-- Rflow's demo workspace: look-alike apps (Notes, Docs, Chat, Call) for recording real demos of Rflow. Open it
+     full-screen: msedge --app="file:///.../demo/workspace/index.html" --start-fullscreen. README.md says how. -->
+<link rel="stylesheet" href="workspace.css">
+<script src="scenario.js"></script>
+<script src="audio/lines.js" onerror="window.LINES = {}"></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-notes" viewBox="0 0 24 24"><rect x="4.5" y="3" width="15" height="18" rx="2.5" fill="#fff" stroke="#3b82f6" stroke-width="1.6"/><path d="M8 8h8M8 11.5h8M8 15h5" stroke="#3b82f6" stroke-width="1.6" stroke-linecap="round"/></symbol>
+    <symbol id="i-docs" viewBox="0 0 24 24"><rect x="3.5" y="3" width="17" height="18" rx="3" fill="#2563eb"/><path d="M7.5 8.5h9M7.5 12h9M7.5 15.5h6" stroke="#fff" stroke-width="1.7" stroke-linecap="round"/></symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24"><rect x="2.5" y="4" width="15" height="12" rx="3.5" fill="#7c3aed"/><path d="M6.5 16 5 20l4.5-4" fill="#7c3aed"/><rect x="9" y="8.5" width="12.5" height="10" rx="3" fill="#a78bfa"/><path d="M18 18.5l1.5 3-4-3" fill="#a78bfa"/></symbol>
+    <symbol id="i-call" viewBox="0 0 24 24"><rect x="2.5" y="6" width="13.5" height="12" rx="3" fill="#0d9488"/><path d="M16 10.5 21.5 7v10L16 13.5z" fill="#14b8a6"/></symbol>
+    <symbol id="i-launch" viewBox="0 0 24 24"><circle cx="7.5" cy="7.5" r="3" fill="#60a5fa"/><circle cx="16.5" cy="7.5" r="3" fill="#a78bfa"/><circle cx="7.5" cy="16.5" r="3" fill="#34d399"/><circle cx="16.5" cy="16.5" r="3" fill="#fbbf24"/></symbol>
+    <symbol id="i-min" viewBox="0 0 12 12"><path d="M2 6h8" stroke="currentColor" stroke-width="1"/></symbol>
+    <symbol id="i-max" viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1"/></symbol>
+    <symbol id="i-close" viewBox="0 0 12 12"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" stroke-width="1.1"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M4 12 20 4l-4 16-4-6.5z" fill="currentColor"/></symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+    <symbol id="i-mic-off" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M4 4l16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+    <symbol id="i-cam" viewBox="0 0 24 24"><rect x="3" y="7" width="12" height="10" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M15 11l5-3v8l-5-3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M3 4l17 16" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+    <symbol id="i-share" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="12.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 14V8m-3 3 3-3 3 3M8 20.5h8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+    <symbol id="i-hand" viewBox="0 0 24 24"><path d="M8 12V6.5a1.5 1.5 0 0 1 3 0V11m0-5.5V4.5a1.5 1.5 0 0 1 3 0V11m0-4a1.5 1.5 0 0 1 3 0v6.5a7 7 0 0 1-7 7h-.5a6 6 0 0 1-4.6-2.2L4 15a1.6 1.6 0 0 1 2.4-2l1.6 1.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-dots" viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18" cy="12" r="1.6" fill="currentColor"/></symbol>
+    <symbol id="i-leave" viewBox="0 0 24 24"><path d="M3.5 13.5c4.7-4.3 12.3-4.3 17 0l-2.3 2.6-3.4-1.5v-2.4a10 10 0 0 0-5.6 0v2.4l-3.4 1.5z" fill="currentColor"/></symbol>
+    <symbol id="i-wifi" viewBox="0 0 24 24"><path d="M2.5 9a14 14 0 0 1 19 0M5.5 12.5a9.5 9.5 0 0 1 13 0M8.7 16a5 5 0 0 1 6.6 0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="12" cy="19" r="1.3" fill="currentColor"/></symbol>
+    <symbol id="i-vol" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+    <symbol id="i-bat" viewBox="0 0 24 24"><rect x="2.5" y="7" width="17" height="10" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="4.5" y="9" width="11" height="6" rx="1" fill="currentColor"/><path d="M21 10.5v3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15zM10 20.5a2 2 0 0 0 4 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+    <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M3.5 9.5h17M8 3v4M16 3v4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+    <symbol id="i-people" viewBox="0 0 24 24"><circle cx="9" cy="8.5" r="3.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M3 19.5a6 6 0 0 1 12 0" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="17" cy="9.5" r="2.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M16.5 14.2a5 5 0 0 1 5 4.8" fill="none" stroke="currentColor" stroke-width="1.5"/></symbol>
+    <symbol id="i-bubble" viewBox="0 0 24 24"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 3.5V17A2.5 2.5 0 0 1 4 14.5z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+    <symbol id="i-phone" viewBox="0 0 24 24"><path d="M6.5 3.5h3l1.5 4-2 1.3a10 10 0 0 0 6.2 6.2l1.3-2 4 1.5v3a2 2 0 0 1-2.2 2A16 16 0 0 1 4.5 5.7a2 2 0 0 1 2-2.2z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+    <symbol id="i-files" viewBox="0 0 24 24"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H10l2 2.5h5.5A2.5 2.5 0 0 1 20 9v8.5a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17.5z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+    <symbol id="i-video" viewBox="0 0 24 24"><rect x="3" y="7" width="12" height="10" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M15 11l5-3v8l-5-3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+    <symbol id="i-emoji" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8.5 14a4 4 0 0 0 7 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="9" cy="10" r="1.1" fill="currentColor"/><circle cx="15" cy="10" r="1.1" fill="currentColor"/></symbol>
+    <symbol id="i-clip" viewBox="0 0 24 24"><path d="M17.5 11.5 11 18a4.2 4.2 0 0 1-6-6l7.2-7.2a2.8 2.8 0 0 1 4 4L9 15.9a1.4 1.4 0 0 1-2-2l6.5-6.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+    <symbol id="i-format" viewBox="0 0 24 24"><path d="M5 19 10.5 5h1L17 19M7.2 14h7.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M15.5 20.5h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="m15 15 5 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+  </defs>
+</svg>
+
+<main id="desktop">
+
+  <!-- Notes: a plain text editor -->
+  <section class="win notes" data-app="notes" style="left:120px;top:90px;width:820px;height:560px" aria-label="Notes">
+    <header class="titlebar"><svg class="app-ico"><use href="#i-notes"/></svg><span class="title"><span data-notes-title>Untitled</span> - Notes</span>
+      <span class="ctl"><button data-act="min" aria-label="Minimise"><svg><use href="#i-min"/></svg></button><button data-act="max" aria-label="Maximise"><svg><use href="#i-max"/></svg></button><button data-act="close" class="x" aria-label="Close"><svg><use href="#i-close"/></svg></button></span></header>
+    <nav class="menubar"><span>File</span><span>Edit</span><span>Format</span><span>View</span><span>Help</span></nav>
+    <textarea class="notes-text" spellcheck="false" aria-label="Text"></textarea>
+    <footer class="status"><span data-pos>Ln 1, Col 1</span><span data-chars>0 characters</span><span>100%</span><span>Windows (CRLF)</span><span>UTF-8</span></footer>
+  </section>
+
+  <!-- Docs: a document editor with a toolbar -->
+  <section class="win docs" data-app="docs" style="left:260px;top:60px;width:1180px;height:820px" aria-label="Docs">
+    <header class="titlebar"><svg class="app-ico"><use href="#i-docs"/></svg><span class="title"><span data-doc-title></span> - Docs</span>
+      <span class="ctl"><button data-act="min" aria-label="Minimise"><svg><use href="#i-min"/></svg></button><button data-act="max" aria-label="Maximise"><svg><use href="#i-max"/></svg></button><button data-act="close" class="x" aria-label="Close"><svg><use href="#i-close"/></svg></button></span></header>
+    <nav class="ribbon-tabs"><span>File</span><span class="on">Home</span><span>Insert</span><span>Layout</span><span>References</span><span>Review</span><span>View</span><span class="share">Share</span></nav>
+    <div class="ribbon">
+      <div class="grp"><button class="big" data-cmd="paste" title="Paste">📋<small>Paste</small></button><div class="grp-name">Clipboard</div></div>
+      <div class="grp">
+        <div class="row"><select class="font"><option>Segoe UI</option><option>Georgia</option><option>Consolas</option></select><select class="size"><option>11</option><option>12</option><option>14</option></select></div>
+        <div class="row"><button data-cmd="bold" title="Bold"><b>B</b></button><button data-cmd="italic" title="Italic"><i>I</i></button><button data-cmd="underline" title="Underline"><u>U</u></button><button data-cmd="strikeThrough" title="Strikethrough"><s>ab</s></button><button data-cmd="foreColor" title="Font colour"><span class="fc">A</span></button><button data-cmd="hiliteColor" title="Highlight"><span class="hl">ab</span></button></div>
+        <div class="grp-name">Font</div></div>
+      <div class="grp">
+        <div class="row"><button data-cmd="insertUnorderedList" title="Bullets">• ≡</button><button data-cmd="insertOrderedList" title="Numbering">1. ≡</button><button data-cmd="outdent" title="Decrease indent">⇤</button><button data-cmd="indent" title="Increase indent">⇥</button></div>
+        <div class="row"><button data-cmd="justifyLeft" title="Align left">≡</button><button data-cmd="justifyCenter" title="Centre">☰</button><button data-cmd="justifyFull" title="Justify">▤</button></div>
+        <div class="grp-name">Paragraph</div></div>
+      <div class="grp styles"><div class="row">
+        <button data-style="p" class="sty"><span>Normal</span></button><button data-style="h1" class="sty"><span class="s-h1">Heading 1</span></button><button data-style="h2" class="sty"><span class="s-h2">Heading 2</span></button><button data-style="h3" class="sty"><span class="s-h3">Title</span></button></div>
+        <div class="grp-name">Styles</div></div>
+      <div class="grp"><button class="big" title="Find">🔍<small>Find</small></button><div class="grp-name">Editing</div></div>
+    </div>
+    <div class="canvas"><article class="page" contenteditable="true" spellcheck="false"></article></div>
+    <footer class="status"><span data-page>Page 1 of 1</span><span data-words>0 words</span><span>English (United States)</span><span class="push">Focus</span><span>100%</span></footer>
+  </section>
+
+  <!-- Chat: team chat, the release channel -->
+  <section class="win chat" data-app="chat" style="left:340px;top:110px;width:1240px;height:800px" aria-label="Chat">
+    <header class="titlebar dark"><svg class="app-ico"><use href="#i-chat"/></svg><span class="title">Chat</span>
+      <span class="search"><svg><use href="#i-search"/></svg>Search</span>
+      <span class="ctl"><button data-act="min" aria-label="Minimise"><svg><use href="#i-min"/></svg></button><button data-act="max" aria-label="Maximise"><svg><use href="#i-max"/></svg></button><button data-act="close" class="x" aria-label="Close"><svg><use href="#i-close"/></svg></button></span></header>
+    <div class="chat-body">
+      <nav class="rail">
+        <span><svg><use href="#i-bell"/></svg>Activity</span><span class="on"><svg><use href="#i-bubble"/></svg>Chat</span>
+        <span><svg><use href="#i-people"/></svg>Teams</span><span><svg><use href="#i-calendar"/></svg>Calendar</span>
+        <span><svg><use href="#i-phone"/></svg>Calls</span><span><svg><use href="#i-files"/></svg>Files</span>
+      </nav>
+      <aside class="channels"><div class="team" data-team></div><ul data-channels></ul></aside>
+      <section class="thread">
+        <header class="thread-head"><span class="chan"># <span data-channel></span></span><span class="tabs"><b>Posts</b><span>Files</span><span>Notes</span></span>
+          <button class="meet" data-open="call"><svg><use href="#i-video"/></svg>Meet</button></header>
+        <div class="messages" data-messages></div>
+        <div class="typing" data-typing hidden></div>
+        <div class="compose">
+          <div class="box" contenteditable="true" data-compose data-placeholder="Type a message"></div>
+          <div class="compose-bar"><svg><use href="#i-format"/></svg><svg><use href="#i-emoji"/></svg><svg><use href="#i-clip"/></svg>
+            <button class="send" data-send aria-label="Send"><svg><use href="#i-send"/></svg></button></div>
+        </div>
+      </section>
+    </div>
+  </section>
+
+  <!-- Call: a video call that plays the recorded lines -->
+  <section class="win call" data-app="call" style="left:180px;top:70px;width:1500px;height:880px" aria-label="Call" hidden>
+    <header class="titlebar dark"><svg class="app-ico"><use href="#i-call"/></svg><span class="title" data-call-title></span>
+      <span class="timer" data-timer>00:00</span>
+      <span class="ctl"><button data-act="min" aria-label="Minimise"><svg><use href="#i-min"/></svg></button><button data-act="max" aria-label="Maximise"><svg><use href="#i-max"/></svg></button><button data-act="close" class="x" aria-label="Close"><svg><use href="#i-close"/></svg></button></span></header>
+    <div class="lobby" data-lobby>
+      <div class="lobby-card"><div class="lobby-title" data-lobby-title></div><div class="lobby-sub">Your camera is off · Your microphone is muted</div>
+        <div class="lobby-who" data-lobby-who></div>
+        <button class="join" data-join>Join now</button></div>
+    </div>
+    <div class="stage" data-stage hidden><div class="tiles" data-tiles></div></div>
+    <footer class="call-bar" data-callbar hidden>
+      <button class="cb" title="Camera"><svg><use href="#i-cam"/></svg><small>Camera</small></button>
+      <button class="cb" title="Microphone"><svg><use href="#i-mic-off"/></svg><small>Mic</small></button>
+      <button class="cb" title="Share"><svg><use href="#i-share"/></svg><small>Share</small></button>
+      <button class="cb" title="Raise"><svg><use href="#i-hand"/></svg><small>Raise</small></button>
+      <button class="cb" title="More"><svg><use href="#i-dots"/></svg><small>More</small></button>
+      <button class="cb leave" data-leave title="Leave"><svg><use href="#i-leave"/></svg><small>Leave</small></button>
+    </footer>
+  </section>
+</main>
+
+<footer id="taskbar">
+  <div class="tb-apps">
+    <button class="tb launch" title="Apps"><svg><use href="#i-launch"/></svg></button>
+    <button class="tb" data-task="notes" title="Notes"><svg><use href="#i-notes"/></svg></button>
+    <button class="tb" data-task="docs" title="Docs"><svg><use href="#i-docs"/></svg></button>
+    <button class="tb" data-task="chat" title="Chat"><svg><use href="#i-chat"/></svg></button>
+    <button class="tb" data-task="call" title="Call"><svg><use href="#i-call"/></svg></button>
+  </div>
+  <div class="tray"><svg><use href="#i-wifi"/></svg><svg><use href="#i-vol"/></svg><svg><use href="#i-bat"/></svg>
+    <span class="clock"><span data-time></span><span data-date></span></span></div>
+</footer>
+
+<!-- The director: F9 shows it (hidden while recording). -->
+<aside id="director" hidden>
+  <div class="d-head">Director <small>F9 hides · F8 = next step in the focused app</small></div>
+  <div class="d-row"><b>Scene</b><button data-d="reset">Reset all</button><button data-d="theme">Light / dark</button><button data-d="layout">Default layout</button></div>
+  <div class="d-row"><b>Open</b><button data-d="open:notes">Notes</button><button data-d="open:docs">Docs</button><button data-d="open:chat">Chat</button><button data-d="open:call">Call</button><button data-d="maximise">Maximise focused</button></div>
+  <div class="d-row"><b>Chat</b><button data-d="chat:next">Next message</button><span data-d-chat></span></div>
+  <div class="d-row"><b>Call</b><button data-d="call:join">Join</button><button data-d="call:next">Play next line</button><button data-d="call:all">Play all</button><button data-d="call:stop">Stop</button><span data-d-call></span></div>
+  <div class="d-row lines" data-d-lines></div>
+</aside>
+
+<script src="workspace.js"></script>
+</body>
+</html>
