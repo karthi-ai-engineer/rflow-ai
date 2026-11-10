@@ -1,25 +1,28 @@
 /* The Rflow lens: what you say drifts in on the left, passes through the lens (the steps Rflow really takes) and comes
-   out clean on the right, typed into a box. Four examples, all true to Rflow. Builds itself inside #lens (or any
+   out clean on the right, typed into a box; or, for a meeting and a screen, a little window of Rflow at work. Four examples,
+   all true to Rflow. Builds itself inside #lens (or any
    [data-lens]); without JavaScript lens.css shows the first example still. Pauses off-screen and in hidden tabs. */
 (function () {
   "use strict";
+  // scene: a little window instead of words through the lens (SCENES below; say and clean are then only for the label).
   // say: the words; _filler, !misheard word, ^number, *name kept (sel: text selected or copied, not spoken; split: speech
   // without spaces, in the phrases it arrives in, joined with nothing). clean: the text typed, {highlighted}; out_lang: its
   // language. chips: colour token, then the label.
   var DICT = '<span>Hold <kbd>Ctrl</kbd>+<kbd>Win</kbd> and speak</span>';
   var EX = [
     {tab: "Meeting", mode: "Live translation", hint: "<span><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>L</kbd> in any call</span>",
-      cap: "They say", out: "On the bar", done: "As they speak", wave: 1, lang: "ja", split: "|",
-      say: "来週の|リリースは|木曜日に|延期します。|" +
-        "資料は|金曜日までに|お願いします。",
-      clean: "We’re moving next week’s release to {Thursday}. Please send the materials by {Friday}.",
-      chips: ["ir:Japanese → English", "vi:Read aloud, if you like"]},
+      scene: "meeting", say: "来週のリリースは木曜日に延期します。資料は金曜日までにお願いします。",
+      clean: "We’re moving next week’s release to Thursday. Please send the materials by Friday.",
+      lines: [["来週のリリースは木曜日に延期します。", "We’re moving next week’s release to Thursday."],
+              ["資料は金曜日までにお願いします。", "Please send the materials by Friday."]],
+      chips: ["ir:Japanese → English", "okc:Speak the translation: heard in English", "vi:Hidden from screen shares"]},
     {tab: "Screen", mode: "Screen translator", hint: "<span><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd> over any app</span>",
-      cap: "On screen", out: "In its place", done: "Translated in place", lang: "ja", sel: 1,
-      say: "申請は月末までに提出してください。" +
-        "領収書の画像を添付する必要があります。",
-      clean: "Please submit by the {end of the month}. A photo of each {receipt} is required.",
-      chips: ["ir:Japanese → English", "okc:Same place, same colours"]},
+      scene: "screen", say: "申請は月末までに提出してください。領収書の画像を添付する必要があります。",
+      clean: "Please submit it by the end of the month. You need to attach a photo of the receipt.",
+      msgs: [["田", "vi", "田中 由衣", "Yui Tanaka", "10:12", "申請は月末までに提出してください。", "Please submit it by the end of the month."],
+             ["佐", "ir", "佐藤 健二", "Kenji Sato", "10:14", "領収書の画像を添付する必要があります。", "You need to attach a photo of the receipt."],
+             ["田", "vi", "田中 由衣", "Yui Tanaka", "10:15", "不明点はこのチャットで聞いてください。", "If anything is unclear, ask in this chat."]],
+      chips: ["ir:Japanese → English", "okc:Same place, same colours", "vi:Any app, any window"]},
     {tab: "Reply", mode: "Text Transform", hint: "<span>Select, then say <b>“Japanese Teams message”</b></span>",
       cap: "You wrote", out: "Ready to send", done: "Replaced", wave: 1, sel: 1, out_lang: "ja",
       say: "Thursday works for me. I’ll send the approval request today.",
@@ -57,6 +60,75 @@
     return shown + '<i class="lens-caret"></i>' + (rest ? "<s>" + rest + "</s>" : "");
   }
 
+  function esc(t) { return t.replace(/&/g, "&amp;").replace(/</g, "&lt;"); }
+  // t shown up to k characters: the rest is there but hidden, so nothing moves while it's typed
+  function upto(t, k, caret) {
+    return esc(t.slice(0, k)) + (caret ? '<i class="lens-caret"></i>' : "") + "<s>" + esc(t.slice(k)) + "</s>";
+  }
+  function put(e, html) { if (e._h !== html) e.innerHTML = e._h = html; }
+  function part(now, from, ms, n) { return Math.max(0, Math.min(n, Math.floor((now - from) / ms * n))); }
+  var DOTS = '<span class="sc-dots"><i></i><i></i><i></i></span>';
+  var SPEAKER = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></svg>';
+  var CURSOR = '<svg class="sc-cur" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3l14 8.5-6.2 1.3L9.6 19z"/></svg>';
+  var EQ = '<span class="sc-eq"><i></i><i></i><i></i><i></i></span>';
+  function avatar(text, k) { return '<span class="sc-av" style="--k:var(--' + k + ')">' + text + "</span>"; }
+  // Each scene builds its window and returns play(now): the window at that moment, in ms (1e9: the end, for still).
+  var SCENES = {
+    // A call in Japanese. The first line: English on Rflow's bar, the voice still Japanese. Then Speak the translation is
+    // turned on, and the next line is heard in English, the call's own sound lowered (as Rflow does).
+    meeting: function (ex, w) {
+      w.innerHTML = '<div class="sc-win"><div class="sc-top">' + DOTS + '<span>Weekly sync</span><b class="sc-rec"><i></i>Live</b></div>' +
+        '<div class="sc-call"><div class="sc-tile sc-talk">' + avatar("YT", "vi") + '<em>Yui Tanaka</em><p class="sc-bub" lang="ja">' +
+        ex.lines.map(function () { return "<span></span>"; }).join("") + '</p><span class="sc-heard">' + SPEAKER +
+        '<b lang="ja">日本語</b><b>English</b>' + EQ + "</span></div>" +
+        '<div class="sc-tile">' + avatar("KS", "ir") + "<em>Kenji Sato</em></div>" +
+        '<div class="sc-tile">' + avatar("HI", "wr") + "<em>Haruto Ito</em></div>" +
+        '<div class="sc-tile">' + avatar("You", "okc") + "<em>You</em></div></div>" +
+        '<div class="sc-bar"><div class="sc-bar-head"><span class="sc-from"><i></i>Japanese → English</span>' +
+        '<span class="sc-speak">' + SPEAKER + 'Speak the translation<i class="sc-switch"></i>' + CURSOR + "</span></div>" +
+        ex.lines.map(function () { return '<p class="sc-l"></p>'; }).join("") + "</div></div>";
+      var win = w.firstChild, tile = w.querySelector(".sc-talk"), bub = w.querySelector(".sc-bub"), said = bub.children;
+      var shown = w.querySelectorAll(".sc-l"), START = [400, 3900], ON = 3300;
+      return function (now) {
+        var talk = false;
+        ex.lines.forEach(function (l, j) {
+          var at = now - START[j], ja = part(now, START[j], 1400, l[0].length), en = part(now, START[j] + 700, 1500, l[1].length);
+          put(said[j], upto(l[0], ja));
+          said[j].classList.toggle("on", at >= 0 && (j === ex.lines.length - 1 || now < START[j + 1]));
+          put(shown[j], upto(l[1], en, en > 0 && en < l[1].length));
+          shown[j].classList.toggle("old", j < ex.lines.length - 1 && now >= START[j + 1]);
+          talk = talk || (at >= 0 && at < 1500);
+        });
+        var on = now >= ON, last = START[START.length - 1];
+        bub.classList.toggle("on", now >= START[0]);
+        tile.classList.toggle("is-talk", talk);
+        win.classList.toggle("sc-aim", now >= ON - 700 && now < ON + 600);  // the cursor comes to the switch, clicks, goes
+        win.classList.toggle("sc-on", on);
+        // what you hear: Yui in Japanese, then, with the switch on, Gemini's voice in English
+        win.classList.toggle("sc-voice", on ? now >= last + 800 && now < last + 2600 : talk);
+        win.classList.toggle("sc-en", on && now >= last + 800);
+      };
+    },
+    // A Japanese Teams chat: the Screen translator's frame is moved onto it, and each message turns English in place
+    screen: function (ex, w) {
+      var x = function (ja, en) { return '<span class="sc-x"><span lang="ja">' + ja + '</span><span class="sc-en">' + en + "</span></span>"; };
+      w.innerHTML = '<div class="sc-win"><div class="sc-top">' + DOTS + '<span lang="ja">経費精算チーム</span></div><div class="sc-body">' +
+        '<div class="sc-rail"><i></i><i></i><i></i><i></i></div><div class="sc-msgs">' +
+        ex.msgs.map(function (m) {
+          return '<div class="sc-msg">' + avatar(m[0], m[1]) + "<div><em>" + x(m[2], m[3]) + " · " + m[4] + "</em><p>" + x(m[5], m[6]) +
+            "</p></div></div>";
+        }).join("") +
+        '<div class="sc-frame"><span class="sc-glass"><i class="sc-scan"></i></span><span class="sc-tag">Screen translator</span>' + CURSOR +
+        "</div></div></div></div>";
+      var win = w.firstChild, msgs = w.querySelectorAll(".sc-msg");
+      return function (now) {
+        win.classList.toggle("sc-go", now >= 700);
+        win.classList.toggle("sc-scanning", now >= 1900 && now < 1e8);
+        [].forEach.call(msgs, function (m, j) { m.classList.toggle("tr", now >= 2500 + j * 450); });
+      };
+    }
+  };
+
   function Lens(root) {
     var label = root.getAttribute("aria-label") || "";
     var view = el("div", "lens-view"), tabs = el("div", "lens-tabs");
@@ -86,17 +158,27 @@
       ex.text = el("p", "", typed(ex.segs, ex.len));
       if (ex.out_lang) ex.text.lang = ex.out_lang;
       ex.chipBox = el("div");
+      if (ex.scene) {  // a scene keeps its chips under its window, and has no captions of the lens's
+        ex.cap = ex.out = ex.done = "";
+        ex.sc = el("div", "sc sc-" + ex.scene);
+        ex.play = SCENES[ex.scene](ex, ex.sc);
+        ex.chipBox.className = "sc-chips";
+        ex.sc.appendChild(ex.chipBox);
+      }
       ex.c = ex.chips.map(function (c) {
         var at = c.indexOf(":"), chip = el("span", "c");
         chip.textContent = c.slice(at + 1);
         chip.style.setProperty("--k", "var(--" + c.slice(0, at) + ")");
         return ex.chipBox.appendChild(chip);
       });
+      if (ex.scene) ex.chipBox = el("div");  // the lens's own chip row: empty for a scene
       // the timeline, in ms: words in, the lens at work (P), typing (O to done), a pause, then the next example
       var n = ex.w.length, s = Math.min(120, 1500 / n), P = 300 + (n - 1) * s + (ex.sel ? 1500 : 700), type = Math.min(2200, ex.len * 26);
       var done = P + 800 + type + 150;
       ex.t = {s: s, P: P, O: P + 800, type: type, done: done, gap: Math.min(520, (done - P - 500) / ex.chips.length),
         end: Math.max(6800, done + 2400)};
+      if (ex.scene === "meeting") ex.t = {s: s, P: 1400, O: 1e9, type: 1, done: 6600, gap: 2400, end: 10200};
+      if (ex.scene === "screen") ex.t = {s: s, P: 2500, O: 1e9, type: 1, done: 4300, gap: 450, end: 8200};
       ex.btn = el("button", "", ex.tab + "<i></i>");
       ex.btn.type = "button";
       return ex;
@@ -123,8 +205,11 @@
     stage.append(inp, el("div", "lens-mid", '<i class="lens-pipe"></i><div class="lens-orb"><i class="lens-ring"></i><div class="lens-core">' +
       '<span class="lens-bars"><i></i><i></i><i></i><i></i><i></i></span><span class="lens-dots"><i></i><i></i><i></i></span>' +
       '<span class="lens-check">' + CHECK + '</span></div></div><i class="lens-pipe"></i>'), out, stacks[7]);
-    view.append(head, stage);
-    stage.querySelectorAll(".lens-wave i, .lens-bars i").forEach(function (b, j) {
+    var scenes = stack("lens-scenes", X.map(function (ex) { return ex.sc || el("div"); })), body = el("div", "lens-body");
+    stacks.push(scenes);
+    body.append(stage, scenes);
+    view.append(head, body);
+    view.querySelectorAll(".lens-wave i, .lens-bars i, .sc-eq i").forEach(function (b, j) {
       b.style.setProperty("--h", (6 + Math.abs(Math.sin(j * 2.1)) * 12).toFixed(0) + "px");
       b.style.animationDelay = (j * -0.13).toFixed(2) + "s";
     });
@@ -160,6 +245,8 @@
     }
     function draw(now) {
       var ex = X[i], p = ex.t;
+      flag("is-scene", ex.scene);
+      if (ex.play) ex.play(now);
       flag("is-wave", ex.wave);
       flag("is-live", ex.wave && now < p.P);
       flag("is-proc", now >= p.P);

@@ -262,6 +262,23 @@
     background: var(--well); }
   .doc .who-is { color: var(--text-3); }
 
+
+  /* Meeting mode: what you hear, with Speak the translation on */
+  .cards { display: grid; gap: 22px; min-width: 0; }
+  .hear { display: grid; gap: 4px; padding: 22px 26px; }
+  .hear-row { display: flex; align-items: center; gap: 14px; }
+  .hear .who { flex: none; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; font-size: 13px; font-weight: 600;
+    color: var(--violet); background: color-mix(in srgb, var(--violet) 16%, transparent); }
+  .hear .out .who { color: var(--ok); background: color-mix(in srgb, var(--ok) 16%, transparent); }
+  .hear .who svg { width: 19px; height: 19px; }
+  .hear em { display: block; font-style: normal; font-size: 13px; font-weight: 500; color: var(--text-3); }
+  .hear p { margin: 0; font-size: 16px; line-height: 1.5; color: var(--text); }
+  .hear p[lang="ja"] { font-family: "Geist", "Yu Gothic UI", "Yu Gothic", Meiryo, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+  .hear-via { display: flex; align-items: center; gap: 10px; min-height: 40px; margin-left: 19px; padding-left: 26px; border-left: 2px dashed var(--line);
+    color: var(--text-2); font-size: 13.5px; font-weight: 500; }
+  .hear-via .sw { position: relative; width: 30px; height: 17px; border-radius: 99px; background: var(--ok); }
+  .hear-via .sw::after { content: ""; position: absolute; right: 2px; top: 2px; width: 13px; height: 13px; border-radius: 50%; background: var(--base); }
+
   /* Pricing: what each part costs, paid to Google */
   .prices { display: grid; grid-template-columns: repeat(4, 1fr); gap: 22px; }
 
@@ -475,9 +492,11 @@
     <div class="caps">Meeting mode</div>
     <h2>Every meeting, written up.</h2>
     <p class="sub">Rflow finds your Teams, Zoom, Google Meet or Webex meeting. Press Start, or <kbd>Ctrl</kbd><span class="plus">+</span><kbd>Alt</kbd><span class="plus">+</span><kbd>M</kbd>:
-      it's translated live and recorded on your laptop. When it ends, Gemini writes the minutes.</p>
+      it's translated live, on screen or out loud, and recorded on your laptop. When it ends, Gemini writes the minutes.</p>
     <div class="two feature" style="margin-top: 0; align-items: start">
       <ul class="list">
+        <li><span class="icon well ok"><svg class="i" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></svg></span>
+          <div><h3>Hear it in your language</h3><p>They speak Japanese; you read it in English on Rflow's bar. Turn on Speak the translation and you hear it in English too, with the call turned down.</p></div></li>
         <li><span class="icon well iris"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.3-4.3"/></svg></span>
           <div><h3>Finds the meeting by itself</h3><p>Start when it begins; it stops by itself when the meeting window closes.</p></div></li>
         <li><span class="icon well live"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3.5" fill="currentColor" stroke="none"/></svg></span>
@@ -487,6 +506,12 @@
         <li><span class="icon well ok"><svg class="i" viewBox="0 0 24 24"><circle cx="8" cy="9" r="3"/><circle cx="16" cy="9" r="3"/><path d="M3 19c.7-2.8 2.6-4.3 5-4.3s4.3 1.5 5 4.3M11 19c.7-2.8 2.6-4.3 5-4.3s4.3 1.5 5 4.3"/></svg></span>
           <div><h3>In person, too</h3><p>A meeting in a room: your microphone hears everyone, with the same captions and minutes.</p></div></li>
       </ul>
+      <div class="cards">
+      <div class="card hear" role="img" aria-label="In the meeting, Yui Tanaka says in Japanese that next week's release moves to Thursday; with Speak the translation on, you hear it in English.">
+        <div class="hear-row"><span class="who">YT</span><div><em>Yui Tanaka says</em><p lang="ja">来週のリリースは木曜日に延期します。</p></div></div>
+        <div class="hear-via"><span class="sw"></span>Speak the translation</div>
+        <div class="hear-row out"><span class="who"><svg class="i" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></svg></span><div><em>You hear, in English</em><p>“We’re moving next week’s release to Thursday.”</p></div></div>
+      </div>
       <div class="card doc" role="img" aria-label="Example minutes: Weekly sync, its summary, two decisions and three action items with owners">
         <div class="bar"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>minutes.md</div>
         <h3>Weekly sync: designs and the release date</h3>
@@ -501,6 +526,7 @@
           <li><span>Book the release review <span class="who-is">· Kenji Sato, due Wednesday</span></span></li>
           <li><span>Share the test plan with the team <span class="who-is">· You</span></span></li>
         </ul>
+      </div>
       </div>
     </div>
   </div>
