@@ -228,6 +228,8 @@
       focus("call");
       show(true);
       joined = Date.now();
+      // Rflow's Meeting mode finds the call by its window's title (sst/meeting/apps.py, "Demo call"), only while joined.
+      document.title = `${S.call.title} · Demo call`;
       timer = setInterval(() => {
         const s = Math.floor((Date.now() - joined) / 1000);
         $("[data-timer]").textContent = `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
@@ -247,6 +249,7 @@
       clearInterval(timer);
       joined = 0;
       index = 0;
+      document.title = "Workspace";
       $("[data-timer]").textContent = "00:00";
       show(false);
       director();

@@ -1,6 +1,6 @@
 """Finding the meeting app's window from a list of top-level windows (fakes only: no real window is looked at)."""
 from sst.meeting import apps
-from sst.meeting.apps import MEET, TEAMS, WEBEX, ZOOM, MeetingWindow, choose, find
+from sst.meeting.apps import DEMO, MEET, TEAMS, WEBEX, ZOOM, MeetingWindow, choose, find
 
 
 def listed(*windows):
@@ -80,3 +80,10 @@ def test_alive_checks_the_same_process(monkeypatch):
     monkeypatch.setattr(apps, "_pid", lambda hwnd: 8)  # the handle now belongs to another process
     assert not apps.alive(window)
     assert not apps.alive(MeetingWindow(TEAMS, "x", 43, 7))
+
+
+def test_the_demo_workspaces_call_is_a_meeting_only_while_joined():
+    joined = (4, 9, "msedge.exe", "Release 4.2 sync · Demo call")
+    assert find(listed(joined)) == [MeetingWindow(DEMO, "Release 4.2 sync · Demo call", 4, 9)]
+    assert find(listed((4, 9, "msedge.exe", "Workspace"))) == []  # the page before joining, or after leaving
+    assert find(listed((5, 2, "notepad.exe", "Demo call notes.txt - Notepad"))) == []  # only a browser's window

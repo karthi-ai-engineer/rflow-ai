@@ -37,7 +37,7 @@ joins the call, `&theme=dark`, `&director=1`.
 | Text Transform | Docs: click in the first paragraph | Say "make it concise", then "professional", "bullet points" |
 | Screen translator | Chat in front | Ctrl+Alt+S: the Japanese channel in English, in place |
 | Live translation | Call: Join, then F8 (or the director's Play all) | Ctrl+Alt+L, source "what the laptop plays": the captions; Speak the translation on: heard in English |
-| Meeting mode | Call: Join, Meeting mode → Start, Play all, then Stop | The minutes: the release moved to Thursday, Haruto's fix by Tuesday, Karthi to contact the customer by Friday |
+| Meeting mode | Call: Join (the window is then titled "… · Demo call", which Rflow's Meeting mode lists as **Demo call**), Meeting mode → Start, Play all, then Stop | The minutes: the release moved to Thursday, Haruto's fix by Tuesday, Karthi to contact the customer by Friday |
 
 The story fits together: the chat says the release may move, the call decides it, and the minutes and the Docs update
 follow from it.

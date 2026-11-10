@@ -12,6 +12,9 @@ but cloaked) with their process's image name and title, and each app's rules (AP
                      (the title starts with "Meet - "), else one whose title has "Google Meet" (its home page, ranked
                      below). A browser shows only the active tab's title: a Meet tab behind another isn't seen.
     Webex            webex.exe, CiscoCollabHost.exe or atmgr.exe (Webex Meetings): a meeting window first.
+    Demo call        a browser window whose title has "Demo call": the demo workspace's call (demo/workspace), which
+                     names its window so while it's joined, so Rflow's demos record Meeting mode on it. No real
+                     meeting is named that way.
 
 Teams, Zoom and Webex hold one meeting at a time but open several windows for it (the call, a compact view, a shared
 screen), so each gives one MeetingWindow, its best; each Meet window is its own meeting. The most likely come first,
@@ -24,7 +27,7 @@ from collections.abc import Callable
 from ctypes import wintypes
 from dataclasses import dataclass
 
-TEAMS, ZOOM, MEET, WEBEX = "Microsoft Teams", "Zoom", "Google Meet", "Webex"
+TEAMS, ZOOM, MEET, WEBEX, DEMO = "Microsoft Teams", "Zoom", "Google Meet", "Webex", "Demo call"
 # The words of Teams' own views, which a meeting window's title never starts with (new and classic Teams).
 TEAMS_VIEWS = frozenset({"activity", "chat", "teams", "calendar", "calls", "onedrive", "files", "apps", "meet", "copilot",
                          "communities", "help", "settings", "search", "assignments", "approvals", "shifts", "planner",
@@ -74,12 +77,18 @@ def _webex(title: str) -> int:
     return STRONG if "meeting" in low or low not in ("webex", "cisco webex meetings", "webex meetings") else WEAK
 
 
+def _demo(title: str) -> int:
+    return STRONG if DEMO in title else 0
+
+
+BROWSERS = frozenset({"chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe"})
 # name, process image names (lower-case), how sure a title is its meeting, one meeting at a time (one window given)
 APPS: tuple[tuple[str, frozenset[str], Callable[[str], int], bool], ...] = (
     (TEAMS, frozenset({"ms-teams.exe", "teams.exe"}), _teams, True),
     (ZOOM, frozenset({"zoom.exe"}), _zoom, True),
-    (MEET, frozenset({"chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe"}), _meet, False),
+    (MEET, BROWSERS, _meet, False),
     (WEBEX, frozenset({"webex.exe", "ciscocollabhost.exe", "atmgr.exe"}), _webex, True),
+    (DEMO, BROWSERS, _demo, True),
 )
 
 if sys.platform == "win32":
