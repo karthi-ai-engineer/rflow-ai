@@ -1,9 +1,10 @@
 """Render two short feature clips for the website, each only the feature, made to loop:
 
-- site/media/clip-transform.mp4: one paragraph in a Notes window, transformed five ways by voice (Concise, Professional,
-  Bullet points, Action items, Rewrite), each result put back with Undo before the next;
+- site/media/clip-transform.mp4: one paragraph in a Notes window, transformed five ways by voice, a word or two each
+  (Concise, Professional, Bullet points, Action items, Rewrite), each result put back with Undo before the next;
 - site/media/clip-live.mp4: a meeting in Japanese translated as people speak, the translation read aloud while the
-  meeting is turned down, and a line of the user's own (Both);
+  meeting is turned down, and a line of the user's own (Both); the cost saver on (what the session cost and saved, in
+  the bar's title), and the session copied at the end;
 
 and a poster for each (site/img/clip-<name>-poster.png, 1280x720), a frame that shows the result.
 
@@ -50,8 +51,8 @@ PARAGRAPH = ("Quick update on the release: we won't make Tuesday, because the da
              "I'm going to fix the migration script. We still have 3 open bugs, and I think we should close them before we "
              "ship.")
 ORDER = ("concise", "professional", "bullets", "actions", "rewrite")
-COMMANDS = {"concise": "make it concise", "professional": "make it professional", "bullets": "bullet points",
-            "actions": "action items", "rewrite": "rewrite it"}
+COMMANDS = {"concise": "concise", "professional": "professional", "bullets": "bullet points", "actions": "action items",
+            "rewrite": "rewrite"}  # one word is enough (2.8.1); "make it concise" works as well
 RESULTS = {  # in the light markdown the model writes (sst.transform.render), as TransformPage's examples
     "concise": ("The release won't make Tuesday: the database migration failed on staging last night, so it's probably "
                 "moving to Thursday, October 15. Priya will confirm the date with the client; I'll fix the migration script. "
@@ -234,6 +235,8 @@ LINES = [  # (start, end, who, heard, translation): Japanese from the meeting, E
     (9.2, 10.8, 0, "ありがとうございます。では、木曜日で確定です。", "Thank you. Then Thursday it is."),
 ]
 SPEAK_ON = 4.6  # the bar's speaker button turned on: the translation read aloud from then on
+SPEND = [(2.2, 0.01, 0.01), (4.5, 0.02, 0.02), (9.0, 0.04, 0.03), (11.0, 0.05, 0.04)]  # the cost saver's note: (t, cost, saved)
+COPY, COPIED = 12.0, 13.0  # the bar's copy button clicked: "Copied 4 lines" in its title for a moment
 READS = [(4.85, 6.85), (10.95, 12.15)]  # the voice reading the second line's translation, then the last one's (not the user's)
 LIVE_TOTAL = 13.1 + LOOP
 CALL, BAR_AT, BAR_SIZE = QRectF(110, 14, 1060, 340), QPointF(220, 364), (840, 262)
@@ -255,6 +258,9 @@ class LiveFeed:
                 line = [(at, replace(e, lane=MIC)) for at, e in line]
             events += line
         events.append((SPEAK_ON, lambda bar: bar.set_speaking(True)))
+        events += [(at, lambda bar, c=cost, s=saved: bar.set_spend(c, s)) for at, cost, saved in SPEND]
+        events += [(COPY + 0.1, lambda bar: (bar.flash("Copied 4 lines"), bar._flash_timer.stop())),
+                   (COPIED, lambda bar: bar.flash(""))]  # the timer stopped: the note goes when the clip says
         self.events = sorted(events, key=lambda e: e[0])
         self.bar, self.last, self.applied, self.image = None, 0.0, 0, None
 
@@ -262,7 +268,7 @@ class LiveFeed:
         from sst.live.captions import CaptionBar
         from sst.live.contracts import Kind, LiveConfig, LiveEvent
         if self.bar is None or t < self.last:
-            self.bar = CaptionBar(LiveConfig(target="en", source="both", mic_target="ja"))
+            self.bar = CaptionBar(LiveConfig(target="en", source="both", mic_target="ja", save=True))
             self.bar.resize(*BAR_SIZE)
             self.bar.show_event(LiveEvent(Kind.STATUS, "Listening"))
             self.applied, self.image = 0, None
@@ -340,9 +346,11 @@ def draw_live(feed: LiveFeed, t: float, bar: QImage | None = None, chips: bool =
     theme.outer_shadow(p, rect, 14, [(0, 16, 40, theme.rgba(0, 0, 0, .55)), (0, 2, 6, theme.rgba(0, 0, 0, .3))],
                        demo.STAGE.s)
     draw_image(p, bar, rect.left(), rect.top())
-    click = ramp(t, SPEAK_ON - 0.15, 0.15) * (1 - ramp(t, SPEAK_ON + 0.35, 0.5))  # the speaker button pressed
-    if click > 0:
-        button = feed.bar.speak_button.geometry()
+    for at, name in ((SPEAK_ON, "speak_button"), (COPY, "copy_button")):  # the speaker button pressed, then copy
+        click = ramp(t, at - 0.15, 0.15) * (1 - ramp(t, at + 0.35, 0.5))
+        if click <= 0:
+            continue
+        button = getattr(feed.bar, name).geometry()
         centre = QPointF(rect.left() + button.center().x() + 0.5, rect.top() + button.center().y() + 0.5)
         p.setPen(QPen(alpha(POP["iris"], 0.8 * click), 2))
         p.setBrush(alpha(POP["iris"], 0.16 * click))
@@ -376,7 +384,7 @@ def empty_bar() -> QImage:
     """The bar with nothing in it yet: between the meeting's last frame and its first, so no text fades over text."""
     from sst.live.captions import CaptionBar
     from sst.live.contracts import Kind, LiveConfig, LiveEvent
-    bar = CaptionBar(LiveConfig(target="en", source="both", mic_target="ja"))
+    bar = CaptionBar(LiveConfig(target="en", source="both", mic_target="ja", save=True))
     bar.resize(*BAR_SIZE)
     bar.show_event(LiveEvent(Kind.STATUS, ""))
     demo.settle()

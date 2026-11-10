@@ -18,7 +18,7 @@ from PySide6.QtGui import QColor, QImage, QPainter  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 OUT = Path(__file__).resolve().parent.parent / "docs" / "media"
-TOUR = ["home", "live", "transform", "models", "formatting", "snippets"]  # the sections a new user meets first
+TOUR = ["home", "live", "meeting", "translate", "transform", "models"]  # the sections a new user meets first
 WIDTH = 960  # pixels in the GIF: sharp on GitHub, small enough to load quickly
 BACKDROP = "#191C22"  # the pill floats over the app's own graphite, as on the website
 
@@ -45,13 +45,15 @@ def save_gif(name: str, frames: list[Image.Image], durations: list[int]) -> None
 def tour(name: str) -> None:
     """The window going from section to section, as a new user would click through it."""
     from sst import window as w
-    window = w.MainWindow(site.preview())
+    window = w.MainWindow(site.meeting_app())  # a Teams meeting open: Meeting mode is ready for it
     window.apply_theme("dark")
     window.resize(1000, 680)
     window.set_status("Ready: hold Ctrl+Win · cleanup: gemini-3.5-flash-lite", True)
     frames = []
     for page in TOUR:
         window.show_page(page)
+        if page == "translate":
+            site.text_translator(window)  # the Text tab with a paragraph translated
         for _ in range(3):
             QApplication.processEvents()
         frames.append(scaled(pil(window.grab().toImage())))

@@ -52,7 +52,25 @@ def preview():
                        microphones=["Microphone array", "Headset (Bluetooth)"],
                        gateway=GatewayConfig("", "AIza-example-key-9f3c", "gemini"), profiles=profiles)
     app.add_sound_alike("post grass", "PostgreSQL")
+    spend(app.usage)
     return app
+
+
+def spend(ledger) -> None:
+    """A month of Gemini use for the Home page's card, recorded as Rflow records it (tokens and seconds, priced by
+    sst.costs): dictation's cleanup, live translation with the cost saver on, a meeting's minutes, translations."""
+    today = date.today()
+    for back in range(min(today.day, 12)):
+        ledger._today = lambda back=back: today - timedelta(days=back)
+        ledger.record("cleanup", "gemini-3.5-flash-lite", text_in=24_000, out=6_000, calls=40)
+        ledger.record("translate", "gemini-3.5-flash-lite", text_in=3_000, out=1_500, calls=6)
+        if back % 3 == 0:  # a meeting every few days: translated as it runs, half its silence not sent, then minutes
+            ledger.record("live_translation", "gemini-3.5-live-translate-preview", audio_in=25 * 1500,
+                          audio_out=25 * 1500, seconds=1500, calls=0, unsent=900)
+            ledger.record("meeting", "gemini-3.6-flash", audio_in=32 * 2400, text_in=6_000, out=12_000, seconds=2400)
+        if back % 4 == 1:
+            ledger.record("screen", "gemini-3.5-flash-lite", text_in=8_000, out=3_000, calls=12)
+    ledger._today = date.today
 
 
 def shot(name: str, page: str, theme_name: str = "dark", size=(1000, 680), setup=None, app=None) -> None:
@@ -67,6 +85,37 @@ def shot(name: str, page: str, theme_name: str = "dark", size=(1000, 680), setup
     for _ in range(3):
         QApplication.processEvents()
     window.grab().save(str(OUT / name))
+
+
+JAPANESE_TEXT = ("来週の定例会議は木曜日の午後3時からに変更になりました。"
+                 "資料は水曜日までに共有フォルダにアップロードしてください。ご不明な点があれば、田中までご連絡ください。")
+ENGLISH_TEXT = ("Next week's regular meeting has moved to Thursday at 3 PM. Please upload the materials to the shared "
+                "folder by Wednesday. If you have any questions, please contact Tanaka.")
+
+
+def text_translator(window) -> None:
+    """Translate's Text tab with a paragraph translated, as the 800 ms pause leaves it."""
+    page = window.pages["translate"]
+    page.tabs.set_current("text")
+    page._tab_chosen("text")
+    text = page.text
+    text.source.setCurrentIndex(max(0, text.source.findData("Japanese")))
+    text.target.setCurrentIndex(max(0, text.target.findData("English")))
+    text.input.setPlainText(JAPANESE_TEXT)
+    text.timer.stop()
+    text.output.setPlainText(ENGLISH_TEXT)
+    text._say("0.9 s")
+
+
+def meeting_app():
+    """An app where a Teams meeting is open and three meetings are already in the list, with their minutes."""
+    from sst.meeting.apps import MeetingWindow
+    app = preview()
+    app._meeting_windows = (MeetingWindow("Microsoft Teams", "Weekly sync | Microsoft Teams", 101, 7),)
+    app._past_meetings = ((Path("a"), datetime.now() - timedelta(days=1, hours=2), "Zoom", 2710.0, True),
+                          (Path("b"), datetime.now() - timedelta(days=3, hours=5), "In person", 1840.0, True),
+                          (Path("c"), datetime.now() - timedelta(days=6, hours=1), "Google Meet", 1260.0, True))
+    return app
 
 
 def popups(name: str) -> None:
@@ -224,6 +273,9 @@ def main() -> None:
     shot("live.png", "live")
     shot("transform.png", "transform")
     shot("words.png", "dictionary")
+    shot("translate.png", "translate", setup=text_translator)
+    shot("translate-light.png", "translate", "light", setup=text_translator)
+    shot("meeting.png", "meeting", app=meeting_app())
     app = preview()
     app.settings.welcomed = False
     shot("welcome.png", "welcome", app=app)
