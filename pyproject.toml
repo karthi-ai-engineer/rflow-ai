@@ -14,7 +14,7 @@ dependencies = [
     "sherpa-onnx-core==1.13.8",
     "sounddevice>=0.5",
     # The tray app: tray icon, recording pill, settings and history windows (Qt, LGPL, linked dynamically).
-    "pyside6-essentials>=6.8",
+    "pyside6-essentials>=6.12.0",
     # Whisper large-v3 turbo on this computer (CTranslate2), the second speech model: on the owner's recordings it was
     # more accurate than sherpa-onnx's Whisper. Its onnxruntime dependency (only for its optional VAD) is never imported
     # and is left out of the installer, so sherpa-onnx keeps the one onnxruntime.dll it needs.
