@@ -123,6 +123,8 @@
   h1 { font-size: clamp(40px, 5.2vw, 60px); line-height: 1.03; letter-spacing: -.035em; font-weight: 600; margin: 22px 0 18px; }
   h1 .soft { color: var(--text-2); }
   .lead { font-size: 19px; line-height: 1.6; color: var(--text-2); margin: 0 0 22px; max-width: 30em; }
+  .button .soon { font-size: 11.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-2);
+                  padding: 3px 8px; border-radius: 999px; border: 1px solid var(--edge); margin-left: -2px; }
   .cta { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
   .release { color: var(--text-3); font-size: 14px; margin-top: 16px; }
 
@@ -383,6 +385,7 @@
         <a class="button primary" id="download" href="https://github.com/karthi-ai-engineer/rflow-ai/releases/latest/download/Rflow-Setup.exe">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 5.5 10.5 4.5v7H3v-6Zm0 13 7.5 1v-7H3v6Zm8.5 1.1L21 21v-8.5h-9.5v7.1Zm0-15.2v7.1H21V3l-9.5 1.4Z"/></svg>
           Download for Windows</a>
+        <a class="button" data-android href="#android"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="6.5" y="2.5" width="11" height="19" rx="2.6"/><path d="M10.5 18.5h3"/></svg>Download for Android<span class="soon" data-android-soon>soon</span></a>
         <a class="button watch" href="#demo" data-watch aria-haspopup="dialog"><span class="play" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 4.8v14.4a1 1 0 0 0 1.5.9l11.3-7.2a1 1 0 0 0 0-1.7L8.5 3.9A1 1 0 0 0 7 4.8Z"/></svg></span>Watch the 1-minute tour</a>
       </div>
       <p class="release" id="release">Windows 10 and 11, 64-bit · free and open source</p>
@@ -679,9 +682,10 @@
             <div><h3>Then the rest</h3><p>Voice typing with the Rflow Keyboard, translating any text, and the Screen translator.</p></div></li>
         </ul>
         <div class="cta" style="margin-top: 30px">
+          <a class="button primary" data-android href="#android"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="6.5" y="2.5" width="11" height="19" rx="2.6"/><path d="M10.5 18.5h3"/></svg>Download for Android<span class="soon" data-android-soon>soon</span></a>
           <a class="button" href="https://github.com/karthi-ai-engineer/rflow-android"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.89 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.5 9.5 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.69-4.57 4.93.36.31.68.92.68 1.85v2.75c0 .27.18.58.69.48A10 10 0 0 0 12 2Z"/></svg>Follow it on GitHub</a>
         </div>
-        <p class="release">Android 10 and newer · the plan is <a href="https://github.com/karthi-ai-engineer/rflow-android/blob/main/docs/plan.md">on GitHub</a></p>
+        <p class="release" id="android-release">Android 10 and newer · the plan is <a href="https://github.com/karthi-ai-engineer/rflow-android/blob/main/docs/plan.md">on GitHub</a></p>
       </div>
       <div class="phone-wrap">
         <div class="phone" role="img" aria-label="Rflow for Android in Meeting mode: Japanese said in the room shown in English as it is spoken, Speak the translation on, recording for the minutes.">
@@ -782,6 +786,20 @@
       const date = new Date(release.published_at).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
       document.getElementById("release").textContent =
         `Version ${release.tag_name.replace(/^v/, "")} · ${size} MB · released ${date} · Windows 10 and 11, 64-bit · free`;
+    })
+    .catch(() => {});
+
+  // Download for Android: the newest Rflow.apk once rflow-android has a release; until then "soon" and the Android section.
+  fetch("https://api.github.com/repos/karthi-ai-engineer/rflow-android/releases/latest")
+    .then(r => r.ok ? r.json() : Promise.reject(r.status))
+    .then(release => {
+      const asset = (release.assets || []).find(a => a.name === "Rflow.apk");
+      if (!asset) return;
+      document.querySelectorAll("[data-android]").forEach(a => a.href = asset.browser_download_url);
+      document.querySelectorAll("[data-android-soon]").forEach(e => e.remove());
+      const size = Math.round(asset.size / 1e6);
+      document.getElementById("android-release").textContent =
+        `Version ${release.tag_name.replace(/^v/, "")} · ${size} MB · Android 10 and newer · free · updates itself in the app`;
     })
     .catch(() => {});
 
