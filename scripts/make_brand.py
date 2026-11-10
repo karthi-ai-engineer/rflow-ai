@@ -119,7 +119,9 @@ def touch_icon(mark: QImage, size: int = 180) -> QImage:
 
 
 def social_card(mark: QImage) -> QImage:
-    """The preview a link to the website shows (1200 x 630): the mark, Rflow and what it does, on Obsidian."""
+    """The preview a link to the website shows (1200 x 630): the mark, Rflow and what it does, on Obsidian. Only it:
+    uv run python -c "import sys; sys.path.insert(0, 'scripts'); import make_brand; make_brand.og()"
+    """
     from sst import theme
     theme.load_fonts()
     width, height = 1200, 630
@@ -141,13 +143,19 @@ def social_card(mark: QImage) -> QImage:
     p.setPen(TEXT_2)
     p.setFont(theme.font(38, 500))
     p.drawText(QRectF(474, 315, 700, 60), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-               "Speak anywhere. It types.")
+               "Work in any language.")
     p.setFont(theme.font(26, 500))
     p.setPen(QColor(138, 145, 161))
     p.drawText(QRectF(476, 385, 700, 44), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-               "Free dictation for Windows · private by default")
+               "Translate, type and take meeting notes · Windows")
     p.end()
     return image
+
+
+def og() -> None:
+    """The social card alone, from the mark already cut (sst/static/brand), for when only its words change."""
+    QApplication([])
+    social_card(QImage(str(BRAND / "rflow-mark-512.png"))).save(str(SITE / "img" / "og.png"))
 
 
 def main() -> None:
